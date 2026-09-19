@@ -49,3 +49,5 @@ mempalace.yaml
 /.vibe
 /.windsurf
 /.zencoder
+# Finder metadata
+.DS_Store

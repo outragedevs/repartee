@@ -180,6 +180,7 @@ impl App {
         self.state.add_message(
             &buf_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: Utc::now(),
                 message_type: MessageType::Event,
@@ -192,6 +193,8 @@ impl App {
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
+                wire_origin: None,
+                translation_suffix_at: None,
             },
         );
 

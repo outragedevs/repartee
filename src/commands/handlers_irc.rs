@@ -128,6 +128,7 @@ pub(crate) fn cmd_connect(app: &mut App, args: &[String]) {
         autosendcmd: None,
         sasl_mechanism: None,
         client_cert_path: None,
+        sasl_key_path: None,
     };
 
     spawn_connection(app, &conn_id, &adhoc_config);
@@ -1031,6 +1032,7 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
             app.state.add_message(
                 &buffer_id,
                 crate::state::buffer::Message {
+                    log_key: None,
                     id: msg_id,
                     timestamp: chrono::Utc::now(),
                     message_type: crate::state::buffer::MessageType::Message,
@@ -1043,6 +1045,8 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
                     log_msg_id: None,
                     log_ref_id: None,
                     tags: None,
+                    wire_origin: None,
+                    translation_suffix_at: None,
                 },
             );
         } else {
@@ -1151,6 +1155,7 @@ pub(crate) fn cmd_me(app: &mut App, args: &[String]) {
             app.state.add_message(
                 &buffer_id,
                 crate::state::buffer::Message {
+                    log_key: None,
                     id: msg_id,
                     timestamp: chrono::Utc::now(),
                     message_type: crate::state::buffer::MessageType::Action,
@@ -1163,6 +1168,8 @@ pub(crate) fn cmd_me(app: &mut App, args: &[String]) {
                     log_msg_id: None,
                     log_ref_id: None,
                     tags: None,
+                    wire_origin: None,
+                    translation_suffix_at: None,
                 },
             );
         } else {

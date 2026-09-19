@@ -3,8 +3,20 @@ members = [".", "web-ui"]
 
 [package]
 name = "repartee"
-version = "1.7.0"
+version = "2.0.0"
 edition = "2024"
+# The real floor, not the edition's. Edition 2024 alone needs 1.85, and the
+# dependency graph asks 1.90 (`quantette`, via ratatui-image → icy_sixel),
+# but our own code uses `Duration::from_hours` and const APIs stabilised in
+# 1.91. Declaring it does two things for `cargo install`: it fails fast
+# with "requires rustc 1.91 or newer" instead of a compile error deep in a
+# dependency, and it lets the edition-2024 resolver pick dependency
+# versions that still build on 1.91 rather than always taking the newest.
+#
+# `clippy::incompatible_msrv` enforces this against our own code, so a use
+# of a newer API fails the 0-warnings gate rather than silently raising the
+# floor. Raise the value only together with the README and docs.
+rust-version = "1.91"
 description = "A modern terminal IRC client built with Ratatui and Tokio"
 license = "MIT"
 repository = "https://github.com/outragedevs/repartee"
@@ -32,7 +44,7 @@ crossterm = { version = "0.29", features = ["event-stream", "serde"] }
 postcard = { version = "1.1", features = ["use-std"] }
 libc = "0.2"
 tokio = { version = "1.50", features = ["full"] }
-irc = { version = "1.5.1", package = "irc-repartee" }
+irc = { version = "1.5.1", package = "irc-repartee", default-features = false, features = ["ctcp", "tls-rust", "channel-lists", "toml_config", "encoding"] }
 color-eyre = "0.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -47,13 +59,21 @@ unicode-segmentation = "1"
 thiserror = "2.0"
 indexmap = { version = "2", features = ["serde"] }
 regex = "1"
+isolang = { version = "2.4", default-features = false }
+whatlang = "0.18"
 rusqlite = { version = "0.39", features = ["bundled-full"] }
 aes-gcm = "0.10"
 rand = "0.10"
 base64 = "0.22"
 sha2 = "0.10"
+sha1 = "0.10"
 hmac = "0.12"
 pbkdf2 = { version = "0.12", features = ["simple"] }
+# SASLprep (RFC 4013) for SASL credentials.
+stringprep = "0.1"
+# NIST P-256 for SASL ECDSA-NIST256P-CHALLENGE. `pem` pulls in SEC1 + PKCS#8
+# PEM parsing so both key encodings in the wild are accepted.
+p256 = { version = "0.13", features = ["pem"] }
 uuid = { version = "1.21", features = ["v4"] }
 hex = "0.4"
 # E2E encryption (RPE2E v1.0)

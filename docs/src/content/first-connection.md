@@ -80,10 +80,10 @@ port = 6697
 tls = true
 sasl_user = "mynick"
 # sasl_pass loaded from .env
-# sasl_mechanism = "SCRAM-SHA-256"  # or PLAIN (default), EXTERNAL
+# sasl_mechanism = "SCRAM-SHA-512"  # omit to auto-detect
 ```
 
-Supported SASL mechanisms: **PLAIN**, **EXTERNAL** (client TLS certificate), **SCRAM-SHA-256** (secure challenge-response — preferred when available).
+Supported SASL mechanisms: **PLAIN**, **EXTERNAL** (client TLS certificate), **SCRAM-SHA-1**, **SCRAM-SHA-256**, **SCRAM-SHA-512** (challenge-response — the password is never sent) and **ECDSA-NIST256P-CHALLENGE** (signs a server challenge with a P-256 key). Leave `sasl_mechanism` unset and repartee picks the strongest one the server offers; see [Configuration](/configuration) for the full order and for how to set up an ECDSA key.
 
 ## Detaching
 

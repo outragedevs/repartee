@@ -151,9 +151,9 @@ port = 6697
 tls = true
 sasl_user = &quot;mynick&quot;
 # sasl_pass loaded from .env
-# sasl_mechanism = &quot;SCRAM-SHA-256&quot;  # or PLAIN (default), EXTERNAL
+# sasl_mechanism = &quot;SCRAM-SHA-512&quot;  # omit to auto-detect
 </code></pre>
-<p>Supported SASL mechanisms: <strong>PLAIN</strong>, <strong>EXTERNAL</strong> (client TLS certificate), <strong>SCRAM-SHA-256</strong> (secure challenge-response — preferred when available).</p>
+<p>Supported SASL mechanisms: <strong>PLAIN</strong>, <strong>EXTERNAL</strong> (client TLS certificate), <strong>SCRAM-SHA-1</strong>, <strong>SCRAM-SHA-256</strong>, <strong>SCRAM-SHA-512</strong> (challenge-response — the password is never sent) and <strong>ECDSA-NIST256P-CHALLENGE</strong> (signs a server challenge with a P-256 key). Leave <code>sasl_mechanism</code> unset and repartee picks the strongest one the server offers; see <a href="/configuration">Configuration</a> for the full order and for how to set up an ECDSA key.</p>
 <h2>Detaching</h2>
 <p>You can detach from repartee and leave it running in the background. IRC connections stay alive and messages continue to be logged.</p>
 <pre><code>/detach

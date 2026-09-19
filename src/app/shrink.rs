@@ -84,7 +84,6 @@ pub struct OutgoingDeliver {
     /// for the local echo so the deferred delivery shows the same
     /// nick / mode the wire was sent under.
     pub nick: String,
-    pub own_mode: Option<char>,
     /// Captured Query `peer_handle` (None for channels / no-handle
     /// queries) — passed into `e2e_encrypt_or_passthrough` so a
     /// closed-buffer wait window cannot fall back to plaintext.
@@ -134,9 +133,6 @@ pub struct PendingOutgoing {
     /// time; used by `send_outgoing_substituted` instead of
     /// re-reading current state at deliver.
     pub nick: String,
-    /// Local-echo mode prefix (e.g. `+`, `@`) captured from the
-    /// channel's user list at dispatch time.
-    pub own_mode: Option<char>,
     /// E2E peer handle for Query buffers, resolved at dispatch from
     /// `state.buffers[buffer_id].peer_handle`. `None` for channels
     /// (which key on the channel name) and for queries with no
@@ -263,7 +259,6 @@ fn spawn_outgoing_worker(
                     buffer_type: pending.buffer_type,
                     substituted_text,
                     nick: pending.nick,
-                    own_mode: pending.own_mode,
                     peer_handle: pending.peer_handle,
                 })
             });
@@ -307,7 +302,21 @@ fn spawn_incoming_worker(
                     true,
                 )
                 .await;
-                pending.message.text = substituted_text;
+                let original = std::mem::replace(&mut pending.message.text, substituted_text);
+                // Incoming shrink has the same identity problem translation
+                // does, and predates it: what we display and log is the
+                // substituted text, but a CHATHISTORY replay of this line
+                // carries the URL the peer actually sent. Without recording
+                // the wire text, a msgid-less server's gap-fill stores and
+                // shows the same message twice. Only when substitution
+                // changed something — an unshrunk line IS its wire text.
+                if original != pending.message.text {
+                    pending.message.wire_origin = Some(crate::state::buffer::WireOrigin {
+                        text: original,
+                        // No appended suffix: shrink rewrites in place.
+                        suffix_at: None,
+                    });
+                }
                 ShrinkDeliver::Incoming(IncomingDeliver {
                     buffer_id: pending.buffer_id,
                     message: pending.message,
@@ -467,11 +476,14 @@ impl App {
                 self.send_outgoing_substituted(&out);
             }
             ShrinkDeliver::Incoming(inc) => {
-                // Use the `_unshrunk` variant — text is already
-                // substituted, taking the shrink path again would
-                // loop forever (worker would push back to the
-                // worker queue).
-                self.state.add_message_with_activity_unshrunk(
+                // In order, never a plain append: a row that was PARKED for
+                // ordering when it went to shrink holds a reserved place in
+                // its buffer's reorder queue, and the shrunk text has to
+                // come back exactly where the raw row would have been. The
+                // helper takes the `_unshrunk` delivery underneath — text is
+                // already substituted, and taking the shrink path again
+                // would loop forever.
+                self.state.deliver_shrunk_in_order(
                     &inc.buffer_id,
                     inc.message,
                     inc.activity_level,
@@ -491,13 +503,18 @@ impl App {
     /// local echo / IRC send mirror `handle_plain_message`'s
     /// non-shrink path with the now-shrunken text.
     ///
-    /// Uses captured `out.nick` / `out.own_mode` / `out.peer_handle`
-    /// instead of re-reading state — the user may have /nick'd,
-    /// /closed the buffer, or gained/lost a channel mode during the
-    /// shrink wait. Reading current state would produce a local echo
-    /// inconsistent with what hit the wire (sent under the prior
-    /// nick/mode) and could even leak plaintext for an E2E PM if
-    /// the Query buffer is gone.
+    /// Uses the captured `out.peer_handle` rather than re-reading it: a
+    /// `/close` during the shrink wait would leave nothing to resolve, and
+    /// falling through to plaintext for an E2E PM is not a display bug.
+    ///
+    /// The NICK and channel prefix are the opposite case and are re-read at
+    /// send time. The wire message carries no sender — the server stamps the
+    /// prefix as it relays it, using the nick the connection holds then — so
+    /// a `/nick` during the wait means the message went out under the NEW
+    /// name and the captured one was never seen by anybody. This comment
+    /// previously claimed the send happened "under the prior nick/mode",
+    /// which is not what happens: the send happens after the wait, not before
+    /// it.
     fn send_outgoing_substituted(&mut self, out: &OutgoingDeliver) {
         // Surface IRC-down as an in-buffer error — old code silently
         // returned, losing the user's message with no UI feedback.
@@ -576,8 +593,9 @@ impl App {
     }
 
     /// Emit the local-echo chunks for a successfully-sent outgoing
-    /// message. Uses the captured `nick/own_mode` from dispatch time
-    /// so the displayed sender matches what peers saw. Skips the
+    /// message. The sender is resolved NOW, not at dispatch: the server
+    /// stamps the prefix as it relays the line, so the nick and mode this
+    /// row carries are the ones the message actually went out under. Skips the
     /// echo entirely (with a status-line diagnostic) when the
     /// destination buffer was closed during the shrink wait — the
     /// wire send already succeeded, the peer has the message, but
@@ -604,16 +622,32 @@ impl App {
         } else {
             crate::irc::split_irc_message(plain_echo, crate::irc::MESSAGE_MAX_BYTES)
         };
-        let nick_mode_str = out.own_mode.map(|c| c.to_string());
+        // Resolved now, not at dispatch — see this function's doc comment.
+        let echo_nick = self
+            .state
+            .connections
+            .get(&out.conn_id)
+            .map_or_else(|| out.nick.clone(), |c| c.nick.clone());
+        let nick_mode_str = self
+            .state
+            .nick_prefix(&out.buffer_id, &echo_nick)
+            .map(|c| c.to_string());
         for chunk in local_chunks {
             let id = self.state.next_message_id();
-            self.state.add_message(
+            // `add_own_message`, not `add_message`: this row is ours and must
+            // not be handed to the translation gate on its way in — a
+            // shrunken line has already been through one external round trip,
+            // and a second would translate our own echo.
+            self.state.add_own_message(
                 &out.buffer_id,
+                // Shrink holds no reservation, so each row orders by itself.
+                id,
                 Message {
+                    log_key: None,
                     id,
                     timestamp: chrono::Utc::now(),
                     message_type: crate::state::buffer::MessageType::Message,
-                    nick: Some(out.nick.clone()),
+                    nick: Some(echo_nick.clone()),
                     nick_mode: nick_mode_str.clone(),
                     text: chunk,
                     highlight: false,
@@ -622,6 +656,8 @@ impl App {
                     log_msg_id: None,
                     log_ref_id: None,
                     tags: None,
+                    wire_origin: None,
+                    translation_suffix_at: None,
                 },
             );
         }

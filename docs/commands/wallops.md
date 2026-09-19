@@ -1,5 +1,5 @@
 ---
-category: Messaging
+category: Other
 description: Send a message to all IRC operators
 ---
 

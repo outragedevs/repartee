@@ -1,5 +1,5 @@
 ---
-category: Moderation
+category: Channel
 description: Kick a user from the channel
 ---
 

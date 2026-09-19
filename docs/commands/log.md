@@ -1,5 +1,5 @@
 ---
-category: Logging
+category: Configuration
 description: Chat log management
 ---
 

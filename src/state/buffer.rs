@@ -101,6 +101,60 @@ pub struct Message {
     /// `IRCv3` message tags extracted from the incoming IRC message.
     /// `None` when no tags are present (the common case), avoiding a `HashMap` allocation per message.
     pub tags: Option<HashMap<String, String>>,
+    /// Set when this row's displayed text is not the text that crossed the
+    /// IRC wire — today, only a translated line. `None` for everything else,
+    /// which is the overwhelming majority of rows.
+    ///
+    /// Live-only, deliberately NOT persisted. The stored text is flat; the
+    /// transport key and optional display boundary survive separately.
+    pub wire_origin: Option<WireOrigin>,
+    /// Byte offset where a translated line's appended original begins.
+    /// Unlike [`Self::wire_origin`], this display-only value survives logging.
+    pub translation_suffix_at: Option<usize>,
+    /// The key this row is stored under in the log (`messages.msg_id`), set
+    /// only on rows READ BACK from `SQLite`.
+    ///
+    /// A live row derives that key from its `@msgid`, or — on a server
+    /// without one — from a hash of its WIRE text (`synthetic_msg_id`). A
+    /// reloaded row cannot: the log holds the display text, so for a
+    /// translated line the wire text is gone. Carrying the stored key forward
+    /// is what still lets a `CHATHISTORY` replay of that same line be
+    /// recognised as the line already on screen instead of being spliced in
+    /// beside it, untranslated.
+    ///
+    /// No new column: this is the key the log has always kept, just no longer
+    /// thrown away on the way back.
+    pub log_key: Option<String>,
+}
+
+/// What the network carried for a row whose display differs from it.
+///
+/// Translation is the only producer today: an incoming line displays the
+/// translation while the wire carried the peer's original, and our own
+/// outgoing echo displays `translated [original]` while the wire carried
+/// just the translation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireOrigin {
+    /// The text as it crossed the wire.
+    ///
+    /// **Identity, not display.** `maybe_log`'s synthetic `msg_id` and the
+    /// in-memory history-dedup check both key on this, so one IRC message
+    /// keys identically whether it arrives live — and is rewritten on the
+    /// way in — or comes back later through CHATHISTORY, which bypasses
+    /// translation entirely. Keying on the displayed text instead makes a
+    /// reconnect gap-fill store and show the same message twice, and only on
+    /// servers with no `@msgid` to key on instead.
+    pub text: String,
+    /// Byte offset where an appended ` [original]` suffix begins, when the
+    /// display carries one. The renderer dims from here to the end.
+    ///
+    /// `None` when the display was rewritten without a visible suffix —
+    /// `show_original_in = false` still replaces the text.
+    ///
+    /// Never derive this by scanning for a trailing `[...]`: an ordinary
+    /// message may legitimately end that way, and the renderer would dim
+    /// someone else's brackets.
+    pub suffix_at: Option<usize>,
 }
 
 // === NickEntry ===
@@ -194,6 +248,39 @@ pub struct Buffer {
 }
 
 impl Buffer {
+    /// A bare buffer of `buffer_type`, for tests.
+    ///
+    /// Every test module that needs one was hand-rolling the same 20-field
+    /// literal; sharing it here keeps a new field from having to be added
+    /// in a dozen places.
+    #[cfg(test)]
+    pub(crate) fn for_test(conn_id: &str, buffer_type: BufferType, name: &str) -> Self {
+        Self {
+            id: make_buffer_id(conn_id, name),
+            connection_id: conn_id.to_string(),
+            buffer_type,
+            name: name.to_string(),
+            messages: VecDeque::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
+            peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
+            log_initial_loaded: false,
+            pin_backlog: false,
+        }
+    }
+
     /// Record a nick as having spoken in this buffer.
     /// Moves them to the front of `last_speakers` (most recent first).
     pub fn touch_speaker(&mut self, nick: &str) {

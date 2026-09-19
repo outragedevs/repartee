@@ -18,18 +18,26 @@ The full directory layout:
   certs/               # TLS certificates for web frontend
 ```
 
-## Full annotated example
+## Annotated example
+
+This example covers every top-level configuration section and the settings
+most commonly changed by hand. Repartee fills omitted fields with their current
+defaults. Provider-specific AI model entries are documented under
+[`/translate`](commands.html#translate).
 
 ```toml
+config_version = 1
+
 [general]
 nick = "mynick"
 username = "mynick"
-realname = "repartee user"
+realname = "repartee Client"
 theme = "default"
 timestamp_format = "%H:%M:%S"
 flood_protection = true
 flood_exemptions = []  # nick or nick!user@host wildcard masks exempt from PRIVMSG flood checks
 ctcp_version = "repartee"
+# default_bind_ip = "192.0.2.10"
 
 [display]
 nick_column_width = 8
@@ -54,7 +62,10 @@ width = 18
 visible = true
 
 [statusbar]
-items = ["active_windows", "nick_info", "channel_info", "typing", "lag", "time"]
+enabled = true
+items = ["time", "nick_info", "channel_info", "typing", "lag", "active_windows"]
+separator = " | "
+prompt = "[$server❱ "
 
 [servers.libera]
 label = "Libera"
@@ -67,8 +78,9 @@ channels = ["#repartee", "#secret mykey"]
 autosendcmd = "MSG NickServ identify pass; WAIT 2000; MODE $N +i"
 # nick = "othernick"           # per-server nick override
 # sasl_user = "mynick"
-# sasl_pass = "hunter2"
-# sasl_mechanism = "SCRAM-SHA-256"  # PLAIN (default), EXTERNAL, SCRAM-SHA-256
+# sasl_mechanism = "SCRAM-SHA-512"  # omit to auto-detect the strongest offered
+# client_cert_path = "libera-cert.pem"  # TLS client cert, for EXTERNAL/CertFP
+# sasl_key_path = "libera-key.pem"      # P-256 key, for ECDSA-NIST256P-CHALLENGE
 # bind_ip = "192.168.1.100"   # bind to specific local IP (vhost)
 # auto_reconnect = true
 # reconnect_delay = 30
@@ -111,14 +123,53 @@ autoaccept_lowports = false    # allow auto-accept from ports < 1024
 max_connections = 10
 
 [spellcheck]
-enabled = true
+enabled = false
+computing = true
+mode = "replace"                  # "replace" or "highlight"
 languages = ["en_US"]              # Hunspell language codes
 dictionary_dir = ""                # default: ~/.repartee/dicts
+
+[e2e]
+enabled = true
+default_mode = "normal"             # "auto-accept", "normal", or "quiet"
+ts_tolerance_secs = 300
+
+[shrink]
+enabled = false
+api_url = "https://shr.al"
+outgoing_enabled = true
+incoming_enabled = true
+min_url_length = 50
+outgoing_timeout_ms = 2000
+incoming_timeout_ms = 2000
+cache_max_entries = 500
+
+[emotes]
+enabled = true
+render = "graphical"                # "graphical", "text", or "off"
+lang = "en"                         # "en" or "pl"
+max_cols = 8
+max_rows = 3
 
 [typing]
 show = true                        # receive and display others' typing indicators
 send_channels = true               # send +typing while typing in a channel
 send_queries = true                # send +typing while typing in a private query
+
+[translate]
+enabled = false
+backend = "none"                   # "none", "ai", or test-only "stub"
+my_lang = "en"
+show_original_in = true
+show_original_out = true
+timeout_ms = 15000
+max_in_flight = 4
+max_queue = 200
+
+[translate.buffers."libera/#german"]
+incoming = true
+outgoing = true
+lang = "de"
 
 [web]
 enabled = false                    # enable embedded web frontend
@@ -128,8 +179,15 @@ tls_cert = ""                      # custom cert (empty = auto self-signed)
 tls_key = ""                       # custom key
 timestamp_format = "%H:%M"        # web UI timestamp format
 line_height = 1.35                 # CSS line-height for chat messages
+nick_column_width = 12
+nick_max_length = 9
 theme = "nightfall"                # web theme (nightfall, catppuccin-mocha, etc.)
-# cloudflare_tunnel_name = ""     # future: Cloudflare tunnel name
+session_days = 90
+username = "repartee"
+image_previews = false
+image_previews_max_per_msg = 4
+thumbnail_cache_mb = 200
+cloudflare_tunnel_name = ""
 
 [[ignores]]
 mask = "*!*@spammer.host"
@@ -162,7 +220,47 @@ Configure which items appear in the status line. Available items: `active_window
 
 Each server gets a unique identifier (the key after `servers.`). The `channels` array lists channels to auto-join on connect. Channels with keys use the format `"#channel key"`.
 
-Set `sasl_mechanism` to override automatic mechanism selection. Available: `PLAIN` (default), `EXTERNAL` (client TLS certificate), `SCRAM-SHA-256` (secure challenge-response).
+#### SASL
+
+Leave `sasl_mechanism` unset and repartee picks the strongest mechanism the server offers that it holds a credential for, in this order:
+
+| Mechanism | Needs | Notes |
+|---|---|---|
+| `EXTERNAL` | `client_cert_path` | CertFP — the TLS client certificate proves who you are. Nothing is sent. |
+| `ECDSA-NIST256P-CHALLENGE` | `sasl_key_path` + `sasl_user` | Signs a server challenge with a NIST P-256 key. Nothing is sent. |
+| `SCRAM-SHA-512` | `sasl_user` + `sasl_pass` | Challenge-response; the password never crosses the wire. |
+| `SCRAM-SHA-256` | `sasl_user` + `sasl_pass` | As above. |
+| `SCRAM-SHA-1` | `sasl_user` + `sasl_pass` | As above. Still beats `PLAIN`. |
+| `PLAIN` | `sasl_user` + `sasl_pass` | Sends the password. Last resort — always over TLS. |
+
+Set `sasl_mechanism` to one of those names to pin it. A pinned mechanism the server does not offer means **no SASL at all**, never a quiet downgrade to a weaker one. The `-PLUS` (channel-binding) variants are not implemented and are never selected.
+
+`client_cert_path` and `sasl_key_path` are separate keys with separate jobs: the first is presented during the TLS handshake, the second is only ever used to sign a challenge. Relative paths resolve against `~/.repartee/certs`.
+
+To use `EXTERNAL` / CertFP, set `tls = true` and point `client_cert_path` to one **PEM file containing both the certificate chain (leaf first) and its unencrypted private key**. PKCS#8 (`PRIVATE KEY`), PKCS#1 (`RSA PRIVATE KEY`), and SEC1 (`EC PRIVATE KEY`) keys are supported. PKCS#12 (`.p12` / `.pfx`) and encrypted private keys are not supported. The IRC connection uses rustls for this PEM identity.
+
+```bash
+mkdir -p ~/.repartee/certs
+chmod 700 ~/.repartee/certs
+(umask 077; openssl req -x509 -newkey rsa:3072 -sha256 -days 365 -nodes \
+  -subj "/CN=IRC client" -keyout ~/.repartee/certs/libera-key.pem \
+  -out ~/.repartee/certs/libera-cert.pem)
+cat ~/.repartee/certs/libera-cert.pem >> ~/.repartee/certs/libera-key.pem
+```
+
+Set `client_cert_path = "libera-key.pem"` in the server block, then reconnect and register the certificate with your network's NickServ according to its CertFP instructions. Absolute paths and `~/` paths are also accepted. Relative paths always resolve against the certificates directory, regardless of the working directory. Missing files, missing certificate/key blocks, and mismatched keys produce an error before connecting; `sasl_key_path` is not used for EXTERNAL.
+
+To use `ECDSA-NIST256P-CHALLENGE`, generate a key and register its public half:
+
+```bash
+openssl ecparam -genkey -name prime256v1 -noout -out ~/.repartee/certs/libera-key.pem
+chmod 600 ~/.repartee/certs/libera-key.pem
+# the compressed public key, base64 — what NickServ wants
+openssl ec -in ~/.repartee/certs/libera-key.pem -pubout -conv_form compressed -outform DER \
+  | tail -c 33 | base64
+```
+
+Then `/msg NickServ SET PUBKEY <that base64>` and set `sasl_key_path = "libera-key.pem"`. Both PEM encodings load — `ecdsatool`'s SEC1 (`BEGIN EC PRIVATE KEY`) and OpenSSL 3's PKCS#8 (`BEGIN PRIVATE KEY`).
 
 Set `bind_ip` to bind to a specific local IP address when connecting. Useful for multi-IP hosts (vhosts/bouncers). Supports both IPv4 and IPv6 — DNS resolution automatically filters to match the address family. Can also be set per-connection with `/connect -bind=<ip>` or `/server add -bind=<ip>`.
 
@@ -203,7 +301,39 @@ DCC (Direct Client-to-Client) chat settings. DCC CHAT establishes peer-to-peer T
 
 ### `[spellcheck]`
 
-Inline spell checking. When `enabled = true`, misspelled words are underlined in red while typing. Press Tab to cycle suggestions, Space to accept, Escape to revert. `languages` is a list of Hunspell language codes (e.g., `en_US`, `pl_PL`, `de_DE`) — a word is correct if **any** active dictionary accepts it. Place `.dic`/`.aff` files in `~/.repartee/dicts/` (or set `dictionary_dir` to a custom path).
+Inline spell checking. `mode = "replace"` replaces a misspelling with the first
+suggestion and lets Tab cycle alternatives; `mode = "highlight"` keeps the
+typed word and marks it instead. `languages` is a list of Hunspell language
+codes such as `en_US`, `pl_PL`, or `de_DE`. The bundled computing dictionary is
+controlled independently with `computing`.
+
+### `[e2e]`
+
+RPE2E end-to-end encryption defaults. `enabled` controls whether the encryption
+manager is available, `default_mode` is applied by `/e2e on`, and
+`ts_tolerance_secs` bounds accepted clock skew. Channel trust and peer state are
+managed with `/e2e`, not by editing this table.
+
+### `[shrink]`
+
+URL shortening through the configured shrink-compatible endpoint. The master
+switch and incoming/outgoing switches are independent. `SHRINK_API_KEY` belongs
+in `~/.repartee/.env`; it is never serialized to this table. See `/help shrink`
+for runtime/restart behavior.
+
+### `[emotes]`
+
+Built-in `:name:` emotes. `render` accepts `graphical`, `text`, or `off`; `lang`
+selects English or Polish picker names. `max_cols` and `max_rows` bound inline
+image dimensions in terminal cells.
+
+### `[translate]` and `[translate.ai]`
+
+Per-buffer incoming and outgoing translation. `enabled` is the master switch,
+`backend` selects `none`, `ai`, or the test-only `stub`, and `my_lang` is the
+language you read and write. Manage buffer mappings with `/translate addin`,
+`addout`, `delin`, and `delout`; use `/help translate` for AI providers, keys,
+language support, fallback routing, and restart behavior.
 
 ### `[typing]`
 
@@ -225,7 +355,9 @@ Ignore patterns for filtering unwanted messages. Uses wildcard matching (`*!*@ho
 
 ## Credentials
 
-Passwords and SASL credentials should **not** go in `config.toml` — store them in `~/.repartee/.env` instead.
+Passwords should **not** go in `config.toml` — store them in
+`~/.repartee/.env` instead. SASL usernames may be set in `config.toml`; the
+environment form remains supported for existing configurations.
 
 ```bash
 # ~/.repartee/.env
@@ -233,11 +365,18 @@ LIBERA_SASL_USER=mynick
 LIBERA_SASL_PASS=hunter2
 LIBERA_PASSWORD=serverpassword
 WEB_PASSWORD=mysecretpassword
+SHRINK_API_KEY=your-shr-al-key
+OPENROUTER_API=your-openrouter-key
+OLLAMA_API=your-ollama-key
+GEMINI_API=your-gemini-key
+GROQ_API_KEY=your-groq-key
 ```
 
-Server credentials use the server identifier uppercased. `WEB_PASSWORD` is required for the web frontend — the server won't start without it.
+Server credentials use the server identifier uppercased. `WEB_PASSWORD` is
+required for the web frontend. Translation needs only one usable model key;
+models whose keys are absent are skipped.
 
 ## Runtime changes
 
 - **`/set section.field value`** — change a config value at runtime. Changes are saved immediately.
-- **`/reload`** — reload theme and config from disk.
+- **`/reload`** — reload config, `.env` credentials, and the current theme from disk.

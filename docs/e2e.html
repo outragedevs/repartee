@@ -167,9 +167,16 @@
 <p>Useful commands:</p>
 <pre><code class="language-text">/e2e fingerprint
 /e2e verify &lt;nick&gt;
-/e2e reverify &lt;nick&gt;
+/e2e reverify &lt;nick|handle&gt; [fingerprint]
 </code></pre>
-<p>If a peer changes identity or appears under a different <code>ident@host</code>, repartee can warn and require you to decide whether to trust the new state.</p>
+<p>If a peer changes identity or appears under a different <code>ident@host</code>, repartee warns and blocks the handshake until you decide whether to trust the new state. The warning names the handle to pass to <code>/e2e reverify</code>, and that handle is accepted verbatim.</p>
+<p>The two cases resolve differently, because they are not equally serious. A changed <code>ident@host</code> under an unchanged fingerprint is the same peer on a new connection: accepting re-binds the fingerprint you already verified to the new handle, and your trust is preserved. A changed fingerprint is a new key: accepting replaces the old one, so compare the SAS words out of band first.</p>
+<p>Either way, the handshake that raised the warning was refused, so run <code>/e2e handshake &lt;nick&gt;</code> afterwards to open a session under the accepted state.</p>
+<p>If two different keys are offered at the same <code>ident@host</code> before you decide, repartee holds both warnings and <code>/e2e reverify</code> refuses to guess between them: it lists the candidates and changes nothing. This matters — accepting the wrong one would install a key you never compared.</p>
+<p>Two keys at one handle are indistinguishable by handle, so you resolve it by naming the fingerprint you verified. That is what the listing leads with, and it is the same value you compared out of band:</p>
+<pre><code class="language-text">/e2e reverify ~bob@b.host c37c65c773314a48
+</code></pre>
+<p>Any unique prefix of the fingerprint works. Accepting one key settles the contest at that handle — the competing claims are dropped, and those peers can re-handshake if they are genuine.</p>
 <h2>Resetting state</h2>
 <p><code>/e2e list</code> only shows trusted peers in the current conversation. It does not show every remembered identity.</p>
 <p>If you want a true clean slate, inspect the full keyring first:</p>

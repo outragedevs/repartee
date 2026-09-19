@@ -26,6 +26,7 @@ impl App {
                 self.state.add_message(
                     buffer_id,
                     Message {
+                        log_key: None,
                         id,
                         timestamp: Utc::now(),
                         message_type: MessageType::Event,
@@ -38,6 +39,8 @@ impl App {
                         log_msg_id: None,
                         log_ref_id: None,
                         tags: None,
+                        wire_origin: None,
+                        translation_suffix_at: None,
                     },
                 );
             }
@@ -235,9 +238,10 @@ impl App {
         for buf_id in buffer_ids {
             let id = self.state.next_message_id();
             let event_param = separator_text.clone();
-            self.state.add_local_message(
+            self.state.add_local_message_in_order(
                 &buf_id,
                 Message {
+                    log_key: None,
                     id,
                     timestamp: Utc::now(),
                     message_type: MessageType::Event,
@@ -250,6 +254,8 @@ impl App {
                     log_msg_id: None,
                     log_ref_id: None,
                     tags: None,
+                    wire_origin: None,
+                    translation_suffix_at: None,
                 },
             );
         }
@@ -284,6 +290,7 @@ impl App {
                     self.state.add_message(
                         &buf_id,
                         crate::state::buffer::Message {
+                            log_key: None,
                             id: msg_id,
                             timestamp: chrono::Utc::now(),
                             message_type: crate::state::buffer::MessageType::Event,
@@ -298,6 +305,8 @@ impl App {
                             log_ref_id: None,
                             event_key: None,
                             event_params: Some(Vec::new()),
+                            wire_origin: None,
+                            translation_suffix_at: None,
                         },
                     );
                     if let Some(handle) = self.irc_handles.get(&conn_id) {

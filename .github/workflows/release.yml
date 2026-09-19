@@ -63,6 +63,23 @@ jobs:
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact: repartee-linux-arm64
+            # jemalloc bakes its page size in at compile time and refuses to
+            # initialise when the running kernel's page is larger — see
+            # jemalloc's pages.c: `if (os_page > PAGE) { "Unsupported system
+            # page size" }`. Since our global allocator IS jemalloc, that is
+            # not a warning: the process aborts on its first allocation.
+            #
+            # Left alone, jemalloc's configure autodetects the *build* host's
+            # page size, and this runner has 4 KiB pages — so the artifact
+            # died on every aarch64 kernel with larger pages, including
+            # Raspberry Pi OS on a Pi 5 (16 KiB) and RHEL-family aarch64
+            # (64 KiB). Build for the largest of the three so one binary
+            # covers all of them; a compile-time page larger than the
+            # runtime one is supported, only slightly coarser.
+            #
+            # amd64 deliberately does not set this: x86_64 is always 4 KiB,
+            # so it would only add allocator slack for no portability gain.
+            jemalloc_lg_page: "16"
     steps:
       - uses: actions/checkout@v6
 
@@ -75,8 +92,27 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # The env var is exported inside the shell rather than via `env:` so
+      # that targets without a `jemalloc_lg_page` do not receive it as an
+      # empty string — jemalloc-sys treats "" as set and would pass a bare
+      # `--with-lg-page=` to configure, failing the build.
       - name: Build release binary
-        run: cargo build --release --locked
+        run: |
+          if [ -n "${{ matrix.jemalloc_lg_page }}" ]; then
+            export JEMALLOC_SYS_WITH_LG_PAGE="${{ matrix.jemalloc_lg_page }}"
+            echo "jemalloc page size: 2^${{ matrix.jemalloc_lg_page }} bytes"
+          fi
+          cargo build --release --locked
+
+      # `--version` short-circuits before any setup, but it still collects
+      # argv — so the global allocator has to boot for this to print
+      # anything. On Linux ARM64 that is the check that a jemalloc built for
+      # 64 KiB pages still runs where pages are 4 KiB, which is the whole
+      # premise of the setting above.
+      - name: Smoke-test the binary
+        run: |
+          echo "runner page size: $(getconf PAGESIZE) bytes"
+          ./target/release/repartee --version
 
       - name: Strip binary
         run: strip target/release/repartee

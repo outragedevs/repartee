@@ -107,6 +107,9 @@ pub struct AppState {
     pub session_hint: RwSignal<bool>,
     pub theme: RwSignal<String>,
     pub error: RwSignal<Option<String>>,
+    /// Text handed back by the server after a refused send, for the composer
+    /// to restore. Cleared by the input component once consumed.
+    pub restore_input: RwSignal<Option<String>>,
     pub timestamp_format: RwSignal<String>,
     pub line_height: RwSignal<f32>,
     /// Client-side appearance overrides (persisted in localStorage, applied
@@ -239,6 +242,7 @@ impl AppState {
             session_hint: RwSignal::new(false),
             theme: RwSignal::new(saved_theme),
             error: RwSignal::new(None),
+            restore_input: RwSignal::new(None),
             timestamp_format: RwSignal::new("%H:%M".to_string()),
             line_height: RwSignal::new(1.35),
             font_size_override: RwSignal::new(font_size_override),
@@ -508,6 +512,13 @@ impl AppState {
                 // Auto-switch to newly created buffer (matches terminal behavior).
                 self.shell_screen.set(None);
                 self.active_buffer.set(Some(new_id));
+            }
+            WebEvent::BufferE2eChanged { buffer_id, enabled } => {
+                self.buffers.update(|bufs| {
+                    if let Some(buffer) = bufs.iter_mut().find(|buffer| buffer.id == buffer_id) {
+                        buffer.e2e_enabled = enabled;
+                    }
+                });
             }
             WebEvent::BufferClosed { buffer_id } => {
                 // If the closed buffer was active, switch to first available.
@@ -789,6 +800,22 @@ impl AppState {
             }
             WebEvent::Error { message, .. } => {
                 self.error.set(Some(message));
+            }
+            WebEvent::RestoreInput { text, buffer_id, .. } => {
+                // Only while the composer still belongs to the conversation
+                // the server computed the retry for. This tab may have
+                // switched during the round trip — its `SwitchBuffer`
+                // travels client→server while this event travels the other
+                // way, so the two can cross — and a bare retry restored into
+                // another conversation's composer publishes it there on the
+                // next Enter. The text survives in the error row either way,
+                // so skipping loses nothing. An event with no buffer (an
+                // older server) fails closed for the same reason.
+                if buffer_id.is_some() && buffer_id == self.active_buffer.get_untracked() {
+                    // The composer owns its own value signal, so hand the
+                    // text over and let the input component pick it up.
+                    self.restore_input.set(Some(text));
+                }
             }
             WebEvent::ShellScreen {
                 buffer_id,
@@ -1095,6 +1122,7 @@ fn insert_date_separators(messages: Vec<WireMessage>) -> Vec<WireMessage> {
                     log_id: None,
                     event_key: Some("date_separator".to_string()),
                     previews: Vec::new(),
+                    orig_offset: None,
                 });
             }
             last_date = Some(date);
@@ -1229,6 +1257,45 @@ mod tests {
     }
 
     #[test]
+    fn a_restore_is_applied_only_in_the_buffer_it_was_computed_for() {
+        // The tab may switch during the round trip — its SwitchBuffer
+        // travels client→server while RestoreInput travels the other way —
+        // and a bare retry restored into another conversation's composer
+        // publishes it there on the next Enter. Exactly the JSON the server
+        // emits, so a field-name drift between the two mirrored protocol
+        // files fails here.
+        let state = headless_state();
+        state.active_buffer.set(Some("libera/#rust".to_string()));
+
+        let stale = r#"{"type":"RestoreInput","text":"sekret","session_id":"s1",
+            "buffer_id":"libera/bob"}"#;
+        state.handle_event(serde_json::from_str(stale).expect("mirrors the server"));
+        assert!(
+            state.restore_input.get_untracked().is_none(),
+            "the tab has left libera/bob, so the text stays in the error row"
+        );
+
+        let matching = r#"{"type":"RestoreInput","text":"sekret","session_id":"s1",
+            "buffer_id":"libera/#rust"}"#;
+        state.handle_event(serde_json::from_str(matching).expect("mirrors the server"));
+        assert_eq!(
+            state.restore_input.get_untracked().as_deref(),
+            Some("sekret"),
+            "still in the conversation it was addressed to, so it comes back"
+        );
+
+        // An event with no buffer — an older server — fails closed too:
+        // restoring it anywhere is the leak this binding exists to prevent.
+        state.restore_input.set(None);
+        state.handle_event(WebEvent::RestoreInput {
+            text: "sekret".to_string(),
+            session_id: Some("s1".to_string()),
+            buffer_id: None,
+        });
+        assert!(state.restore_input.get_untracked().is_none());
+    }
+
+    #[test]
     fn sync_init_without_typing_clears_a_stale_map() {
         // The snapshot REPLACES the map: an empty payload still has to wipe
         // whatever the previous session left on screen.
@@ -1339,6 +1406,7 @@ mod tests {
             log_id: Some(i64::try_from(id).unwrap_or_default()),
             event_key: None,
             previews: Vec::new(),
+            orig_offset: None,
         }
     }
 
@@ -1638,4 +1706,3 @@ mod tests {
         assert!(!ScrollMode::ReadingHistory.is_following_tail());
     }
 }
-

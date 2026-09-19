@@ -1,5 +1,5 @@
 ---
-category: Moderation
+category: Configuration
 description: Add an ignore rule
 ---
 

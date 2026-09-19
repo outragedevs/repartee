@@ -1,5 +1,5 @@
 ---
-category: Info
+category: Channel
 description: Set or query channel/user modes
 ---
 

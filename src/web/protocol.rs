@@ -99,6 +99,10 @@ pub enum WebEvent {
     },
     /// A new buffer was created.
     BufferCreated { buffer: BufferMeta },
+    BufferE2eChanged {
+        buffer_id: String,
+        enabled: bool,
+    },
     /// A buffer was closed.
     BufferClosed { buffer_id: String },
     /// Buffer activity level or unread count changed.
@@ -158,6 +162,25 @@ pub enum WebEvent {
         /// UI (`[emotes] enabled` AND `render = graphical`).
         #[serde(default = "default_true")]
         emotes_enabled: bool,
+    },
+    /// Hand a refused message back to the client that submitted it.
+    ///
+    /// Sent when an outgoing message is refused (translation could not run,
+    /// E2E refused) after the submitting client already cleared its input.
+    /// Targeted like [`Self::Error`]: only the author's session restores it.
+    RestoreInput {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        /// The buffer whose composer this text belongs in. The client
+        /// applies the restore only while that buffer is still its active
+        /// one: the tab may have switched during the round trip — its
+        /// `SwitchBuffer` travels client→server while this travels
+        /// server→client, so the two can cross — and a bare retry restored
+        /// into another conversation's composer publishes it there on the
+        /// next Enter.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        buffer_id: Option<String>,
     },
     /// Server-side error.
     Error {
@@ -291,6 +314,8 @@ pub struct SaveServerCmd {
     #[serde(default)]
     pub client_cert_path: String,
     #[serde(default)]
+    pub sasl_key_path: String,
+    #[serde(default)]
     pub auto_reconnect: bool,
     #[serde(default)]
     pub reconnect_delay: String,
@@ -315,6 +340,8 @@ pub struct BufferMeta {
     pub nick_count: u32,
     #[serde(default)]
     pub modes: Option<String>,
+    #[serde(default)]
+    pub e2e_enabled: bool,
 }
 
 /// Connection metadata sent in `SyncInit`.
@@ -362,6 +389,15 @@ pub struct WireMessage {
     /// disabled or when the message contains no preview-eligible URLs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub previews: Vec<super::preview::LinkPreview>,
+    /// Byte offset in `text` where an appended ` [original]` suffix begins,
+    /// for a translated line displayed alongside its original. The client
+    /// dims from here to the end, matching the TUI.
+    ///
+    /// `None` for every other row, and for rows loaded from the log — the
+    /// stored text is flat, so a reloaded row renders undimmed in both
+    /// frontends alike.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orig_offset: Option<usize>,
 }
 
 /// Wire-format nick entry for transport over WebSocket.
@@ -468,9 +504,16 @@ mod tests {
             log_id: Some(42),
             event_key: None,
             previews: Vec::new(),
+            orig_offset: Some(7),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: WireMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            decoded.orig_offset,
+            Some(7),
+            "the dim boundary survives the wire, or the browser renders a \
+             translated line undimmed"
+        );
         assert_eq!(decoded.id, 42);
         assert_eq!(decoded.ts_ms, 1_710_000_000_500);
         assert_eq!(decoded.nick.as_deref(), Some("ferris"));

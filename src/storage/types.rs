@@ -14,6 +14,7 @@ pub struct LogRow {
     pub msg_type: MessageType,
     pub nick: Option<String>,
     pub text: String,
+    pub translation_suffix_at: Option<usize>,
     pub highlight: bool,
     /// For fan-out events (quit/nick): points to the primary row's `msg_id`.
     /// Reference rows store empty text; the web frontend JOINs to get the full text.
@@ -40,6 +41,7 @@ pub struct StoredMessage {
     pub msg_type: String,
     pub nick: Option<String>,
     pub text: String,
+    pub translation_suffix_at: Option<usize>,
     pub highlight: bool,
     pub ref_id: Option<String>,
     /// JSON-serialized `IRCv3` message tags (`None` if empty).

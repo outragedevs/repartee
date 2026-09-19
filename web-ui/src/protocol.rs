@@ -77,6 +77,10 @@ pub enum WebEvent {
     BufferCreated {
         buffer: BufferMeta,
     },
+    BufferE2eChanged {
+        buffer_id: String,
+        enabled: bool,
+    },
     BufferClosed {
         buffer_id: String,
     },
@@ -134,6 +138,19 @@ pub enum WebEvent {
         nick_color_lightness: f32,
         #[serde(default = "default_true")]
         emotes_enabled: bool,
+    },
+    /// A message this client submitted was refused; put the text back in the
+    /// composer. Targeted, so only its author receives it.
+    RestoreInput {
+        text: String,
+        #[serde(default)]
+        session_id: Option<String>,
+        /// The buffer the text belongs to. Restored only while that buffer
+        /// is still the active one — the tab may have switched during the
+        /// round trip, and a retry in another conversation's composer would
+        /// publish it there on Enter.
+        #[serde(default)]
+        buffer_id: Option<String>,
     },
     Error {
         message: String,
@@ -254,6 +271,8 @@ pub struct SaveServerCmd {
     #[serde(default)]
     pub client_cert_path: String,
     #[serde(default)]
+    pub sasl_key_path: String,
+    #[serde(default)]
     pub auto_reconnect: bool,
     #[serde(default)]
     pub reconnect_delay: String,
@@ -277,6 +296,8 @@ pub struct BufferMeta {
     pub nick_count: u32,
     #[serde(default)]
     pub modes: Option<String>,
+    #[serde(default)]
+    pub e2e_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,6 +337,11 @@ pub struct WireMessage {
     /// disabled or the message contains no eligible URLs.
     #[serde(default)]
     pub previews: Vec<LinkPreview>,
+    /// Byte offset in `text` where an appended ` [original]` suffix begins,
+    /// for a translated line displayed alongside its original. Rendered
+    /// dimmed, matching the TUI. `None` for every other row.
+    #[serde(default)]
+    pub orig_offset: Option<usize>,
 }
 
 /// Mirror of `src/web/preview::LinkPreview`. Kept in sync manually because

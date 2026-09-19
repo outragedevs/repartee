@@ -105,37 +105,30 @@
 </div>
 <p class="search-results-count" id="search-count"></p>
 <h2 id="cat-channel">Channel</h2>
-<div class="command-entry" data-command="clear" data-category="Channel">
-<h1>/clear</h1>
+<div class="command-entry" data-command="ban" data-category="Channel">
+<h1>/ban</h1>
 <h2>Syntax</h2>
-<pre><code>/clear
+<pre><code>/ban [mask]
+/ban -a &lt;account&gt;
 </code></pre>
 <h2>Description</h2>
-<p>Clears all messages from the current buffer&#39;s display. This is a visual-only
-operation — chat logs in the database are not affected. Messages remain
-searchable via <code>/log search</code>.</p>
-<p>Works on any buffer type: channels, queries, and server buffers.</p>
+<p>Ban a user or hostmask from the current channel.</p>
+<p>With no arguments, requests the ban list from the server and displays it
+as a numbered list. These numbers can be used with <code>/unban</code> to remove
+entries by index.</p>
+<p>With a mask argument, sets mode <code>+b</code> on the channel. If the argument
+contains <code>!</code> or <code>@</code>, it is used as a literal hostmask. Otherwise it is
+sent as-is (the server typically treats a plain nick as <code>nick!*@*</code>).</p>
+<p>The <code>-a</code> flag creates an account extban (<code>$a:account</code>) if the server
+supports EXTBAN with the account type.</p>
 <h2>Examples</h2>
-<pre><code>/clear
+<pre><code>/ban                        Show numbered ban list
+/ban *!*@bad.host.com       Ban a hostmask
+/ban *!*ident@*.isp.net     Ban by ident and host pattern
+/ban -a troll               Account extban ($a:troll)
 </code></pre>
 <h2>See Also</h2>
-<p>/close, /log</p>
-</div>
-<div class="command-entry" data-command="close" data-category="Channel">
-<h1>/close</h1>
-<h2>Syntax</h2>
-<pre><code>/close [reason]
-</code></pre>
-<h2>Description</h2>
-<p>Close the current buffer. For channels, parts the channel with an
-optional reason. For query windows, closes the window. Server buffers
-cannot be closed.</p>
-<h2>Examples</h2>
-<pre><code>/close
-/close Window closed
-</code></pre>
-<h2>See Also</h2>
-<p>/part, /quit</p>
+<p>/unban, /kick, /kb, /mode</p>
 </div>
 <div class="command-entry" data-command="cycle" data-category="Channel">
 <h1>/cycle</h1>
@@ -155,6 +148,36 @@ be provided.</p>
 </code></pre>
 <h2>See Also</h2>
 <p>/part, /join</p>
+</div>
+<div class="command-entry" data-command="deop" data-category="Channel">
+<h1>/deop</h1>
+<h2>Syntax</h2>
+<pre><code>/deop &lt;nick&gt; [nick2 ...]
+</code></pre>
+<h2>Description</h2>
+<p>Remove channel operator status (-o) from one or more users in the current
+channel. You must be a channel operator to use this command.</p>
+<h2>Examples</h2>
+<pre><code>/deop troublemaker
+/deop user1 user2
+</code></pre>
+<h2>See Also</h2>
+<p>/op, /devoice, /mode</p>
+</div>
+<div class="command-entry" data-command="devoice" data-category="Channel">
+<h1>/devoice</h1>
+<h2>Syntax</h2>
+<pre><code>/devoice &lt;nick&gt; [nick2 ...]
+</code></pre>
+<h2>Description</h2>
+<p>Remove voice status (-v) from one or more users in the current channel.
+You must be a channel operator to use this command.</p>
+<h2>Examples</h2>
+<pre><code>/devoice user1
+/devoice user1 user2
+</code></pre>
+<h2>See Also</h2>
+<p>/voice, /deop, /mode</p>
 </div>
 <div class="command-entry" data-command="except" data-category="Channel">
 <h1>/except</h1>
@@ -218,6 +241,71 @@ Optionally provide a channel key for key-protected channels.</p>
 <h2>See Also</h2>
 <p>/part, /close</p>
 </div>
+<div class="command-entry" data-command="kb" data-category="Channel">
+<h1>/kb</h1>
+<h2>Syntax</h2>
+<pre><code>/kb [#channel] &lt;nick&gt; [reason]
+</code></pre>
+<h2>Description</h2>
+<p>Kick and ban a user, from the named channel or the current one if you omit
+it. Looks up the user&#39;s ident
+and host from cached WHOX data to create a proper <code>*!*ident@host</code> ban
+mask, then kicks with the given reason.</p>
+<p>Falls back to <code>nick!*@*</code> if the user&#39;s ident and host are not available
+(e.g. the server does not support WHOX or userhost-in-names).</p>
+<p>The reason defaults to the nick if not provided.</p>
+<h2>Examples</h2>
+<pre><code>/kb troll
+/kb spammer Enough is enough
+/kb #other troll Take it elsewhere
+</code></pre>
+<h2>See Also</h2>
+<p>/kick, /ban, /unban, /mode</p>
+</div>
+<div class="command-entry" data-command="kick" data-category="Channel">
+<h1>/kick</h1>
+<h2>Syntax</h2>
+<pre><code>/kick [#channel] &lt;nick&gt;[,nick2,...,nick6] [reason]
+</code></pre>
+<h2>Aliases</h2>
+<pre><code>/k
+</code></pre>
+<h2>Description</h2>
+<p>Kick one or more users from the current channel (or <code>#channel</code> if
+given). Separate multiple nicks with commas — up to six per
+invocation. Everything after the nick list is the reason; no colon
+is needed. If no reason is given, the user&#39;s nick is used as the
+reason. You must be a channel operator to use this command.</p>
+<h2>Examples</h2>
+<pre><code>/kick troll
+/kick spammer Stop spamming
+/kick alice,bob,carol go away
+/kick #other troll Get out
+/k troll Get out
+</code></pre>
+<h2>See Also</h2>
+<p>/ban, /kb, /mode</p>
+</div>
+<div class="command-entry" data-command="mode" data-category="Channel">
+<h1>/mode</h1>
+<h2>Syntax</h2>
+<pre><code>/mode [target] [+/-modes] [params]
+</code></pre>
+<h2>Description</h2>
+<p>Set or query channel or user modes. With no arguments, queries your
+own user modes. If the first argument starts with <code>+</code> or <code>-</code>, applies
+the mode change to the current channel. Otherwise, the first argument
+is treated as the target.</p>
+<h2>Examples</h2>
+<pre><code>/mode
+/mode +i
+/mode #linux +o friend
+/mode +nt
+/mode #linux +b *!*@bad.host
+</code></pre>
+<h2>See Also</h2>
+<p>/op, /deop, /voice, /ban</p>
+</div>
 <div class="command-entry" data-command="names" data-category="Channel">
 <h1>/names</h1>
 <h2>Syntax</h2>
@@ -232,6 +320,21 @@ Optionally provide a channel key for key-protected channels.</p>
 </code></pre>
 <h2>See Also</h2>
 <p>/who, /whois</p>
+</div>
+<div class="command-entry" data-command="op" data-category="Channel">
+<h1>/op</h1>
+<h2>Syntax</h2>
+<pre><code>/op &lt;nick&gt; [nick2 ...]
+</code></pre>
+<h2>Description</h2>
+<p>Give channel operator status (+o) to one or more users in the current channel.
+You must be a channel operator to use this command.</p>
+<h2>Examples</h2>
+<pre><code>/op friend
+/op user1 user2 user3
+</code></pre>
+<h2>See Also</h2>
+<p>/deop, /voice, /mode</p>
 </div>
 <div class="command-entry" data-command="part" data-category="Channel">
 <h1>/part</h1>
@@ -285,6 +388,31 @@ automatically re-op users matching the mask when they rejoin.</p>
 <h2>See Also</h2>
 <p>/mode, /names</p>
 </div>
+<div class="command-entry" data-command="unban" data-category="Channel">
+<h1>/unban</h1>
+<h2>Syntax</h2>
+<pre><code>/unban &lt;number|mask|wildcard&gt; [...]
+</code></pre>
+<h2>Description</h2>
+<p>Remove one or more bans from the current channel. Accepts numeric
+references (from the numbered list shown by <code>/ban</code>), literal masks,
+and wildcard patterns that match against stored bans.</p>
+<p>Use <code>/ban</code> with no arguments first to display the numbered ban list,
+then <code>/unban 1 3 5</code> to remove entries by their index.</p>
+<p>Wildcard patterns (<code>*</code> and <code>?</code>) are matched against the stored ban list.
+Use <code>/unban *</code> to remove all bans from the channel.</p>
+<p>Multiple arguments can be given to remove several bans at once.</p>
+<h2>Examples</h2>
+<pre><code>/unban *                     Remove all bans
+/unban 1                     Remove first entry from ban list
+/unban 2 4 7                 Remove multiple entries by index
+/unban *!*@*.spam.host       Remove all bans matching pattern
+/unban *!*@good.host.com     Remove by literal mask
+/unban 1 *!*@other.net       Mix numeric and wildcard
+</code></pre>
+<h2>See Also</h2>
+<p>/ban, /kick, /kb, /mode</p>
+</div>
 <div class="command-entry" data-command="unexcept" data-category="Channel">
 <h1>/unexcept</h1>
 <h2>Syntax</h2>
@@ -323,6 +451,22 @@ automatically re-op users matching the mask when they rejoin.</p>
 </code></pre>
 <h2>See Also</h2>
 <p>/reop</p>
+</div>
+<div class="command-entry" data-command="voice" data-category="Channel">
+<h1>/voice</h1>
+<h2>Syntax</h2>
+<pre><code>/voice &lt;nick&gt; [nick2 ...]
+</code></pre>
+<h2>Description</h2>
+<p>Give voice status (+v) to one or more users in the current channel.
+Voiced users can speak in moderated (+m) channels. You must be a
+channel operator to use this command.</p>
+<h2>Examples</h2>
+<pre><code>/voice user1
+/voice user1 user2
+</code></pre>
+<h2>See Also</h2>
+<p>/devoice, /op, /mode</p>
 </div>
 <h2 id="cat-configuration">Configuration</h2>
 <div class="command-entry" data-command="alias" data-category="Configuration">
@@ -379,16 +523,340 @@ j = &quot;/join $0; /msg $0 hello everyone&quot;
 <h2>See Also</h2>
 <p>/unalias</p>
 </div>
+<div class="command-entry" data-command="autoconnect" data-category="Configuration">
+<h1>/autoconnect</h1>
+<h2>Syntax</h2>
+<pre><code>/autoconnect [on|off]
+</code></pre>
+<h2>Description</h2>
+<p>Toggle the autoconnect flag for the current server&#39;s configuration.
+When autoconnect is on, the client will connect to this server
+automatically on startup.</p>
+<p>Without arguments, shows the current autoconnect status.</p>
+<h2>Examples</h2>
+<pre><code>/autoconnect
+/autoconnect on
+/autoconnect off
+</code></pre>
+<h2>See Also</h2>
+<p>/server, /connect</p>
+</div>
+<div class="command-entry" data-command="flood" data-category="Configuration">
+<h1>/flood</h1>
+<h2>Syntax</h2>
+<pre><code>/flood
+/flood on
+/flood off
+/flood add &lt;nick|mask&gt;
+/flood remove &lt;number|mask&gt;
+</code></pre>
+<h2>Description</h2>
+<p>Manage local flood protection and <code>PRIVMSG</code> exemptions. Without
+arguments, lists the current status and exemption rules.</p>
+<p>Exemptions use the same wildcard matching as <code>/ignore</code>. A bare nick
+pattern matches the nick only. A pattern containing <code>!</code> matches the
+full <code>nick!user@host</code> mask.</p>
+<p>Exemptions only bypass local incoming <code>PRIVMSG</code> flood checks. They do
+not affect <code>/ignore</code>, nick-change flood suppression, or the IRC
+crate&#39;s outgoing send throttle.</p>
+<h2>Examples</h2>
+<pre><code>/flood
+/flood add trustednick
+/flood add *!*@trusted.host
+/flood remove 1
+/flood off
+</code></pre>
+<h2>See Also</h2>
+<p>/ignore, /set</p>
+</div>
+<div class="command-entry" data-command="ignore" data-category="Configuration">
+<h1>/ignore</h1>
+<h2>Syntax</h2>
+<pre><code>/ignore [mask] [levels...] [-channels #a,#b]
+</code></pre>
+<h2>Description</h2>
+<p>Add an ignore rule to suppress messages and events from matching
+users. Without arguments, lists current ignore rules.</p>
+<p>A bare nick pattern (e.g., <code>troll</code>) matches the nick only.
+A pattern containing <code>!</code> (e.g., <code>*!*@bad.host</code>) matches the
+full <code>nick!user@host</code> mask with wildcard support (<code>*</code>, <code>?</code>).</p>
+<p>Use <code>-channels</code> to restrict the ignore to specific channels
+(comma-separated). Without it, the ignore applies everywhere.</p>
+<h2>Levels</h2>
+<pre><code>MSGS      Private messages
+PUBLIC    Channel messages
+NOTICES   Notices
+ACTIONS   CTCP ACTIONs (/me)
+JOINS     Join events
+PARTS     Part events
+QUITS     Quit events
+NICKS     Nick change events
+KICKS     Kick events
+CTCPS     CTCP requests and responses
+ALL       All of the above
+</code></pre>
+<p>If no levels are specified, ALL is assumed.</p>
+<h2>Examples</h2>
+<pre><code>/ignore
+/ignore troll
+/ignore *!*@bad.host.com
+/ignore spammer PUBLIC NOTICES
+/ignore troll ALL -channels #chat,#help
+</code></pre>
+<h2>See Also</h2>
+<p>/unignore</p>
+</div>
+<div class="command-entry" data-command="items" data-category="Configuration">
+<h1>/items</h1>
+<h2>Syntax</h2>
+<pre><code>/items [list|add|remove|move|format|separator|available|reset] [args...]
+</code></pre>
+<h2>Description</h2>
+<p>Manage the statusbar layout. Add, remove, reorder, and format statusbar items.</p>
+<h2>Subcommands</h2>
+<h3>list</h3>
+<p>Show current statusbar items with their positions.</p>
+<pre><code>/items list
+</code></pre>
+<p>This is the default when no subcommand is given.</p>
+<h3>add</h3>
+<p>Add an item to the statusbar.</p>
+<pre><code>/items add &lt;item&gt;
+</code></pre>
+<h3>remove</h3>
+<p>Remove an item from the statusbar.</p>
+<pre><code>/items remove &lt;item&gt;
+</code></pre>
+<h3>move</h3>
+<p>Move an item to a different position in the statusbar.</p>
+<pre><code>/items move &lt;item&gt; &lt;position&gt;
+</code></pre>
+<p>Position is 1-based (1 = first item).</p>
+<h3>format</h3>
+<p>Set or view the format string for a statusbar item.</p>
+<pre><code>/items format &lt;item&gt; [format_string]
+</code></pre>
+<p>Without a format string, shows the current format.</p>
+<h3>separator</h3>
+<p>Set or view the separator between statusbar items.</p>
+<pre><code>/items separator [string]
+</code></pre>
+<p>Without a string, shows the current separator.</p>
+<h3>available</h3>
+<p>List all available statusbar item types.</p>
+<pre><code>/items available
+</code></pre>
+<h3>reset</h3>
+<p>Reset statusbar to default items, formats, and separator.</p>
+<pre><code>/items reset
+</code></pre>
+<h2>Available Items</h2>
+<ul>
+<li><code>time</code> — Current time</li>
+<li><code>nick_info</code> — Current nick and user modes</li>
+<li><code>channel_info</code> — Channel/buffer name and modes</li>
+<li><code>lag</code> — Server lag measurement</li>
+<li><code>active_windows</code> — Windows with unread activity</li>
+</ul>
+<h2>Examples</h2>
+<pre><code>/items list
+/items add time
+/items remove lag
+/items move time 1
+/items format time %H:%M
+/items separator  -
+/items available
+/items reset
+</code></pre>
+<h2>See Also</h2>
+<p>/set</p>
+</div>
+<div class="command-entry" data-command="log" data-category="Configuration">
+<h1>/log</h1>
+<h2>Syntax</h2>
+<pre><code>/log [status|search] [query]
+</code></pre>
+<h2>Description</h2>
+<p>Manage persistent chat logs. Messages are stored in a local SQLite database
+at <code>~/.repartee/logs/messages.db</code> with WAL mode for concurrent access.</p>
+<p>Only messages that reach the UI are logged — messages filtered by <code>/ignore</code>,
+antiflood, or script <code>stop()</code> propagation are never stored.</p>
+<h2>Subcommands</h2>
+<h3>status</h3>
+<p>Show logging status including message count, database size, and encryption mode.</p>
+<pre><code>/log status
+</code></pre>
+<p>This is the default when no subcommand is given.</p>
+<h3>search</h3>
+<p>Full-text search across logged messages (plain text mode only).</p>
+<pre><code>/log search &lt;query&gt;
+</code></pre>
+<p>Searches within the current buffer&#39;s network and channel context. Results
+show the 20 most recent matches with timestamps.</p>
+<p>Search is not available in encrypted mode since ciphertext cannot be indexed.</p>
+<h2>Configuration</h2>
+<pre><code class="language-toml">[logging]
+enabled = true                 # enable/disable logging
+encrypt = false                # AES-256-GCM encryption (disables search)
+retention_days = 0             # 0 = keep forever
+event_retention_hours = 72     # auto-prune events after 72h (0 = keep forever)
+exclude_types = []             # filter: &quot;message&quot;, &quot;action&quot;, &quot;notice&quot;, &quot;ctcp&quot;, &quot;event&quot;
+</code></pre>
+<h3>Encryption</h3>
+<p>When <code>encrypt = true</code>, message text is encrypted with AES-256-GCM using a
+256-bit key auto-generated in <code>~/.repartee/.env</code>. No password is required —
+same trust model as irssi logs or SSH keys.</p>
+<p>Only the <code>text</code> column is encrypted. Network, buffer, nick, timestamp, and
+type remain queryable for the future web frontend.</p>
+<h3>Retention</h3>
+<p>Set <code>retention_days</code> to automatically purge old messages on startup.
+<code>0</code> means keep forever.</p>
+<h3>Event retention</h3>
+<p><code>event_retention_hours</code> controls how long event messages (join/part/quit/nick/kick/mode)
+are kept. Defaults to 72 hours. Pruning runs on startup and every hour in the background.
+Only event-type rows are affected — chat messages are never touched.</p>
+<pre><code>/set logging.event_retention_hours 72    # default
+/set logging.event_retention_hours 0     # keep forever
+</code></pre>
+<h3>Excluding Types</h3>
+<p>Filter specific message types from logging:</p>
+<pre><code class="language-toml">[logging]
+exclude_types = [&quot;event&quot;]  # skip join/part/quit/nick events
+</code></pre>
+<p>This is especially important if you&#39;re on many channels. A single QUIT or NICK
+change fans out to every shared channel — on 70 channels, one quit becomes 35+
+log rows. Adding <code>&quot;event&quot;</code> to <code>exclude_types</code> prevents this bloat.</p>
+<h2>Examples</h2>
+<pre><code>/log
+/log status
+/log search ssl certificate
+</code></pre>
+<h2>Read-only Browser</h2>
+<p>From the shell, use <code>repartee l</code> or <code>repartee logs</code> to open the stored history
+without connecting to IRC. In log browser mode, <code>/search &lt;query&gt;</code> searches the
+read-only database, <code>Q</code> and <code>/quit</code> exit, and scrolling up pages older messages.</p>
+<h2>See Also</h2>
+<p>/set, /ignore</p>
+</div>
 <div class="command-entry" data-command="reload" data-category="Configuration">
 <h1>/reload</h1>
 <h2>Syntax</h2>
 <pre><code>/reload
 </code></pre>
 <h2>Description</h2>
-<p>Reload the configuration file and theme from disk. Useful after manually
-editing <code>config/config.toml</code> or theme files.</p>
+<p>Reload <code>~/.repartee/config.toml</code>, <code>~/.repartee/.env</code> credentials, and the
+current theme from disk.</p>
+<p>Existing IRC connections keep credentials already used to authenticate. New
+or rotated service keys are applied where the running component supports a
+safe live refresh; otherwise Repartee reports that a restart is required.</p>
 <h2>See Also</h2>
 <p>/set, /items</p>
+</div>
+<div class="command-entry" data-command="script" data-category="Configuration">
+<h1>/script</h1>
+<h2>Syntax</h2>
+<pre><code>/script [list|load|unload|reload|autoload|template] [name]
+</code></pre>
+<h2>Description</h2>
+<p>Manage user scripts. Scripts are Lua 5.4 files in <code>~/.repartee/scripts/</code>
+that extend Repartee with custom commands, event hooks, filters, and automation.</p>
+<p>Scripts run in a sandboxed Lua environment — <code>os</code>, <code>io</code>, <code>loadfile</code>, <code>dofile</code>,
+and <code>package</code> are removed. Each script gets its own isolated environment.</p>
+<h2>Subcommands</h2>
+<h3>list</h3>
+<p>Show currently loaded scripts with version and description.</p>
+<pre><code>/script list
+</code></pre>
+<p>This is the default when no subcommand is given.</p>
+<h3>load</h3>
+<p>Load a script by name.</p>
+<pre><code>/script load &lt;name&gt;
+</code></pre>
+<p>Looks for <code>~/.repartee/scripts/&lt;name&gt;.lua</code>.</p>
+<h3>unload</h3>
+<p>Unload a script. All event handlers, commands, and timers registered by
+the script are automatically cleaned up. If the script returned a cleanup
+function from <code>setup()</code>, it is called.</p>
+<pre><code>/script unload &lt;name&gt;
+</code></pre>
+<h3>reload</h3>
+<p>Unload and reload a script.</p>
+<pre><code>/script reload &lt;name&gt;
+</code></pre>
+<h3>autoload</h3>
+<p>Show or manage scripts that load automatically on startup.</p>
+<pre><code>/script autoload
+</code></pre>
+<h3>template</h3>
+<p>Create a starter script file with the standard boilerplate.</p>
+<pre><code>/script template
+</code></pre>
+<h2>Autoloading</h2>
+<p>All <code>.lua</code> files in <code>~/.repartee/scripts/</code> are loaded automatically on startup.</p>
+<p>You can also explicitly list scripts in <code>config.toml</code>:</p>
+<pre><code class="language-toml">[scripts]
+autoload = [&quot;auto-away&quot;, &quot;spam-filter&quot;]
+debug = false
+</code></pre>
+<h2>Writing Scripts</h2>
+<p>Scripts are <code>.lua</code> files with a <code>meta</code> table and a <code>setup</code> function:</p>
+<pre><code class="language-lua">meta = {
+    name = &quot;my-script&quot;,
+    version = &quot;1.0&quot;,
+    description = &quot;What it does&quot;,
+}
+
+function setup(api)
+    -- Register event handlers
+    api.on(&quot;irc.privmsg&quot;, function(ev)
+        -- handle message
+    end)
+
+    -- Register custom commands
+    api.command(&quot;mycommand&quot;, {
+        handler = function(args, conn_id) --[[ ... ]] end,
+        description = &quot;Does something&quot;,
+        usage = &quot;/mycommand &lt;arg&gt;&quot;,
+    })
+
+    -- Optional: return cleanup function
+    return function()
+        api.log(&quot;my-script unloaded&quot;)
+    end
+end
+</code></pre>
+<h3>Available Events</h3>
+<p><strong>IRC events:</strong> <code>irc.privmsg</code>, <code>irc.action</code>, <code>irc.notice</code>, <code>irc.join</code>, <code>irc.part</code>,
+<code>irc.quit</code>, <code>irc.kick</code>, <code>irc.nick</code>, <code>irc.topic</code>, <code>irc.mode</code>, <code>irc.invite</code>,
+<code>irc.ctcp_request</code>, <code>irc.ctcp_response</code>, <code>irc.wallops</code></p>
+<p><strong>Lifecycle events:</strong> <code>command_input</code>, <code>connected</code>, <code>disconnected</code></p>
+<h3>Event Priority</h3>
+<p>Handlers run in descending priority order. Use priority constants:</p>
+<ul>
+<li><code>api.PRIORITY_HIGHEST</code> (100)</li>
+<li><code>api.PRIORITY_HIGH</code> (75)</li>
+<li><code>api.PRIORITY_NORMAL</code> (50) — default</li>
+<li><code>api.PRIORITY_LOW</code> (25)</li>
+<li><code>api.PRIORITY_LOWEST</code> (0)</li>
+</ul>
+<p>Return <code>true</code> from a handler to suppress the event.</p>
+<h3>Per-Script Config</h3>
+<p>Access per-script config values at runtime:</p>
+<pre><code class="language-lua">local val = api.config.get(&quot;timeout&quot;, 300)
+api.config.set(&quot;timeout&quot;, 600)
+</code></pre>
+<p>Read app-level config with dot-path notation:</p>
+<pre><code class="language-lua">local theme = api.config.app_get(&quot;general.theme&quot;)
+</code></pre>
+<h2>Examples</h2>
+<pre><code>/script list
+/script load auto-away
+/script reload auto-away
+/script unload auto-away
+/script template
+</code></pre>
+<h2>See Also</h2>
+<p>/set</p>
 </div>
 <div class="command-entry" data-command="set" data-category="Configuration">
 <h1>/set</h1>
@@ -398,12 +866,12 @@ editing <code>config/config.toml</code> or theme files.</p>
 <h2>Description</h2>
 <p>View or change runtime configuration. Settings use dot-notation paths
 like <code>general.nick</code> or <code>servers.libera.port</code>. Changes are saved to
-<code>config/config.toml</code> immediately. Credentials (passwords, SASL) are
-stored in <code>.env</code> instead.</p>
+<code>~/.repartee/config.toml</code> immediately. Server and SASL passwords are stored in
+<code>.env</code> instead; SASL usernames remain ordinary TOML configuration.</p>
 <p>With no arguments, lists all settings grouped by section.
 With just a path, shows the current value.
 With a path and value, sets the value and saves.</p>
-<p>Boolean values accept: <code>true</code>/<code>false</code>, <code>on</code>/<code>off</code>, <code>yes</code>/<code>no</code>.
+<p>Boolean values accept <code>true</code> or <code>false</code>.
 Array values use comma-separated format: <code>#chan1,#chan2</code>.</p>
 <h2>Examples</h2>
 <pre><code>/set
@@ -424,7 +892,7 @@ Array values use comma-separated format: <code>#chan1,#chan2</code>.</p>
 <p>Spell checker status and control.</p>
 <h2>Description</h2>
 <p>Two modes: &quot;replace&quot; (default) replaces misspelled words inline — Tab cycles suggestions, Space accepts, Escape reverts. &quot;highlight&quot; marks misspelled words with red underline without changing text. Switch with <code>/set spellcheck.mode highlight</code> or <code>/set spellcheck.mode replace</code>.</p>
-<h2>Usage</h2>
+<h2>Syntax</h2>
 <pre><code>/spellcheck [status|reload|list|get &lt;lang&gt;]
 </code></pre>
 <h2>Subcommands</h2>
@@ -434,8 +902,10 @@ Array values use comma-separated format: <code>#chan1,#chan2</code>.</p>
 <p>Reload dictionaries from disk. Useful after adding new <code>.dic</code>/<code>.aff</code> files or changing <code>spellcheck.languages</code>.</p>
 <h3>list</h3>
 <p>Fetch the list of available dictionaries from the Repartee dictionary repository. Shows each language with its install status.</p>
-<h3>get &lt;lang&gt;</h3>
+<h3>get</h3>
 <p>Download a dictionary by language code (e.g. <code>en_US</code>, <code>pl_PL</code>, <code>de_DE</code>). Files are saved to <code>~/.repartee/dicts/</code> and the spell checker is automatically reloaded.</p>
+<pre><code>/spellcheck get &lt;lang&gt;
+</code></pre>
 <h2>Configuration</h2>
 <pre><code class="language-toml">[spellcheck]
 enabled = true
@@ -514,25 +984,23 @@ dictionary_dir = &quot;&quot;        # default: ~/.repartee/dicts
 <h2>See Also</h2>
 <p>/alias</p>
 </div>
-<h2 id="cat-connection">Connection</h2>
-<div class="command-entry" data-command="autoconnect" data-category="Connection">
-<h1>/autoconnect</h1>
+<div class="command-entry" data-command="unignore" data-category="Configuration">
+<h1>/unignore</h1>
 <h2>Syntax</h2>
-<pre><code>/autoconnect [on|off]
+<pre><code>/unignore &lt;number|mask&gt;
 </code></pre>
 <h2>Description</h2>
-<p>Toggle the autoconnect flag for the current server&#39;s configuration.
-When autoconnect is on, the client will connect to this server
-automatically on startup.</p>
-<p>Without arguments, shows the current autoconnect status.</p>
+<p>Remove an ignore rule by its number (from <code>/ignore</code> list) or
+by the exact mask pattern.</p>
 <h2>Examples</h2>
-<pre><code>/autoconnect
-/autoconnect on
-/autoconnect off
+<pre><code>/unignore 1
+/unignore troll
+/unignore *!*@bad.host.com
 </code></pre>
 <h2>See Also</h2>
-<p>/server, /connect</p>
+<p>/ignore</p>
 </div>
+<h2 id="cat-connection">Connection</h2>
 <div class="command-entry" data-command="connect" data-category="Connection">
 <h1>/connect</h1>
 <h2>Syntax</h2>
@@ -654,16 +1122,15 @@ repartee a &lt;pid&gt;     # attach to a specific session by PID
 <div class="command-entry" data-command="disconnect" data-category="Connection">
 <h1>/disconnect</h1>
 <h2>Syntax</h2>
-<pre><code>/disconnect [server-id|label] [message]
+<pre><code>/disconnect [message]
 </code></pre>
 <h2>Description</h2>
-<p>Disconnect from an IRC server. With no arguments, disconnects from the
-server associated with the current buffer. Optionally specify a server
-by ID or label, and a quit message.</p>
+<p>Disconnect the IRC server associated with the current buffer and disable its
+automatic reconnect for this session. Any argument is used as the quit
+message; switch to a buffer on the intended network before running the command.</p>
 <h2>Examples</h2>
 <pre><code>/disconnect
-/disconnect libera
-/disconnect libera Goodbye!
+/disconnect Goodbye!
 </code></pre>
 <h2>See Also</h2>
 <p>/connect, /quit, /server</p>
@@ -675,7 +1142,8 @@ by ID or label, and a quit message.</p>
 </code></pre>
 <h2>Description</h2>
 <p>Disconnect from all servers and close the application. An optional quit
-message is sent to each server. Default message is &quot;kIRC&quot;.</p>
+message is sent to each server. The default includes the Repartee name,
+version, and project URL.</p>
 <h2>Examples</h2>
 <pre><code>/quit
 /quit Goodnight!
@@ -726,14 +1194,15 @@ Server credentials (passwords, SASL) are stored in <code>.env</code>.</p>
 <li><code>-reconnect-max-retries=&lt;n&gt;</code> — Maximum reconnect attempts</li>
 <li><code>-autosendcmd=&lt;cmds&gt;</code> — Commands to run on connect (semicolon-separated)</li>
 <li><code>-client-cert=&lt;path&gt;</code> — Client TLS certificate path for SASL EXTERNAL / CertFP</li>
+<li><code>-sasl-key=&lt;path&gt;</code> — P-256 private key path for ECDSA-NIST256P-CHALLENGE</li>
 </ul>
 <p>Flag values are parsed as single command arguments, so values with spaces should
-be edited in <code>config.toml</code> or with <code>/set</code>.</p>
+be edited in <code>config.toml</code> or with <code>/set</code>. For a guided form instead of flags,
+use <code>/wizard server</code>.</p>
 <h3>remove</h3>
 <p>Remove a server and disconnect if connected.</p>
 <pre><code>/server remove &lt;id&gt;
 </code></pre>
-<p>Aliases: del</p>
 <h2>Examples</h2>
 <pre><code>/server list
 /server add libera irc.libera.chat 6697 -tls
@@ -745,7 +1214,53 @@ be edited in <code>config.toml</code> or with <code>/set</code>.</p>
 /server remove libera
 </code></pre>
 <h2>See Also</h2>
-<p>/connect, /disconnect, /set</p>
+<p>/wizard, /connect, /disconnect, /set</p>
+</div>
+<div class="command-entry" data-command="wizard" data-category="Connection">
+<h1>/wizard</h1>
+<h2>Syntax</h2>
+<pre><code>/wizard server [id]
+</code></pre>
+<h2>Description</h2>
+<p>Open a guided popup form — a friendlier alternative to memorising <code>/server add</code>
+flags. The form is a fixed-size modal with two pages, <strong>Basics</strong> and
+<strong>Advanced</strong>, switched with the <code>◂ ▸</code> arrows or by clicking the tab row.</p>
+<p>Both keyboard and mouse work throughout:</p>
+<ul>
+<li><strong>Tab</strong> / <strong>Shift-Tab</strong> move between fields and the Save/Cancel buttons</li>
+<li><strong>Space</strong> toggles the focused checkbox</li>
+<li><strong>← →</strong> switch pages (or cycle the focused dropdown, e.g. SASL mechanism)</li>
+<li><strong>Enter</strong> on Save commits; <strong>Esc</strong> (or Cancel) closes without saving</li>
+<li><strong>Click</strong> a field to focus it, a checkbox to toggle, a tab to switch pages, or
+a button to press it</li>
+</ul>
+<p><strong>Basics:</strong> Network Name, server address/IP, port, Use TLS/SSL, Verify TLS
+certificate, Bind IP.</p>
+<p><strong>Advanced:</strong> server id, nick, username, realname, channels, server password,
+SASL user/pass/mechanism, encoding, autoconnect, auto-reconnect, reconnect delay
+and max retries, autosendcmd, client cert path.</p>
+<p>Passwords (server password, SASL pass) are stored in <code>.env</code>, never <code>config.toml</code>.
+The manual <code>/server add</code> command is unchanged and still available.</p>
+<h2>Subcommands</h2>
+<h3>server</h3>
+<p>Open the add-server form.</p>
+<pre><code>/wizard server
+</code></pre>
+<p>With an id, open the form pre-filled to <strong>edit</strong> that existing server (the id
+field is locked):</p>
+<pre><code>/wizard server libera
+</code></pre>
+<p>On edit, leaving a password field blank keeps the stored credential unchanged.</p>
+<h2>Web UI</h2>
+<p>The wizard is also available in the web UI: click <strong>&quot;+ Add network&quot;</strong> or type
+<code>/wizard server</code>. The web form is add-only (editing an existing server is a TUI
+feature).</p>
+<h2>Examples</h2>
+<pre><code>/wizard server
+/wizard server libera
+</code></pre>
+<h2>See Also</h2>
+<p>/server, /connect, /set</p>
 </div>
 <h2 id="cat-info">Info</h2>
 <div class="command-entry" data-command="admin" data-category="Info">
@@ -845,7 +1360,7 @@ specific subcommand.</p>
 <div class="command-entry" data-command="mentions" data-category="Info">
 <h1>/mentions</h1>
 <p>Switch to the Mentions buffer — a persistent buffer pinned at the top of the sidebar that aggregates all highlight mentions from all networks.</p>
-<h2>Usage</h2>
+<h2>Syntax</h2>
 <pre><code>/mentions
 </code></pre>
 <h2>Description</h2>
@@ -875,48 +1390,6 @@ specific subcommand.</p>
 <p>Mentions are stored in the SQLite database. When the buffer is re-enabled after being disabled, the last 7 days of mentions (up to 1000) are loaded from the database. Old mentions (&gt;7 days) are automatically purged every hour.</p>
 <h2>See also</h2>
 <p><code>/set display.mentions_buffer</code>, <code>/clear</code></p>
-</div>
-<div class="command-entry" data-command="mode" data-category="Info">
-<h1>/mode</h1>
-<h2>Syntax</h2>
-<pre><code>/mode [target] [+/-modes] [params]
-</code></pre>
-<h2>Description</h2>
-<p>Set or query channel or user modes. With no arguments, queries your
-own user modes. If the first argument starts with <code>+</code> or <code>-</code>, applies
-the mode change to the current channel. Otherwise, the first argument
-is treated as the target.</p>
-<h2>Examples</h2>
-<pre><code>/mode
-/mode +i
-/mode #linux +o friend
-/mode +nt
-/mode #linux +b *!*@bad.host
-</code></pre>
-<h2>See Also</h2>
-<p>/op, /deop, /voice, /ban</p>
-</div>
-<div class="command-entry" data-command="stats" data-category="Info">
-<h1>/stats</h1>
-<h2>Syntax</h2>
-<pre><code>/stats [type] [server]
-</code></pre>
-<h2>Description</h2>
-<p>Request statistics from the IRC server. Common stat types include:</p>
-<ul>
-<li><code>u</code> — server uptime</li>
-<li><code>m</code> — command usage counts</li>
-<li><code>o</code> — configured operators</li>
-<li><code>l</code> — connection information</li>
-</ul>
-<p>If no type is given, the server may return a summary or help text.</p>
-<h2>Examples</h2>
-<pre><code>/stats
-/stats u
-/stats o irc.libera.chat
-</code></pre>
-<h2>See Also</h2>
-<p>/quote</p>
 </div>
 <div class="command-entry" data-command="time" data-category="Info">
 <h1>/time</h1>
@@ -980,14 +1453,12 @@ channels, server, and account status.</p>
 <div class="command-entry" data-command="whowas" data-category="Info">
 <h1>/whowas</h1>
 <h2>Syntax</h2>
-<pre><code>/whowas &lt;nick&gt; [count]
+<pre><code>/whowas &lt;nick&gt;
 </code></pre>
 <h2>Description</h2>
 <p>Query the server for historical information about a nick that is no longer connected. Shows the last known username, hostname, and real name.</p>
-<p>Optionally specify a count to limit the number of results returned.</p>
 <h2>Examples</h2>
 <pre><code>/whowas oldnick
-/whowas user 5
 </code></pre>
 <h2>See Also</h2>
 <p>/whois, /who</p>
@@ -1005,141 +1476,6 @@ channels, server, and account status.</p>
 </code></pre>
 <h2>See Also</h2>
 <p>/whois, /nick</p>
-</div>
-<h2 id="cat-logging">Logging</h2>
-<div class="command-entry" data-command="log" data-category="Logging">
-<h1>/log</h1>
-<h2>Syntax</h2>
-<pre><code>/log [status|search] [query]
-</code></pre>
-<h2>Description</h2>
-<p>Manage persistent chat logs. Messages are stored in a local SQLite database
-at <code>~/.repartee/logs/messages.db</code> with WAL mode for concurrent access.</p>
-<p>Only messages that reach the UI are logged — messages filtered by <code>/ignore</code>,
-antiflood, or script <code>stop()</code> propagation are never stored.</p>
-<h2>Subcommands</h2>
-<h3>status</h3>
-<p>Show logging status including message count, database size, and encryption mode.</p>
-<pre><code>/log status
-</code></pre>
-<p>This is the default when no subcommand is given.</p>
-<h3>search</h3>
-<p>Full-text search across logged messages (plain text mode only).</p>
-<pre><code>/log search &lt;query&gt;
-</code></pre>
-<p>Searches within the current buffer&#39;s network and channel context. Results
-show the 20 most recent matches with timestamps.</p>
-<p>Search is not available in encrypted mode since ciphertext cannot be indexed.</p>
-<h2>Configuration</h2>
-<pre><code class="language-toml">[logging]
-enabled = true                 # enable/disable logging
-encrypt = false                # AES-256-GCM encryption (disables search)
-retention_days = 0             # 0 = keep forever
-event_retention_hours = 72     # auto-prune events after 72h (0 = keep forever)
-exclude_types = []             # filter: &quot;message&quot;, &quot;action&quot;, &quot;notice&quot;, &quot;ctcp&quot;, &quot;event&quot;
-</code></pre>
-<h3>Encryption</h3>
-<p>When <code>encrypt = true</code>, message text is encrypted with AES-256-GCM using a
-256-bit key auto-generated in <code>~/.repartee/.env</code>. No password is required —
-same trust model as irssi logs or SSH keys.</p>
-<p>Only the <code>text</code> column is encrypted. Network, buffer, nick, timestamp, and
-type remain queryable for the future web frontend.</p>
-<h3>Retention</h3>
-<p>Set <code>retention_days</code> to automatically purge old messages on startup.
-<code>0</code> means keep forever.</p>
-<h3>Event retention</h3>
-<p><code>event_retention_hours</code> controls how long event messages (join/part/quit/nick/kick/mode)
-are kept. Defaults to 72 hours. Pruning runs on startup and every hour in the background.
-Only event-type rows are affected — chat messages are never touched.</p>
-<pre><code>/set logging.event_retention_hours 72    # default
-/set logging.event_retention_hours 0     # keep forever
-</code></pre>
-<h3>Excluding Types</h3>
-<p>Filter specific message types from logging:</p>
-<pre><code class="language-toml">[logging]
-exclude_types = [&quot;event&quot;]  # skip join/part/quit/nick events
-</code></pre>
-<p>This is especially important if you&#39;re on many channels. A single QUIT or NICK
-change fans out to every shared channel — on 70 channels, one quit becomes 35+
-log rows. Adding <code>&quot;event&quot;</code> to <code>exclude_types</code> prevents this bloat.</p>
-<h2>Examples</h2>
-<pre><code>/log
-/log status
-/log search ssl certificate
-</code></pre>
-<h2>Read-only Browser</h2>
-<p>From the shell, use <code>repartee l</code> or <code>repartee logs</code> to open the stored history
-without connecting to IRC. In log browser mode, <code>/search &lt;query&gt;</code> searches the
-read-only database, <code>Q</code> and <code>/quit</code> exit, and scrolling up pages older messages.</p>
-<h2>See Also</h2>
-<p>/set, /ignore</p>
-</div>
-<h2 id="cat-media">Media</h2>
-<div class="command-entry" data-command="image" data-category="Media">
-<h1>/image</h1>
-<h2>Syntax</h2>
-<pre><code>/image [stats|clear|cleanup|debug]
-</code></pre>
-<h2>Description</h2>
-<p>Manage the image preview cache. Without arguments, shows current status.</p>
-<p>All image preview settings are persistent via <code>/set</code>:</p>
-<pre><code>/set image_preview.enabled true|false
-/set image_preview.protocol auto|kitty|iterm2|sixel|symbols
-/set image_preview.max_width 0
-/set image_preview.cache_max_mb 100
-</code></pre>
-<h2>Subcommands</h2>
-<h3>stats</h3>
-<p>Show cache file count and disk usage.</p>
-<pre><code>/image stats
-</code></pre>
-<h3>clear</h3>
-<p>Delete all cached images.</p>
-<pre><code>/image clear
-</code></pre>
-<h3>cleanup</h3>
-<p>Remove cached images that exceed the configured size or age limits
-(<code>image_preview.cache_max_mb</code> and <code>image_preview.cache_max_days</code>).
-Reports the number of files removed and disk space freed.</p>
-<pre><code>/image cleanup
-</code></pre>
-<h3>debug</h3>
-<p>Show detailed image preview diagnostics including detected protocol,
-terminal capabilities, font size, environment variables, and tmux
-passthrough status.</p>
-<pre><code>/image debug
-</code></pre>
-<h2>Examples</h2>
-<pre><code>/image
-/image stats
-/image clear
-/image cleanup
-/image debug
-/set image_preview.enabled false
-/set image_preview.protocol kitty
-</code></pre>
-<h2>See Also</h2>
-<p>/preview, /set</p>
-</div>
-<div class="command-entry" data-command="preview" data-category="Media">
-<h1>/preview</h1>
-<h2>Syntax</h2>
-<pre><code>/preview &lt;url&gt;
-</code></pre>
-<h2>Description</h2>
-<p>Fetches an image URL and displays it as a popup overlay in the terminal.
-Supports direct image links (jpg, png, gif, webp) and pages with og:image
-metadata (imgur, imgbb, etc.).</p>
-<p>The display protocol is auto-detected based on your terminal:
-kitty, iTerm2, sixel, or Unicode half-block fallback.
-Works through tmux with DCS passthrough.</p>
-<p>Press any key or click to dismiss the preview.</p>
-<h2>Examples</h2>
-<pre><code>/preview https://i.imgur.com/abc123.jpg
-/preview https://imgur.com/gallery/xyz
-</code></pre>
-<h2>See Also</h2>
-<p>/image</p>
 </div>
 <h2 id="cat-messaging">Messaging</h2>
 <div class="command-entry" data-command="away" data-category="Messaging">
@@ -1234,269 +1570,62 @@ it is sent immediately. The query buffer is created and switched to.</p>
 <h2>See Also</h2>
 <p>/msg, /close</p>
 </div>
-<div class="command-entry" data-command="wallops" data-category="Messaging">
-<h1>/wallops</h1>
-<h2>Syntax</h2>
-<pre><code>/wallops &lt;message&gt;
-</code></pre>
-<h2>Description</h2>
-<p>Send a message to all connected IRC operators. This is an operator-only
-command typically used for server-wide announcements among staff.</p>
-<h2>Examples</h2>
-<pre><code>/wallops Server maintenance in 10 minutes
-/wallops New oper guidelines posted on the wiki
-</code></pre>
-<h2>See Also</h2>
-<p>/oper, /quote</p>
-</div>
-<h2 id="cat-moderation">Moderation</h2>
-<div class="command-entry" data-command="ban" data-category="Moderation">
-<h1>/ban</h1>
-<h2>Syntax</h2>
-<pre><code>/ban [mask]
-/ban -a &lt;account&gt;
-</code></pre>
-<h2>Description</h2>
-<p>Ban a user or hostmask from the current channel.</p>
-<p>With no arguments, requests the ban list from the server and displays it
-as a numbered list. These numbers can be used with <code>/unban</code> to remove
-entries by index.</p>
-<p>With a mask argument, sets mode <code>+b</code> on the channel. If the argument
-contains <code>!</code> or <code>@</code>, it is used as a literal hostmask. Otherwise it is
-sent as-is (the server typically treats a plain nick as <code>nick!*@*</code>).</p>
-<p>The <code>-a</code> flag creates an account extban (<code>$a:account</code>) if the server
-supports EXTBAN with the account type.</p>
-<h2>Examples</h2>
-<pre><code>/ban                        Show numbered ban list
-/ban *!*@bad.host.com       Ban a hostmask
-/ban *!*ident@*.isp.net     Ban by ident and host pattern
-/ban -a troll               Account extban ($a:troll)
-</code></pre>
-<h2>See Also</h2>
-<p>/unban, /kick, /kb, /mode</p>
-</div>
-<div class="command-entry" data-command="deop" data-category="Moderation">
-<h1>/deop</h1>
-<h2>Syntax</h2>
-<pre><code>/deop &lt;nick&gt; [nick2 ...]
-</code></pre>
-<h2>Description</h2>
-<p>Remove channel operator status (-o) from one or more users in the current
-channel. You must be a channel operator to use this command.</p>
-<h2>Examples</h2>
-<pre><code>/deop troublemaker
-/deop user1 user2
-</code></pre>
-<h2>See Also</h2>
-<p>/op, /devoice, /mode</p>
-</div>
-<div class="command-entry" data-command="devoice" data-category="Moderation">
-<h1>/devoice</h1>
-<h2>Syntax</h2>
-<pre><code>/devoice &lt;nick&gt; [nick2 ...]
-</code></pre>
-<h2>Description</h2>
-<p>Remove voice status (-v) from one or more users in the current channel.
-You must be a channel operator to use this command.</p>
-<h2>Examples</h2>
-<pre><code>/devoice user1
-/devoice user1 user2
-</code></pre>
-<h2>See Also</h2>
-<p>/voice, /deop, /mode</p>
-</div>
-<div class="command-entry" data-command="flood" data-category="Moderation">
-<h1>/flood</h1>
-<h2>Syntax</h2>
-<pre><code>/flood
-/flood on
-/flood off
-/flood add &lt;nick|mask&gt;
-/flood remove &lt;number|mask&gt;
-</code></pre>
-<h2>Description</h2>
-<p>Manage local flood protection and <code>PRIVMSG</code> exemptions. Without
-arguments, lists the current status and exemption rules.</p>
-<p>Exemptions use the same wildcard matching as <code>/ignore</code>. A bare nick
-pattern matches the nick only. A pattern containing <code>!</code> matches the
-full <code>nick!user@host</code> mask.</p>
-<p>Exemptions only bypass local incoming <code>PRIVMSG</code> flood checks. They do
-not affect <code>/ignore</code>, nick-change flood suppression, or the IRC
-crate&#39;s outgoing send throttle.</p>
-<h2>Examples</h2>
-<pre><code>/flood
-/flood add trustednick
-/flood add *!*@trusted.host
-/flood remove 1
-/flood off
-</code></pre>
-<h2>See Also</h2>
-<p>/ignore, /set</p>
-</div>
-<div class="command-entry" data-command="ignore" data-category="Moderation">
-<h1>/ignore</h1>
-<h2>Syntax</h2>
-<pre><code>/ignore [mask] [levels...] [-channels #a,#b]
-</code></pre>
-<h2>Description</h2>
-<p>Add an ignore rule to suppress messages and events from matching
-users. Without arguments, lists current ignore rules.</p>
-<p>A bare nick pattern (e.g., <code>troll</code>) matches the nick only.
-A pattern containing <code>!</code> (e.g., <code>*!*@bad.host</code>) matches the
-full <code>nick!user@host</code> mask with wildcard support (<code>*</code>, <code>?</code>).</p>
-<p>Use <code>-channels</code> to restrict the ignore to specific channels
-(comma-separated). Without it, the ignore applies everywhere.</p>
-<h2>Levels</h2>
-<pre><code>MSGS      Private messages
-PUBLIC    Channel messages
-NOTICES   Notices
-ACTIONS   CTCP ACTIONs (/me)
-JOINS     Join events
-PARTS     Part events
-QUITS     Quit events
-NICKS     Nick change events
-KICKS     Kick events
-CTCPS     CTCP requests and responses
-ALL       All of the above
-</code></pre>
-<p>If no levels are specified, ALL is assumed.</p>
-<h2>Examples</h2>
-<pre><code>/ignore
-/ignore troll
-/ignore *!*@bad.host.com
-/ignore spammer PUBLIC NOTICES
-/ignore troll ALL -channels #chat,#help
-</code></pre>
-<h2>See Also</h2>
-<p>/unignore</p>
-</div>
-<div class="command-entry" data-command="kb" data-category="Moderation">
-<h1>/kb</h1>
-<h2>Syntax</h2>
-<pre><code>/kb &lt;nick&gt; [reason]
-</code></pre>
-<h2>Description</h2>
-<p>Kick and ban a user from the current channel. Looks up the user&#39;s ident
-and host from cached WHOX data to create a proper <code>*!*ident@host</code> ban
-mask, then kicks with the given reason.</p>
-<p>Falls back to <code>nick!*@*</code> if the user&#39;s ident and host are not available
-(e.g. the server does not support WHOX or userhost-in-names).</p>
-<p>The reason defaults to the nick if not provided.</p>
-<h2>Examples</h2>
-<pre><code>/kb troll
-/kb spammer Enough is enough
-</code></pre>
-<h2>See Also</h2>
-<p>/kick, /ban, /unban, /mode</p>
-</div>
-<div class="command-entry" data-command="kick" data-category="Moderation">
-<h1>/kick</h1>
-<h2>Syntax</h2>
-<pre><code>/kick &lt;nick&gt; [reason]
-</code></pre>
-<h2>Aliases</h2>
-<pre><code>/k
-</code></pre>
-<h2>Description</h2>
-<p>Kick a user from the current channel. If no reason is given, the
-user&#39;s nick is used as the reason. You must be a channel operator
-to use this command.</p>
-<h2>Examples</h2>
-<pre><code>/kick troll
-/kick spammer Stop spamming
-/k troll Get out
-</code></pre>
-<h2>See Also</h2>
-<p>/ban, /kb, /mode</p>
-</div>
-<div class="command-entry" data-command="kill" data-category="Moderation">
-<h1>/kill</h1>
-<h2>Syntax</h2>
-<pre><code>/kill &lt;nick&gt; [reason]
-</code></pre>
-<h2>Description</h2>
-<p>Forcefully disconnect a user from the IRC network. This is an operator-only
-command. If no reason is given, the target&#39;s nick is used as the reason.</p>
-<h2>Examples</h2>
-<pre><code>/kill spammer Spamming is not allowed
-/kill baduser
-</code></pre>
-<h2>See Also</h2>
-<p>/oper, /kick, /ban</p>
-</div>
-<div class="command-entry" data-command="op" data-category="Moderation">
-<h1>/op</h1>
-<h2>Syntax</h2>
-<pre><code>/op &lt;nick&gt; [nick2 ...]
-</code></pre>
-<h2>Description</h2>
-<p>Give channel operator status (+o) to one or more users in the current channel.
-You must be a channel operator to use this command.</p>
-<h2>Examples</h2>
-<pre><code>/op friend
-/op user1 user2 user3
-</code></pre>
-<h2>See Also</h2>
-<p>/deop, /voice, /mode</p>
-</div>
-<div class="command-entry" data-command="unban" data-category="Moderation">
-<h1>/unban</h1>
-<h2>Syntax</h2>
-<pre><code>/unban &lt;number|mask|wildcard&gt; [...]
-</code></pre>
-<h2>Description</h2>
-<p>Remove one or more bans from the current channel. Accepts numeric
-references (from the numbered list shown by <code>/ban</code>), literal masks,
-and wildcard patterns that match against stored bans.</p>
-<p>Use <code>/ban</code> with no arguments first to display the numbered ban list,
-then <code>/unban 1 3 5</code> to remove entries by their index.</p>
-<p>Wildcard patterns (<code>*</code> and <code>?</code>) are matched against the stored ban list.
-Use <code>/unban *</code> to remove all bans from the channel.</p>
-<p>Multiple arguments can be given to remove several bans at once.</p>
-<h2>Examples</h2>
-<pre><code>/unban *                     Remove all bans
-/unban 1                     Remove first entry from ban list
-/unban 2 4 7                 Remove multiple entries by index
-/unban *!*@*.spam.host       Remove all bans matching pattern
-/unban *!*@good.host.com     Remove by literal mask
-/unban 1 *!*@other.net       Mix numeric and wildcard
-</code></pre>
-<h2>See Also</h2>
-<p>/ban, /kick, /kb, /mode</p>
-</div>
-<div class="command-entry" data-command="unignore" data-category="Moderation">
-<h1>/unignore</h1>
-<h2>Syntax</h2>
-<pre><code>/unignore &lt;number|mask&gt;
-</code></pre>
-<h2>Description</h2>
-<p>Remove an ignore rule by its number (from <code>/ignore</code> list) or
-by the exact mask pattern.</p>
-<h2>Examples</h2>
-<pre><code>/unignore 1
-/unignore troll
-/unignore *!*@bad.host.com
-</code></pre>
-<h2>See Also</h2>
-<p>/ignore</p>
-</div>
-<div class="command-entry" data-command="voice" data-category="Moderation">
-<h1>/voice</h1>
-<h2>Syntax</h2>
-<pre><code>/voice &lt;nick&gt; [nick2 ...]
-</code></pre>
-<h2>Description</h2>
-<p>Give voice status (+v) to one or more users in the current channel.
-Voiced users can speak in moderated (+m) channels. You must be a
-channel operator to use this command.</p>
-<h2>Examples</h2>
-<pre><code>/voice user1
-/voice user1 user2
-</code></pre>
-<h2>See Also</h2>
-<p>/devoice, /op, /mode</p>
-</div>
 <h2 id="cat-other">Other</h2>
+<div class="command-entry" data-command="clear" data-category="Other">
+<h1>/clear</h1>
+<h2>Syntax</h2>
+<pre><code>/clear
+</code></pre>
+<h2>Description</h2>
+<p>Clears all messages from the current buffer&#39;s display. This is a visual-only
+operation — chat logs in the database are not affected. Messages remain
+searchable via <code>/log search</code>.</p>
+<p>Works on any buffer type: channels, queries, and server buffers.</p>
+<h2>Examples</h2>
+<pre><code>/clear
+</code></pre>
+<h2>See Also</h2>
+<p>/close, /log</p>
+</div>
+<div class="command-entry" data-command="close" data-category="Other">
+<h1>/close</h1>
+<h2>Syntax</h2>
+<pre><code>/close [reason]
+/close &lt;number&gt; [reason]
+/close &lt;from&gt;-&lt;to&gt; [reason]
+/close -YES ...
+</code></pre>
+<h2>Description</h2>
+<p>Close the active window, a window by its sidebar number, or a whole range
+of windows at once. Channels are parted with an optional reason; queries,
+DCC chats and log windows just close.</p>
+<p>The numbers are the ones printed next to each name in the buffer list, so
+<code>/wc 22-35</code> closes exactly what you see as 22 through 35, inclusive. A
+range that runs past the last window closes what exists rather than
+failing, which makes <code>/wc 20-999</code> a convenient &quot;everything from 20 on&quot;.</p>
+<p>Mentions is a protected window: closing it needs <code>-YES</code>. It only goes away
+for the current session — <code>display.mentions_buffer</code> stays on, so <code>/mentions</code>
+or the next restart brings it straight back.</p>
+<p>Server windows cannot be closed while connected; <code>/disconnect</code> first.
+Closing a disconnected server window drops the whole network along with all
+its windows, so a <em>range</em> refuses to touch server windows at all, and <code>-YES</code>
+does not override that. Close them one at a time instead.</p>
+<p>Anything that is not a number or a range is treated as the part reason, so
+the old <code>/wc going to bed</code> still works. A malformed range such as <code>22-</code> or
+<code>35-22</code> is reported as an error rather than quietly becoming a reason.</p>
+<h2>Examples</h2>
+<pre><code>/close
+/close going to bed
+/wc 22
+/wc 22 see you tomorrow
+/wc 22-35
+/wc 3-40 spring cleaning
+/wc -YES
+/wc 1 -YES
+</code></pre>
+<h2>See Also</h2>
+<p>/part, /mentions, /disconnect, /quit</p>
+</div>
 <div class="command-entry" data-command="e2e" data-category="Other">
 <h1>/e2e</h1>
 <h2>Syntax</h2>
@@ -1560,9 +1689,30 @@ channel operator to use this command.</p>
 <pre><code>/e2e verify &lt;nick&gt;
 </code></pre>
 <h3>reverify</h3>
-<p>Accept a changed fingerprint after manual verification.</p>
-<pre><code>/e2e reverify &lt;nick&gt;
+<p>Accept a peer&#39;s changed state after manual verification — either a new
+identity key, or a known key that has re-appeared under a different
+<code>ident@host</code>.</p>
+<pre><code>/e2e reverify &lt;nick|handle&gt; [fingerprint]
 </code></pre>
+<p>The warning prints the handle to pass, so the argument can be a full
+<code>ident@host</code> as well as a nick. Accepting a handle change keeps the
+existing fingerprint and trust and re-binds them to the new handle;
+accepting a fingerprint change replaces the key.</p>
+<p>Reverify acts on a warning repartee is currently holding. If the warning
+was raised in an earlier session, run <code>/e2e handshake &lt;nick&gt;</code> first to
+raise it again.</p>
+<p>If more than one unresolved identity change is waiting on the peer you
+named, reverify refuses and lists them instead of picking one — it cannot
+tell which fingerprint you compared. Nothing is changed and no warning is
+discarded.</p>
+<p>Resolve it by passing the fingerprint of the key you verified, which is
+what each line of the list starts with:</p>
+<pre><code>/e2e reverify ~bob@b.host c37c65c773314a48
+</code></pre>
+<p>Any unique prefix works, and case does not matter. Accepting one key
+settles the contest at that <code>ident@host</code>: the other claims are dropped,
+and their peers can re-handshake to raise a fresh warning. A fingerprint
+that matches nothing changes nothing.</p>
 <h3>rotate</h3>
 <p>Schedule outgoing key rotation.</p>
 <pre><code>/e2e rotate
@@ -1590,6 +1740,141 @@ channel operator to use this command.</p>
 /e2e forget -all k2
 /e2e forget -all ~k@f7a48125c050.cloak.irc.al
 </code></pre>
+</div>
+<div class="command-entry" data-command="emote" data-category="Other">
+<h1>/emote</h1>
+<h2>Syntax</h2>
+<pre><code>/emote [name|search]
+</code></pre>
+<h2>Description</h2>
+<p>Open the built-in emote picker. With an exact Polish or English emote name,
+insert its <code>:name:</code> token at the cursor. With a partial name, list up to ten
+matching emotes in the active buffer.</p>
+<p>The command is available when <code>[emotes] enabled = true</code> and <code>render</code> is not
+<code>&quot;off&quot;</code>. Names are matched case-insensitively, with or without surrounding
+colons. The picker can also be opened with <code>Ctrl+G</code>.</p>
+<h2>Examples</h2>
+<pre><code>/emote
+/emote smile
+/emote :usmiech:
+/emote smi
+</code></pre>
+<h2>See Also</h2>
+<p>/set</p>
+</div>
+<div class="command-entry" data-command="image" data-category="Other">
+<h1>/image</h1>
+<h2>Syntax</h2>
+<pre><code>/image [stats|clear|cleanup|debug]
+</code></pre>
+<h2>Description</h2>
+<p>Manage the image preview cache. Without arguments, shows current status.</p>
+<p>All image preview settings are persistent via <code>/set</code>:</p>
+<pre><code>/set image_preview.enabled true|false
+/set image_preview.protocol auto|kitty|iterm2|sixel|symbols
+/set image_preview.max_width 0
+/set image_preview.cache_max_mb 100
+</code></pre>
+<h2>Subcommands</h2>
+<h3>stats</h3>
+<p>Show cache file count and disk usage.</p>
+<pre><code>/image stats
+</code></pre>
+<h3>clear</h3>
+<p>Delete all cached images.</p>
+<pre><code>/image clear
+</code></pre>
+<h3>cleanup</h3>
+<p>Remove cached images that exceed the configured size or age limits
+(<code>image_preview.cache_max_mb</code> and <code>image_preview.cache_max_days</code>).
+Reports the number of files removed and disk space freed.</p>
+<pre><code>/image cleanup
+</code></pre>
+<h3>debug</h3>
+<p>Show detailed image preview diagnostics including detected protocol,
+terminal capabilities, font size, environment variables, and tmux
+passthrough status.</p>
+<pre><code>/image debug
+</code></pre>
+<h2>Examples</h2>
+<pre><code>/image
+/image stats
+/image clear
+/image cleanup
+/image debug
+/set image_preview.enabled false
+/set image_preview.protocol kitty
+</code></pre>
+<h2>See Also</h2>
+<p>/preview, /set</p>
+</div>
+<div class="command-entry" data-command="kill" data-category="Other">
+<h1>/kill</h1>
+<h2>Syntax</h2>
+<pre><code>/kill &lt;nick&gt; [reason]
+</code></pre>
+<h2>Description</h2>
+<p>Forcefully disconnect a user from the IRC network. This is an operator-only
+command. If no reason is given, the target&#39;s nick is used as the reason.</p>
+<h2>Examples</h2>
+<pre><code>/kill spammer Spamming is not allowed
+/kill baduser
+</code></pre>
+<h2>See Also</h2>
+<p>/oper, /kick, /ban</p>
+</div>
+<div class="command-entry" data-command="oper" data-category="Other">
+<h1>/oper</h1>
+<h2>Syntax</h2>
+<pre><code>/oper &lt;name&gt; &lt;password&gt;
+</code></pre>
+<h2>Description</h2>
+<p>Authenticate as an IRC operator. Requires valid operator credentials
+configured on the server. Once authenticated, you gain access to
+operator commands like /kill and /wallops.</p>
+<h2>Examples</h2>
+<pre><code>/oper admin secretpass
+</code></pre>
+<h2>See Also</h2>
+<p>/kill, /wallops</p>
+</div>
+<div class="command-entry" data-command="preview" data-category="Other">
+<h1>/preview</h1>
+<h2>Syntax</h2>
+<pre><code>/preview &lt;url&gt;
+</code></pre>
+<h2>Description</h2>
+<p>Fetches an image URL and displays it as a popup overlay in the terminal.
+Supports direct image links (jpg, png, gif, webp) and pages with og:image
+metadata (imgur, imgbb, etc.).</p>
+<p>The display protocol is auto-detected based on your terminal:
+kitty, iTerm2, sixel, or Unicode half-block fallback.
+Works through tmux with DCS passthrough.</p>
+<p>Press any key or click to dismiss the preview.</p>
+<h2>Examples</h2>
+<pre><code>/preview https://i.imgur.com/abc123.jpg
+/preview https://imgur.com/gallery/xyz
+</code></pre>
+<h2>See Also</h2>
+<p>/image</p>
+</div>
+<div class="command-entry" data-command="quote" data-category="Other">
+<h1>/quote</h1>
+<h2>Syntax</h2>
+<pre><code>/quote &lt;raw command&gt;
+</code></pre>
+<h2>Description</h2>
+<p>Send a raw IRC command directly to the server. This is useful for
+commands not yet implemented, testing, or advanced protocol interaction.</p>
+<h2>Aliases</h2>
+<p>/raw</p>
+<h2>Examples</h2>
+<pre><code>/quote VERSION
+/raw LUSERS
+/quote PRIVMSG #channel :hello
+</code></pre>
+<h2>See Also</h2>
+<p>/stats</p>
 </div>
 <div class="command-entry" data-command="shell" data-category="Other">
 <h1>/shell</h1>
@@ -1637,212 +1922,568 @@ switches away from the shell.</p>
 <h2>See Also</h2>
 <p>/close</p>
 </div>
-<h2 id="cat-scripts">Scripts</h2>
-<div class="command-entry" data-command="script" data-category="Scripts">
-<h1>/script</h1>
+<div class="command-entry" data-command="shrink" data-category="Other">
+<h1>/shrink</h1>
 <h2>Syntax</h2>
-<pre><code>/script [list|load|unload|reload|autoload|template] [name]
+<pre><code>/shrink &lt;url&gt;
 </code></pre>
 <h2>Description</h2>
-<p>Manage user scripts. Scripts are Lua 5.4 files in <code>~/.repartee/scripts/</code>
-that extend Repartee with custom commands, event hooks, filters, and automation.</p>
-<p>Scripts run in a sandboxed Lua environment — <code>os</code>, <code>io</code>, <code>loadfile</code>, <code>dofile</code>,
-and <code>package</code> are removed. Each script gets its own isolated environment.</p>
-<h2>Subcommands</h2>
-<h3>list</h3>
-<p>Show currently loaded scripts with version and description.</p>
-<pre><code>/script list
+<p>Send a single URL to the configured shrink service and print the
+shortened form into the current buffer as a local event line.</p>
+<p>Repartee can also shorten URLs automatically as you type them
+(<code>shrink.outgoing_enabled</code>) and when others post long URLs you
+receive (<code>shrink.incoming_enabled</code>). <code>/shrink</code> is the manual escape
+hatch for the one-off case, or when you want a copy-pasteable short
+URL without sending anything to a channel.</p>
+<p>URLs hit the in-memory cache first, so calling <code>/shrink</code> on a URL
+that was already shortened in this session returns instantly with
+<code>(cached)</code> appended.</p>
+<p>The API key is read from <code>.env</code> (<code>SHRINK_API_KEY=…</code>) — see
+<code>SHRINK_API.md</code> for the API spec. If the key is missing or
+<code>shrink.enabled = false</code>, <code>/shrink</code> prints an error instead of
+calling the API.</p>
+<h2>Examples</h2>
+<pre><code>/shrink https://example.com/very/long/path/to/article-2026-05-24
+/shrink https://x.com/foo/status/1234567890
 </code></pre>
-<p>This is the default when no subcommand is given.</p>
-<h3>load</h3>
-<p>Load a script by name.</p>
-<pre><code>/script load &lt;name&gt;
+<h2>Configuration</h2>
+<pre><code>/set shrink.enabled                true
+/set shrink.api_url                https://shr.al
+/set shrink.outgoing_enabled       true
+/set shrink.incoming_enabled       true
+/set shrink.min_url_length         50      (≥ 25)
+/set shrink.outgoing_timeout_ms    2000
+/set shrink.incoming_timeout_ms    2000
+/set shrink.cache_max_entries      500
 </code></pre>
-<p>Looks for <code>~/.repartee/scripts/&lt;name&gt;.lua</code>.</p>
-<h3>unload</h3>
-<p>Unload a script. All event handlers, commands, and timers registered by
-the script are automatically cleaned up. If the script returned a cleanup
-function from <code>setup()</code>, it is called.</p>
-<pre><code>/script unload &lt;name&gt;
-</code></pre>
-<h3>reload</h3>
-<p>Unload and reload a script.</p>
-<pre><code>/script reload &lt;name&gt;
-</code></pre>
-<h3>autoload</h3>
-<p>Show or manage scripts that load automatically on startup.</p>
-<pre><code>/script autoload
-</code></pre>
-<h3>template</h3>
-<p>Create a starter script file with the standard boilerplate.</p>
-<pre><code>/script template
-</code></pre>
-<h2>Autoloading</h2>
-<p>All <code>.lua</code> files in <code>~/.repartee/scripts/</code> are loaded automatically on startup.</p>
-<p>You can also explicitly list scripts in <code>config.toml</code>:</p>
-<pre><code class="language-toml">[scripts]
-autoload = [&quot;auto-away&quot;, &quot;spam-filter&quot;]
-debug = false
-</code></pre>
-<h2>Writing Scripts</h2>
-<p>Scripts are <code>.lua</code> files with a <code>meta</code> table and a <code>setup</code> function:</p>
-<pre><code class="language-lua">meta = {
-    name = &quot;my-script&quot;,
-    version = &quot;1.0&quot;,
-    description = &quot;What it does&quot;,
-}
-
-function setup(api)
-    -- Register event handlers
-    api.on(&quot;irc.privmsg&quot;, function(ev)
-        -- handle message
-    end)
-
-    -- Register custom commands
-    api.command(&quot;mycommand&quot;, {
-        handler = function(args, conn_id) --[[ ... ]] end,
-        description = &quot;Does something&quot;,
-        usage = &quot;/mycommand &lt;arg&gt;&quot;,
-    })
-
-    -- Optional: return cleanup function
-    return function()
-        api.log(&quot;my-script unloaded&quot;)
-    end
-end
-</code></pre>
-<h3>Available Events</h3>
-<p><strong>IRC events:</strong> <code>irc.privmsg</code>, <code>irc.action</code>, <code>irc.notice</code>, <code>irc.join</code>, <code>irc.part</code>,
-<code>irc.quit</code>, <code>irc.kick</code>, <code>irc.nick</code>, <code>irc.topic</code>, <code>irc.mode</code>, <code>irc.invite</code>,
-<code>irc.ctcp_request</code>, <code>irc.ctcp_response</code>, <code>irc.wallops</code></p>
-<p><strong>Lifecycle events:</strong> <code>command_input</code>, <code>connected</code>, <code>disconnected</code></p>
-<h3>Event Priority</h3>
-<p>Handlers run in descending priority order. Use priority constants:</p>
+<p><code>SHRINK_API_KEY</code> is loaded from <code>.env</code> only; it is never written to
+<code>config.toml</code>.</p>
+<h2>Known limitations (v1)</h2>
 <ul>
-<li><code>api.PRIORITY_HIGHEST</code> (100)</li>
-<li><code>api.PRIORITY_HIGH</code> (75)</li>
-<li><code>api.PRIORITY_NORMAL</code> (50) — default</li>
-<li><code>api.PRIORITY_LOW</code> (25)</li>
-<li><code>api.PRIORITY_LOWEST</code> (0)</li>
+<li><strong>Mentions buffer (<code>_mentions</code>)</strong> records the <strong>original</strong> URL even
+when the chat buffer shows the shortened form. The mention-buffer
+push runs synchronously inside the IRC handler before the deferred
+shrink worker substitutes the text. Look at the chat buffer for the
+shortened form; the mentions buffer is canonical for full URLs.</li>
+<li><strong>Multi-chunk outgoing messages</strong> (over ~510 bytes) fall through to
+the non-shrink path and ship with original URLs. Per-chunk
+substitution accounting is out of scope for v1; threshold of 50
+chars keeps this rare in practice.</li>
+<li><strong><code>/set shrink.{api_url,outgoing_timeout_ms,incoming_timeout_ms,cache_max_entries}</code></strong>
+changes config but the running workers captured these at startup —
+<code>/set</code> emits a <code>restart required</code> notice for these keys.</li>
+<li><strong><code>/set shrink.enabled true</code></strong> has no effect if <code>SHRINK_API_KEY</code>
+was missing at startup (no client was ever built). <code>/set</code> emits a
+diagnostic and the operator must restart with the key set in <code>.env</code>.</li>
+<li><strong>Multi-URL latency budget is per chunk, not per message.</strong> A
+message with N URLs that all miss the cache makes
+<code>ceil(N / 4)</code> sequential round-trips to the API (4 is the
+per-message concurrency cap chosen to keep shr.al rate limits
+happy). A 12-URL paste with a 2 s per-call timeout can therefore
+stall the outgoing pipeline for up to 6 s. The pipeline is
+sequential per direction, so a message typed during that stall
+falls through to the unshrunk path (visible in the buffer, but
+with original URLs).</li>
 </ul>
-<p>Return <code>true</code> from a handler to suppress the event.</p>
-<h3>Per-Script Config</h3>
-<p>Access per-script config values at runtime:</p>
-<pre><code class="language-lua">local val = api.config.get(&quot;timeout&quot;, 300)
-api.config.set(&quot;timeout&quot;, 600)
-</code></pre>
-<p>Read app-level config with dot-path notation:</p>
-<pre><code class="language-lua">local theme = api.config.app_get(&quot;general.theme&quot;)
-</code></pre>
-<h2>Examples</h2>
-<pre><code>/script list
-/script load auto-away
-/script reload auto-away
-/script unload auto-away
-/script template
-</code></pre>
 <h2>See Also</h2>
-<p>/set</p>
+<p>/set, /preview</p>
 </div>
-<h2 id="cat-server">Server</h2>
-<div class="command-entry" data-command="oper" data-category="Server">
-<h1>/oper</h1>
+<div class="command-entry" data-command="stats" data-category="Other">
+<h1>/stats</h1>
 <h2>Syntax</h2>
-<pre><code>/oper &lt;name&gt; &lt;password&gt;
+<pre><code>/stats [type] [server]
 </code></pre>
 <h2>Description</h2>
-<p>Authenticate as an IRC operator. Requires valid operator credentials
-configured on the server. Once authenticated, you gain access to
-operator commands like /kill and /wallops.</p>
-<h2>Examples</h2>
-<pre><code>/oper admin secretpass
-</code></pre>
-<h2>See Also</h2>
-<p>/kill, /wallops</p>
-</div>
-<div class="command-entry" data-command="quote" data-category="Server">
-<h1>/quote</h1>
-<h2>Syntax</h2>
-<pre><code>/quote &lt;raw command&gt;
-</code></pre>
-<h2>Description</h2>
-<p>Send a raw IRC command directly to the server. This is useful for
-commands not yet implemented, testing, or advanced protocol interaction.</p>
-<h2>Aliases</h2>
-<p>/raw</p>
-<h2>Examples</h2>
-<pre><code>/quote VERSION
-/raw LUSERS
-/quote PRIVMSG #channel :hello
-</code></pre>
-<h2>See Also</h2>
-<p>/stats</p>
-</div>
-<h2 id="cat-statusbar">Statusbar</h2>
-<div class="command-entry" data-command="items" data-category="Statusbar">
-<h1>/items</h1>
-<h2>Syntax</h2>
-<pre><code>/items [list|add|remove|move|format|separator|available|reset] [args...]
-</code></pre>
-<h2>Description</h2>
-<p>Manage the statusbar layout. Add, remove, reorder, and format statusbar items.</p>
-<h2>Subcommands</h2>
-<h3>list</h3>
-<p>Show current statusbar items with their positions.</p>
-<pre><code>/items list
-</code></pre>
-<p>This is the default when no subcommand is given.</p>
-<h3>add</h3>
-<p>Add an item to the statusbar.</p>
-<pre><code>/items add &lt;item&gt;
-</code></pre>
-<h3>remove</h3>
-<p>Remove an item from the statusbar.</p>
-<pre><code>/items remove &lt;item&gt;
-</code></pre>
-<h3>move</h3>
-<p>Move an item to a different position in the statusbar.</p>
-<pre><code>/items move &lt;item&gt; &lt;position&gt;
-</code></pre>
-<p>Position is 1-based (1 = first item).</p>
-<h3>format</h3>
-<p>Set or view the format string for a statusbar item.</p>
-<pre><code>/items format &lt;item&gt; [format_string]
-</code></pre>
-<p>Without a format string, shows the current format.</p>
-<h3>separator</h3>
-<p>Set or view the separator between statusbar items.</p>
-<pre><code>/items separator [string]
-</code></pre>
-<p>Without a string, shows the current separator.</p>
-<h3>available</h3>
-<p>List all available statusbar item types.</p>
-<pre><code>/items available
-</code></pre>
-<h3>reset</h3>
-<p>Reset statusbar to default items, formats, and separator.</p>
-<pre><code>/items reset
-</code></pre>
-<h2>Available Items</h2>
+<p>Request statistics from the IRC server. Common stat types include:</p>
 <ul>
-<li><code>time</code> — Current time</li>
-<li><code>nick_info</code> — Current nick and user modes</li>
-<li><code>channel_info</code> — Channel/buffer name and modes</li>
-<li><code>lag</code> — Server lag measurement</li>
-<li><code>active_windows</code> — Windows with unread activity</li>
+<li><code>u</code> — server uptime</li>
+<li><code>m</code> — command usage counts</li>
+<li><code>o</code> — configured operators</li>
+<li><code>l</code> — connection information</li>
 </ul>
+<p>If no type is given, the server may return a summary or help text.</p>
 <h2>Examples</h2>
-<pre><code>/items list
-/items add time
-/items remove lag
-/items move time 1
-/items format time %H:%M
-/items separator  -
-/items available
-/items reset
+<pre><code>/stats
+/stats u
+/stats o irc.libera.chat
 </code></pre>
 <h2>See Also</h2>
-<p>/set</p>
+<p>/quote</p>
+</div>
+<div class="command-entry" data-command="translate" data-category="Other">
+<h1>/translate</h1>
+<h2>Syntax</h2>
+<pre><code>/translate list
+/translate status
+/translate addin  &lt;#channel|nick&gt; [lang] [my-lang]
+/translate delin  &lt;#channel|nick&gt;
+/translate addout &lt;#channel|nick&gt; &lt;lang&gt; [my-lang]
+/translate delout &lt;#channel|nick&gt;
+</code></pre>
+<p>Alias: <code>/tr</code></p>
+<h2>Description</h2>
+<p>Turn a channel or query into one you can read — and write — in your own
+language. Incoming lines are shown already translated; outgoing messages are
+translated before they reach IRC.</p>
+<p>Translation is per buffer and per direction. <code>addin</code> translates what others
+say to you; <code>addout</code> translates what you send. They are independent, so
+reading a German channel in Polish while still writing German yourself is
+just <code>addin</code> without <code>addout</code>.</p>
+<p>Nothing happens until the master switch is on <strong>and</strong> a translator is named:</p>
+<pre><code>/set translate.enabled true
+/set translate.backend &lt;name&gt;
+</code></pre>
+<p>The switch and the translator are separate settings on purpose. <code>enabled</code>
+says the mechanism may run; <code>backend</code> says what it runs on. With
+<code>translate.backend = &quot;none&quot;</code> — the default — every line is delivered exactly
+as it arrived, however many buffers are configured, and <code>/translate status</code>
+says so.</p>
+<p>Available backends:</p>
+<table>
+<thead>
+<tr>
+<th>name</th>
+<th>what it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>none</code></td>
+<td>nothing is translated (default)</td>
+</tr>
+<tr>
+<td><code>ai</code></td>
+<td>production AI translator with ordered OpenAI-compatible providers</td>
+</tr>
+<tr>
+<td><code>stub</code></td>
+<td>test backend — <strong>reverses word order</strong>, no network, no API key</td>
+</tr>
+</tbody></table>
+<p><code>stub</code> exists only to exercise the mechanism end to end. It is never installed
+implicitly, because its output does not stay on your screen: on the outgoing
+side it is what goes to the channel, under your nick. Repartee says so loudly
+at startup when it is on. Do not leave it on for a real conversation.</p>
+<h3>AI setup</h3>
+<p>The quickest production setup uses the default OpenRouter model. Put the key
+in <code>~/.repartee/.env</code>, never in <code>config.toml</code>:</p>
+<pre><code>OPENROUTER_API=your-key
+</code></pre>
+<p>Then select the backend and restart Repartee:</p>
+<pre><code>/set translate.enabled true
+/set translate.backend ai
+</code></pre>
+<p>The AI backend is a policy, not one hard-wired vendor. It can use any
+OpenAI-compatible chat-completions endpoint and tries configured models in
+order. The built-in easy-line order starts with OpenRouter Gemma 4 31B and
+Ollama Gemma 4 31B. Lines classified as difficult start with Gemini 3.6 Flash.
+Groq GPT-OSS 120B and Groq Qwen 3.6 27B are terminal fallbacks: regardless of
+their positions inside the selected policy, Repartee tries that policy&#39;s
+available non-terminal models before either Groq model. The alternate policy
+is attempted only if the selected policy is exhausted. A model whose key is
+absent is skipped; one usable key is enough. The recognized default <code>.env</code>
+names are:</p>
+<table>
+<thead>
+<tr>
+<th>provider</th>
+<th>key</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>OpenRouter</td>
+<td><code>OPENROUTER_API</code></td>
+</tr>
+<tr>
+<td>Ollama Cloud</td>
+<td><code>OLLAMA_API</code></td>
+</tr>
+<tr>
+<td>Gemini</td>
+<td><code>GEMINI_API</code></td>
+</tr>
+<tr>
+<td>Groq</td>
+<td><code>GROQ_API_KEY</code></td>
+</tr>
+</tbody></table>
+<p>Before a provider call, Repartee filters lines that do not need translation,
+masks URLs, channel names, nicks and technical identifiers, then routes the
+remaining text to the easy or strong policy. Every answer passes a local
+quality gate. Missing or altered placeholders, refusals, explanations,
+unchanged source text, a confidently wrong target language, empty output and
+multi-line output all cause fallback to the next model. If the policy is
+exhausted, the existing untranslated/refusal behavior applies.</p>
+<p>The supplied prompt is embedded in the binary. Set
+<code>translate.ai.prompt_path</code> in <code>config.toml</code> to load a custom prompt at startup.
+The provider-independent translation seam remains outside this AI module, so
+a future Google Translate backend does not change queues, ordering, E2E rules
+or line replacement.</p>
+<h2>Languages</h2>
+<p>A buffer has a <strong>language pair</strong>, not a per-direction setting:</p>
+<ul>
+<li><code>&lt;lang&gt;</code> — the language the channel or query is written in</li>
+<li><code>translate.my_lang</code> — the language <em>you</em> read and write</li>
+</ul>
+<p>The two directions swap them:</p>
+<table>
+<thead>
+<tr>
+<th>direction</th>
+<th>from</th>
+<th>into</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>incoming</td>
+<td>the channel&#39;s <code>lang</code></td>
+<td>your <code>my_lang</code></td>
+</tr>
+<tr>
+<td>outgoing</td>
+<td>your <code>my_lang</code></td>
+<td>the channel&#39;s <code>lang</code></td>
+</tr>
+</tbody></table>
+<p>So the language you write <em>into</em> is per channel, which is what makes a German
+and a Spanish channel work at the same time. <code>/translate list</code> prints the
+arrows for each direction so you can check at a glance:</p>
+<pre><code>test/#german  in: de→pl   out: pl→de
+test/#somos   in: es→pl   out: pl→es
+</code></pre>
+<p><code>[my-lang]</code> overrides <code>translate.my_lang</code> for one buffer only — useful when
+machine translation into your own language is poor for a particular source
+and English reads better.</p>
+<p>For <strong>incoming</strong>, <code>&lt;lang&gt;</code> may be left off and the language is detected
+automatically. For <strong>outgoing</strong> it is required and <code>addout</code> refuses without
+it: there is nothing to detect which language to <em>write</em> in from, so guessing
+is the one thing that must not happen.</p>
+<p>The AI backend accepts English, German, Polish, French, Spanish and Mandarin
+Chinese. Their ISO 639-1 and ISO 639-3 codes are accepted, including regional
+forms such as <code>fr-FR</code> and <code>zh_CN</code>. Any other code is refused before conversation
+text is sent to a provider.</p>
+<h2>What you see</h2>
+<p>A translated line replaces the original in place — one line, never two:</p>
+<pre><code>11:32:33 alice&gt; albalb [blabla]
+</code></pre>
+<p>The bracketed part is the original, dimmed. Turn it off and only the
+translation is shown:</p>
+<pre><code>/set translate.show_original_in  false
+/set translate.show_original_out false
+</code></pre>
+<p>The two directions have separate switches, because wanting your own words
+echoed back is a different question from wanting everyone else&#39;s.</p>
+<p><strong>What is on screen is what is logged.</strong> Stored history keeps exactly the
+text that was displayed, brackets included, so <code>/search</code> finds both the
+translation and the original. The consequence is that changing
+<code>show_original_*</code> does not rewrite history: lines logged with brackets keep
+them.</p>
+<p>The bracketed original is dimmed in the terminal and in the browser alike. A
+line reloaded from history renders it undimmed in both: the stored text is
+flat, and the client will not guess which trailing brackets are an original —
+an ordinary message may simply end that way.</p>
+<p>On servers that echo your own messages back to you, that echo is still the
+copy you see — Repartee adds the original to it as it arrives, rather than
+printing a second line of its own. The server&#39;s copy is the one carrying the
+message&#39;s identity, and keeping it is what stops your own messages coming
+back a second time after a reconnect.</p>
+<h2>Ordering</h2>
+<p>Lines are sent for translation the instant they arrive and translate
+concurrently, but they are only <em>shown</em> in the order they arrived. A short
+line that comes back quickly will wait for the longer one in front of it, so
+an answer can never appear above its question.</p>
+<p>A line that has waited longer than <code>translate.timeout_ms</code> is shown
+untranslated rather than holding up the channel, and the queue is capped at
+<code>translate.max_queue</code> so a dead provider cannot stall a busy channel or grow
+without bound. That deadline counts from the moment the line arrived — or,
+for your own messages, from the moment you pressed Enter — not from when the
+translator was actually reached, so a busy queue cannot quietly stretch it.
+A message of yours whose translation misses the deadline is not sent; the
+text comes back as with any other refusal. The same happens to a private
+message that has been in flight so long the client can no longer be sure
+whether the person you addressed still answers to that nick — better to hand
+it back than to risk delivering it to whoever picked the nick up. Losing the connection releases that server&#39;s queued lines at
+once rather than waiting the timeout out for a server that is gone.</p>
+<p>The queue is held to <code>translate.max_queue</code> as lines arrive, not on a timer,
+so a stalled translator cannot let a busy channel build a backlog between
+checks. If the queue reaches the cap while a message of yours is still being
+translated, that message can lose the place held for it and will then appear
+below the replies that arrived meanwhile. It is still sent — a full display
+queue never eats something you typed — and the client logs a warning saying
+so.</p>
+<p><code>/translate delin</code> releases the lines it was still waiting on, shown
+untranslated. <code>/translate delout</code> releases nothing: it does not touch the
+incoming direction, and a message of yours already being translated is still
+sent when it comes back. Until it does, the next message to that same
+conversation is refused with a note rather than sent — it would otherwise
+reach the channel ahead of the one still being translated, and you would have
+no way to see that it had. Press Enter again once the earlier one lands.
+Turning off <code>translate.enabled</code>, running <code>/reload</code>, or enabling E2E on the
+conversation all behave the same way for the same reason.</p>
+<p>Closing a window — <code>/close</code>, leaving the channel, or being kicked from it —
+also shows whatever it was still waiting on, untranslated, before the window
+goes. Those lines had already reached you; the queue only decides when they
+are allowed on screen, so they are displayed and written to your log rather
+than discarded.</p>
+<p>If the person you are talking to changes nick, the settings and any lines in
+flight follow the conversation — including a message of yours that was still
+being translated, which goes to them under their new nick and never to
+whoever may have picked up the old one. That holds however many times the
+nick changes hands: each conversation that held it is tracked with the period
+it held it for, so a message you sent to the first person cannot be delivered
+to the second. If their window has closed by then,
+the message is refused and handed back rather than sent to a name that is no
+longer theirs. The saved setting still names the nick you typed, so it is
+that name a restart looks for.</p>
+<p>If they <strong>quit</strong> instead of renaming, nothing can be followed: the server
+frees the nick there and then, and the next person to ask for it gets it. A
+private message still being translated when that happens is refused and handed
+back rather than addressed to a name that may already mean somebody else.
+Sending without translation races the same reassignment by milliseconds; a
+translation makes the gap seconds wide, so the mechanism that opened it is the
+one that closes it. Text you type <em>after</em> they have gone is sent as it always
+was — that is the same gamble with or without translation, and not this
+feature&#39;s to refuse.</p>
+<p>That tracking has a horizon of <strong>five minutes</strong>. A private message whose
+translation comes back later than that is refused and handed back: the nick it
+was addressed to can no longer be shown to still mean the same person. This is
+only reachable with a <code>translate.timeout_ms</code> above five minutes, which is far
+past any sane provider budget — the default is five <em>seconds</em>. Channels are
+never affected, in any configuration: a channel name cannot change hands, so
+there is nothing to trace and nothing to doubt.</p>
+<h2>When translation does not happen</h2>
+<p>A line that was not translated is shown as its original, marked with the
+reason:</p>
+<pre><code>11:32:33 alice&gt; hola que tal [untranslated: timeout]
+</code></pre>
+<p>A translation that comes back as more than one line is refused outright. The
+translator is an outside service and its answer is about to be sent under
+your nick, so anything that could be read as a second IRC command never
+reaches the network.</p>
+<p>For the same reason, a translation carrying the CTCP byte (<code>\x01</code>) is refused.
+That byte is what tells an IRC client a message is a <em>request</em> rather than
+text — a DCC file offer, a VERSION query — so an answer containing one would
+send a request under your nick instead of a sentence, and inside a <code>/me</code> it
+would break out of the action your client wrapped round it. Any framing that
+reaches the network from a translated message is framing this client built.
+Incoming is checked too: a reply carrying it would render as a <code>/me</code> from the
+other person, putting words in their mouth.</p>
+<p>A translation <em>beginning</em> with one of the E2E wire prefixes is refused too.
+Those are recognised as protocol on every conversation, encrypted or not —
+that is how the first handshake from a peer can arrive at all — so an answer
+shaped like one would be swallowed as a handshake or fed to the decryption
+path by every Repartee that received it, your own included, instead of being
+read. Only the prefix is reserved: mentioning the protocol mid-sentence is
+ordinary conversation and passes.</p>
+<p>A translation that comes back empty is refused too — the original comes
+back to you rather than an empty line going out under your nick. One that
+comes back implausibly long is refused rather than sent:
+it would be split across the wire budget and published as a long run of
+messages under your nick. Never a guess, never a partial translation. A fluent sentence that means
+something else is the one failure a reader cannot detect, so a visible gap is
+always preferred — and the gap has to be visible, or it is just the original
+text with nothing to say it is not a translation.</p>
+<p>The one exception carries no marker, because it is not a gap: see below.</p>
+<p>For <strong>outgoing</strong> messages the rule is stricter: if translation fails, the
+message is <strong>not sent at all</strong>. Your text goes back into the input line you
+sent it from — the terminal or the browser tab that submitted it — and an
+error explains why.</p>
+<p>If you have already started typing the next message, the composer is left
+alone rather than overwritten — and since a translation takes a moment, that
+is the usual case rather than the exception. The error row always carries the
+refused text for exactly that reason, so it is recoverable either way — and it
+carries it <strong>character for character</strong> — including <code>%</code>, which the theme engine
+would otherwise read as a formatting code and swallow. A row you are meant to
+retype from has to be exactly what you typed.
+Sending the untranslated original would put something other than what you
+intended in front of the channel.</p>
+<p>If you have moved to a different conversation while it was translating, what
+comes back is re-addressed — a private message returns as
+<code>/msg &lt;nick&gt; &lt;text&gt;</code>, so pressing Enter cannot publish it to the channel you
+are now in. Where no such form exists nothing is put in the composer at all
+and the text stays in the error row, which names where it was going. That
+covers a <code>/me</code>, a conversation that has since closed, and — because <code>/msg</code>
+names a person, not a server — <strong>any</strong> move to a different network: the same
+nick there is somebody else.</p>
+<p>The local echo names whoever the message actually went out as. If you <code>/nick</code>
+while a translation is running, the message reaches the channel under your new
+name, and that is the name your own copy carries too.</p>
+<p>A connection that drops and comes back while your message is being translated
+also refuses it, rather than sending a message you typed on the old session
+into the new one.</p>
+<p>That applies to every way of not translating, not just a provider error: a
+full or dead translation queue, a message too long to translate in one piece,
+a multi-line paste, and a buffer with <code>outgoing</code> enabled but no language all
+refuse rather than sending as-is.</p>
+<p>Incoming multi-line messages are the mirror of this: they are shown intact
+and marked untranslated rather than being flattened into one request, which
+would let a translator reorder words across the line breaks. <code>/translate delout &lt;target&gt;</code> is how you
+send something untranslated on purpose.</p>
+<p>It also applies however the message was submitted. <code>/msg</code>, <code>/query &lt;nick&gt; &lt;text&gt;</code>, <code>/me</code> and messages sent by scripts go through the same gate as text
+typed in the buffer, so whether a line is translated depends on the buffer,
+never on which command you used. A <code>/me</code> is translated as its text; other
+CTCPs (<code>VERSION</code>, DCC negotiation) are protocol and pass through untouched.</p>
+<p>There is one case where your text is <strong>not</strong> put back in the composer: a long
+message is split into several lines before it goes out, and if the connection
+dies partway through, the first parts are already on the channel. Restoring
+the whole thing would invite you to press Enter and send those parts twice, so
+it stays in the error row only — which says as much.</p>
+<p>On a server with <code>echo-message</code>, your own translated message is the copy the
+server sends back, and the client holds its place in the buffer until that
+copy arrives. If something in your own setup throws that copy away — an
+<code>/ignore</code> mask broad enough to cover you, or a script that swallows the
+message — the line is gone, as you asked, and the conversation carries on
+immediately rather than pausing for a reply that is never coming.</p>
+<p>A line the translator deliberately skipped — already in the target language,
+or recognized as non-translatable chat noise — is a correct outcome, not a failure.
+It is sent and shown with no marker; marking it would cry wolf on a large
+share of ordinary traffic.</p>
+<h2>What leaves your client</h2>
+<p>Translating means sending text to an outside service. The AI backend sends a
+system prompt containing the source and target language plus the line after
+local masking. URLs, channel names, recognized technical identifiers and
+known nicks are replaced with opaque placeholders first and restored only
+after the answer passes validation.</p>
+<p>The network name, channel/query name, speaker nick and channel nick list are
+not sent as metadata. The nick list, speaker and query peer are used locally
+only to find names that must be masked. Text not recognized by the masker
+still leaves the client, so translation should be treated as disclosure of
+the conversation content to the configured provider.</p>
+<p>Nothing is sent for a channel you have not explicitly enabled, and nothing is
+sent for history — only lines arriving live, and only while the master switch
+is on.</p>
+<h2>End-to-end encrypted conversations</h2>
+<p><strong>Translation is refused on any conversation E2E might be protecting, and
+this cannot be overridden.</strong></p>
+<p>Translating means sending the text to an outside provider. For an encrypted
+conversation that would hand its plaintext to exactly the party the
+encryption exists to exclude.</p>
+<p>The refusal is enforced where each request is built, not just in
+<code>/translate addin</code>, so the order you enable things in does not matter:
+turning E2E on for a channel that already had translation enabled stops it
+from the next line — and <code>/e2e on</code> says so, rather than leaving a channel
+that silently stopped translating to read as a broken translator. When E2E
+status cannot be determined at all — an unreadable keyring, a DM whose peer
+handle has not resolved yet — the conversation is treated as encrypted and
+left untranslated.</p>
+<h2>Interaction with URL shortening</h2>
+<p>A translated line is not also URL-shortened. Sending one line through two
+outside services is worse than losing the shortening, so translation takes
+precedence on buffers where both are enabled.</p>
+<h2>Examples</h2>
+<pre><code>/set translate.enabled true
+/set translate.my_lang pl
+
+/translate addin  #german de     # read it in Polish
+/translate addout #german        # write it in German (lang already known)
+/translate addin  #somos  es     # a second channel, a different language
+/translate addout #somos  es
+/translate addin  #cn zh en      # read this one in English, not Polish
+/translate list
+/translate status
+/translate delout #german
+</code></pre>
+<h2>Configuration</h2>
+<pre><code>/set translate.enabled           false
+/set translate.backend           none
+/set translate.my_lang           en
+/set translate.show_original_in  true
+/set translate.show_original_out true
+/set translate.timeout_ms        15000
+/set translate.ai.preferred_attempt_ms 3000
+/set translate.max_in_flight     4
+/set translate.max_queue         200
+</code></pre>
+<p><code>/translate status</code> shows what is in flight, and — whether or not anything
+is, and for both directions — how lines have come back this session: how many were translated, how
+many the translator decided needed no translation, and any failures split
+into timeouts, provider refusals, and answers this client would not use.
+That split is the point: a channel sitting in its original language looks
+identical whether the translator is filtering correctly or not answering at
+all.</p>
+<p><code>translate.max_in_flight</code> caps concurrent translations. Raising it past what
+your provider actually allows makes throughput worse, not better. It takes
+effect immediately. Lowering it applies as work already in flight finishes —
+including under sustained traffic, where the reduction is applied by the next
+translations to start rather than waiting for a lull that may never come.</p>
+<p>Outgoing messages are translated one at a time <strong>per connection</strong>, so they
+reach IRC in the order you sent them without a slow request on one network
+holding up another.</p>
+<p><code>translate.ai.preferred_attempt_ms</code> is the maximum time assigned to each
+available non-terminal model before moving on. Its default is 3000 ms and it
+takes effect immediately through <code>/set</code> or <code>/reload</code>. Repartee preserves time
+inside the overall <code>translate.timeout_ms</code> deadline for configured terminal
+fallbacks. Models from the selected easy or strong policy run first, with its
+terminal models last. Only after that policy is exhausted does Repartee try the
+alternate policy, so a model intended for difficult lines does not dilute the
+normal-line budget. Keep the overall timeout large enough for the number of
+preferred providers you configured; the built-in 15000 ms default covers the
+standard policy.</p>
+<p>Per-buffer settings live under <code>[translate.buffers]</code> in <code>config.toml</code> and are
+managed with the <code>add*</code> / <code>del*</code> subcommands rather than <code>/set</code>.</p>
+<p>AI policies and models are configured directly in <code>config.toml</code>. This minimal
+example replaces the built-in policy with one OpenAI-compatible model:</p>
+<pre><code>[translate.ai]
+easy = [&quot;primary&quot;]
+strong = [&quot;primary&quot;]
+terminal = []
+preferred_attempt_ms = 3000
+prompt_path = &quot;&quot;
+
+[[translate.ai.models]]
+name = &quot;primary&quot;
+base_url = &quot;https://openrouter.ai/api/v1&quot;
+model = &quot;google/gemma-4-31b-it&quot;
+api_key_env = &quot;OPENROUTER_API&quot;
+rpm = 60
+tpm = 0
+max_retries = 2
+max_output_tokens = 256
+</code></pre>
+<p><code>api_key_env</code> names a variable in <code>~/.repartee/.env</code>. API keys loaded from
+that file are held only in memory and are never serialized into <code>config.toml</code>.
+<code>terminal</code> names models that run after regular candidates in each policy. An
+explicit empty list disables terminal routing. For compatibility, an older
+configuration without this field recognizes models using the standard
+<code>api.groq.com</code> endpoint as terminal fallbacks.
+<code>/reload</code> applies added, removed and rotated keys to an already-running AI
+backend. If no AI backend was built at startup, adding the first usable key
+still requires a restart and <code>/reload</code> reports that explicitly.
+Changing <code>translate.ai.preferred_attempt_ms</code> takes effect immediately. Any
+other <code>[translate.ai]</code> value does not hot-swap a running client.
+<code>/reload</code> immediately deactivates a backend whose endpoint, model, policy,
+prompt or rate configuration no longer matches, then reports that a restart is
+required. New conversation text is never sent through the stale configuration.
+<code>rpm</code> and <code>tpm</code> are local safety limits; zero disables that dimension. Server
+rate-limit headers and <code>Retry-After</code> are honored, <code>429</code> and transient server
+errors use bounded retries, and authentication, access and daily-quota errors
+disable that model for the rest of the session. Provider response bodies are
+streamed under a 64 KiB limit before JSON parsing. Every model named in an
+<code>easy</code> or <code>strong</code> policy must exist in <code>translate.ai.models</code>; an unknown name
+prevents the AI backend from starting and is reported as a configuration error.</p>
+<p>Enabling <code>translate.enabled</code>, or naming a <code>translate.backend</code>, at runtime when
+translation was not running at startup reports that a restart is required: the
+translation workers and the backend are built once, when the client starts.
+<code>/reload</code> says the same thing — editing <code>enabled = true</code> in <code>config.toml</code> and
+reloading cannot build a backend either, so the reload warns instead of
+reporting a plain success you would have no reason to distrust.</p>
+<p>Turning it <strong>off</strong> needs no restart, by either switch. <code>/set translate.backend none</code>, <code>/set translate.enabled false</code>, and the same edits followed by
+<code>/reload</code> all stop translation immediately: deciding your lines should stop
+leaving for a translator is not a decision that should wait.</p>
+</div>
+<div class="command-entry" data-command="wallops" data-category="Other">
+<h1>/wallops</h1>
+<h2>Syntax</h2>
+<pre><code>/wallops &lt;message&gt;
+</code></pre>
+<h2>Description</h2>
+<p>Send a message to all connected IRC operators. This is an operator-only
+command typically used for server-wide announcements among staff.</p>
+<h2>Examples</h2>
+<pre><code>/wallops Server maintenance in 10 minutes
+/wallops New oper guidelines posted on the wiki
+</code></pre>
+<h2>See Also</h2>
+<p>/oper, /quote</p>
 </div>
 <script>(function(){const i=document.getElementById('command-search'),c=document.getElementById('search-clear'),n=document.getElementById('search-count'),e=document.querySelectorAll('.command-entry'),h=document.querySelectorAll('h2[id^="cat-"]');function f(){const q=i.value.toLowerCase().trim();let v=0;e.forEach(function(x){const nm=x.getAttribute('data-command')||'',ct=x.getAttribute('data-category')||'',t=x.textContent||'',m=!q||nm.includes(q)||ct.toLowerCase().includes(q)||t.toLowerCase().includes(q);x.style.display=m?'':'none';if(m)v++});h.forEach(function(x){let s=x.nextElementSibling,ok=false;while(s&&!s.matches('h2')){if(s.classList.contains('command-entry')&&s.style.display!=='none'){ok=true;break}s=s.nextElementSibling}x.style.display=ok?'':'none'});n.textContent=q?v+' command'+(v!==1?'s':'')+' found':''}i.addEventListener('input',f);c.addEventListener('click',function(){i.value='';f();i.focus()})})();</script>
 

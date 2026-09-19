@@ -14,6 +14,7 @@ use super::helpers::add_local_event;
 use super::types::{C_CMD, C_DIM, C_ERR, C_HEADER, C_RST, C_TEXT, divider};
 use crate::app::App;
 use crate::e2e::crypto::fingerprint::{fingerprint_bip39, fingerprint_hex};
+use crate::e2e::manager::TrustChange;
 use crate::e2e::keyring::{ChannelConfig, ChannelMode, IncomingSession, TrustStatus};
 use crate::state::buffer::{Message, MessageType};
 use chrono::Utc;
@@ -51,6 +52,7 @@ fn e2e_event(app: &mut App, level: E2eEventLevel, text: &str) {
     app.state.add_local_message(
         &active_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -63,6 +65,8 @@ fn e2e_event(app: &mut App, level: E2eEventLevel, text: &str) {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -103,7 +107,12 @@ pub(crate) enum E2eSub {
     Status,
     Fingerprint,
     Verify(String),
-    Reverify(String),
+    Reverify {
+        target: String,
+        /// Hex prefix of the key being accepted, disambiguating two
+        /// changes offered at one handle.
+        fingerprint: Option<String>,
+    },
     Rotate,
     Export(Option<String>),
     Import(Option<String>),
@@ -173,16 +182,40 @@ pub(crate) fn parse_subcommand(args: &[String]) -> E2eSub {
             .map_or(E2eSub::Usage("/e2e verify <nick>"), |n| {
                 E2eSub::Verify(n.clone())
             }),
-        "reverify" => rest
-            .first()
-            .map_or(E2eSub::Usage("/e2e reverify <nick>"), |n| {
-                E2eSub::Reverify(n.clone())
-            }),
+        "reverify" => parse_reverify_subcommand(rest),
         "rotate" => E2eSub::Rotate,
         "export" => E2eSub::Export(rest.first().cloned()),
         "import" => E2eSub::Import(rest.first().cloned()),
         "help" | "?" => E2eSub::Help,
         other => E2eSub::Unknown(other.to_string()),
+    }
+}
+
+/// `/e2e reverify <nick|handle> [fingerprint]`.
+///
+/// The optional second argument is the fingerprint of the key being
+/// accepted. It is only needed when two changes are waiting at the same
+/// `ident@host`, where the handle alone cannot tell them apart.
+const REVERIFY_USAGE: &str = "/e2e reverify <nick|handle> [fingerprint]";
+
+/// Command offered when the warning a reverify would answer is no longer
+/// in memory — a handshake re-raises it.
+///
+/// Must stay a *runnable* command line. `/e2e handshake` on its own only
+/// prints its own usage, which is where this hint used to send people.
+const REVERIFY_RETRY_CMD: &str = "/e2e handshake <nick>";
+
+fn parse_reverify_subcommand(rest: &[String]) -> E2eSub {
+    match rest {
+        [target] => E2eSub::Reverify {
+            target: target.clone(),
+            fingerprint: None,
+        },
+        [target, fingerprint] => E2eSub::Reverify {
+            target: target.clone(),
+            fingerprint: Some(fingerprint.clone()),
+        },
+        _ => E2eSub::Usage(REVERIFY_USAGE),
     }
 }
 
@@ -261,7 +294,10 @@ pub(crate) fn cmd_e2e(app: &mut App, args: &[String]) {
         E2eSub::Status => e2e_status(app),
         E2eSub::Fingerprint => e2e_fingerprint(app),
         E2eSub::Verify(nick) => e2e_verify(app, &nick),
-        E2eSub::Reverify(nick) => e2e_reverify(app, &nick),
+        E2eSub::Reverify {
+            target,
+            fingerprint,
+        } => e2e_reverify(app, &target, fingerprint.as_deref()),
         E2eSub::Rotate => e2e_rotate(app),
         E2eSub::Export(path) => e2e_export(app, path.as_deref()),
         E2eSub::Import(path) => e2e_import(app, path.as_deref()),
@@ -417,6 +453,13 @@ fn warn(app: &mut App, msg: &str) {
     e2e_event(app, E2eEventLevel::Warning, msg);
 }
 
+fn push_active_e2e_status(app: &mut App) {
+    let Some(buffer_id) = app.state.active_buffer_id.clone() else {
+        return;
+    };
+    app.state.push_buffer_e2e_status(&buffer_id);
+}
+
 // ─── on / off / mode ─────────────────────────────────────────────────────────
 
 fn e2e_on(app: &mut App) {
@@ -434,7 +477,28 @@ fn e2e_on(app: &mut App) {
         err(app, &format!("/e2e on: {e}"));
         return;
     }
+    push_active_e2e_status(app);
     ok(app, &format!("enabled on {} (mode=normal)", crate::e2e::display_context(&chan)));
+    // The user just made this a conversation translation must never touch.
+    // The exclusion itself is enforced at the gate, from the next line, with
+    // no state to keep in sync — but silently: without this row both
+    // features read as "on" and the channel simply stops being translated,
+    // which looks like a broken translator rather than a decision.
+    if let Some(buffer_id) = app.state.active_buffer_id.as_deref()
+        && app.state.translate_buffers.contains_key(buffer_id)
+    {
+        warn(
+            app,
+            "this conversation was set up for translation — encryption wins, \
+             so it will no longer be translated (translating would send its \
+             plaintext to a third-party provider)",
+        );
+    }
+    // The user just made this a conversation translation must never touch.
+    // The exclusion itself is enforced at the gate, from the next line, with
+    // no state to keep in sync — but silently: without this row both
+    // features read as "on" and the channel simply stops being translated,
+    // which looks like a broken translator rather than a decision.
 }
 
 fn e2e_off(app: &mut App) {
@@ -452,6 +516,7 @@ fn e2e_off(app: &mut App) {
         err(app, &format!("/e2e off: {e}"));
         return;
     }
+    push_active_e2e_status(app);
     ok(app, &format!("disabled on {}", crate::e2e::display_context(&chan)));
 }
 
@@ -477,6 +542,7 @@ fn e2e_mode(app: &mut App, mode_str: &str) {
         err(app, &format!("/e2e mode: {e}"));
         return;
     }
+    push_active_e2e_status(app);
     ok(
         app,
         &format!(
@@ -707,7 +773,7 @@ fn e2e_forget(app: &mut App, target: &str, all: bool) {
     };
     let conn_id = active_buffer.connection_id.clone();
     let buffer_id = active_buffer.id.clone();
-    if target.contains('@') {
+    if looks_like_handle(target) {
         perform_e2e_forget(app, buffer_id, target, target, channel.as_deref(), all);
         return;
     }
@@ -1114,23 +1180,46 @@ fn format_verify_block(
     ]
 }
 
-fn e2e_reverify(app: &mut App, nick: &str) {
-    let Some(chan) = current_e2e_context(app) else {
-        err(app, "/e2e reverify: no active channel or known query peer");
-        return;
-    };
-    // Strict handle resolution — see `require_handle_for_nick` for the
-    // rationale (no raw-nick fallback, themed-error on miss).
-    let Some(handle) = require_handle_for_nick(app, &chan, nick) else {
-        return;
+fn e2e_reverify(app: &mut App, target: &str, fingerprint: Option<&str>) {
+    // A handle is taken verbatim: it is exactly what the trust-change
+    // notices tell the user to type, and unlike a nick it needs no channel
+    // context to resolve — so `/e2e reverify <handle>` also works from a
+    // buffer where the peer isn't present.
+    let handle = if looks_like_handle(target) {
+        target.to_string()
+    } else {
+        let Some(chan) = current_e2e_context(app) else {
+            err(app, "/e2e reverify: no active channel or known query peer");
+            return;
+        };
+        // Strict handle resolution — see `require_handle_for_nick` for the
+        // rationale (no raw-nick fallback, themed-error on miss).
+        let Some(handle) = require_handle_for_nick(app, &chan, target) else {
+            return;
+        };
+        handle
     };
     let Some(mgr) = require_mgr(app) else { return };
-    match mgr.reverify_peer(&handle) {
+    let outcome = mgr.reverify_peer(&handle, fingerprint);
+    report_reverify(app, target, &handle, fingerprint, outcome);
+}
+
+/// Render one `/e2e reverify` outcome. Split out of [`e2e_reverify`] because
+/// the command now has seven distinct results and the resolution logic was
+/// getting lost among them.
+fn report_reverify(
+    app: &mut App,
+    target: &str,
+    handle: &str,
+    fingerprint: Option<&str>,
+    outcome: crate::e2e::error::Result<crate::e2e::manager::ReverifyOutcome>,
+) {
+    match outcome {
         Ok(crate::e2e::manager::ReverifyOutcome::Applied { old_fp, new_fp }) => {
             ok(
                 app,
                 &format!(
-                    "reverified {nick}: old fp={} → new fp={} — installed new key",
+                    "reverified {target}: old fp={} → new fp={} — installed new key",
                     fingerprint_hex(&old_fp),
                     fingerprint_hex(&new_fp),
                 ),
@@ -1140,15 +1229,86 @@ fn e2e_reverify(app: &mut App, nick: &str) {
             ok(
                 app,
                 &format!(
-                    "reverified {nick}: purged {deleted} stale row(s); \
+                    "reverified {target}: purged {deleted} stale row(s); \
                      re-handshake to TOFU-pin the new key"
                 ),
             );
         }
-        Ok(crate::e2e::manager::ReverifyOutcome::NotFound) => {
+        Ok(crate::e2e::manager::ReverifyOutcome::Rebound {
+            fingerprint,
+            old_handle,
+            new_handle,
+        }) => {
+            ok(
+                app,
+                &format!(
+                    "reverified {target}: fp={} re-bound {old_handle} → {new_handle} — \
+                     re-handshake to open a session under the new handle",
+                    fingerprint_hex(&fingerprint),
+                ),
+            );
+        }
+        Ok(crate::e2e::manager::ReverifyOutcome::Ambiguous { candidates }) => {
+            // Refuse rather than guess: the user compared ONE fingerprint
+            // out of band, and we cannot tell which. Nothing was applied
+            // and nothing was consumed, so the choice survives.
             err(
                 app,
-                &format!("no keyring state for {nick} ({handle}) to reverify"),
+                &format!(
+                    "{target} has {} unresolved identity changes — \
+                     re-run naming the fingerprint you verified:",
+                    candidates.len()
+                ),
+            );
+            list_trust_candidates(app, &candidates);
+        }
+        Ok(crate::e2e::manager::ReverifyOutcome::NoSuchCandidate { candidates }) => {
+            let named = fingerprint.unwrap_or_default();
+            if candidates.is_empty() {
+                err(
+                    app,
+                    &format!("no unresolved identity change for {target} matches fp={named}"),
+                );
+            } else {
+                err(
+                    app,
+                    &format!("no key matching fp={named} is waiting on {target} — did you mean:"),
+                );
+                list_trust_candidates(app, &candidates);
+            }
+        }
+        Ok(crate::e2e::manager::ReverifyOutcome::Stale { fingerprint }) => {
+            ok(
+                app,
+                &format!(
+                    "the pending change for {target} named key fp={}, which is no \
+                     longer in the keyring — discarded it; nothing else changed",
+                    fingerprint_hex(&fingerprint),
+                ),
+            );
+        }
+        Ok(crate::e2e::manager::ReverifyOutcome::NotFound) => {
+            // Naming the peer twice reads as a bug when the argument WAS
+            // the handle, which is now the documented spelling.
+            let who = if handle == target {
+                target.to_string()
+            } else {
+                format!("{target} ({handle})")
+            };
+            // `/e2e handshake` needs a nick to send the KEYREQ to, so echo
+            // the one the user gave; a handle is no use as an IRC target.
+            let retry = if looks_like_handle(target) {
+                REVERIFY_RETRY_CMD.to_string()
+            } else {
+                format!("/e2e handshake {target}")
+            };
+            err(
+                app,
+                &format!(
+                    "no keyring state for {who} to reverify — \
+                     if the warning was from a previous session, \
+                     run {retry} to raise it again first"
+                ),
             );
         }
         Err(e) => err(app, &format!("/e2e reverify: {e}")),
@@ -1250,6 +1410,7 @@ fn e2e_import(app: &mut App, path: Option<&str>) {
     let Some(mgr) = require_mgr(app) else { return };
     match crate::e2e::portable::import_from_path(mgr.keyring(), &resolved) {
         Ok(summary) => {
+            app.state.push_all_buffer_e2e_statuses();
             ok(
                 app,
                 &format!(
@@ -1292,7 +1453,10 @@ const HELP_ENTRIES: &[(&str, &str)] = &[
         "Delete channel or global peer state",
     ),
     ("verify <nick>", "Show a peer's fingerprint + SAS words"),
-    ("reverify <nick>", "Re-trust after SAS comparison"),
+    (
+        "reverify <nick|handle> [fp]",
+        "Re-trust after SAS comparison / accept a new handle",
+    ),
     ("rotate", "Schedule outgoing key rotation for this channel"),
     (
         "list [-all]",
@@ -1384,6 +1548,95 @@ fn resolve_cached_handle_by_nick(
     }
 }
 
+/// Render the candidate list for an unresolved-changes prompt, each entry
+/// followed by the command that accepts exactly that one.
+///
+/// Every entry leads with the fingerprint of the key that would be
+/// trusted: when two changes wait at one `ident@host` the handle cannot
+/// tell them apart, so the fingerprint is both the discriminator and the
+/// thing the user compared out of band. The command is spelled out per
+/// candidate rather than once as an example, because the argument that
+/// resolves a candidate is not always the handle the user just typed —
+/// one key seen moving to two destinations yields candidates that share
+/// both handle *and* fingerprint, and only the destination separates
+/// them.
+fn list_trust_candidates(app: &mut App, candidates: &[TrustChange]) {
+    for change in candidates {
+        let Some(candidate) = describe_trust_change(change) else {
+            continue;
+        };
+        add_local_event(
+            app,
+            &format!(
+                "  {C_CMD}{}{C_RST}  {C_DIM}{}{C_RST}",
+                candidate.fingerprint, candidate.detail
+            ),
+        );
+        add_local_event(
+            app,
+            &format!(
+                "    {C_DIM}accept: {C_CMD}/e2e reverify {} {}{C_RST}",
+                candidate.target, candidate.fingerprint
+            ),
+        );
+    }
+}
+
+/// One line of the disambiguation list.
+struct TrustCandidate {
+    /// Fingerprint of the key that would be trusted.
+    fingerprint: String,
+    /// The `/e2e reverify` argument that selects this candidate alone.
+    target: String,
+    /// What accepting it does.
+    detail: String,
+}
+
+fn describe_trust_change(change: &TrustChange) -> Option<TrustCandidate> {
+    match change {
+        TrustChange::HandleChanged {
+            old_handle,
+            new_handle,
+            fingerprint,
+        } => Some(TrustCandidate {
+            fingerprint: fingerprint_hex(fingerprint),
+            // The destination, not the handle being left: the same key
+            // moving to two places is one fingerprint under one old
+            // handle, so only `new_handle` picks a single candidate.
+            target: new_handle.clone(),
+            detail: format!("known key moves {old_handle} → {new_handle}"),
+        }),
+        TrustChange::FingerprintChanged {
+            handle,
+            old_fp,
+            new_fp,
+        } => Some(TrustCandidate {
+            fingerprint: fingerprint_hex(new_fp),
+            target: handle.clone(),
+            detail: format!("new key at {handle}, replacing {}", fingerprint_hex(old_fp)),
+        }),
+        TrustChange::Revoked {
+            handle,
+            fingerprint,
+        } => Some(TrustCandidate {
+            fingerprint: fingerprint_hex(fingerprint),
+            target: handle.clone(),
+            detail: format!("revoked key at {handle}"),
+        }),
+        TrustChange::Known | TrustChange::New => None,
+    }
+}
+
+/// Is this `<nick|handle>` argument already a handle?
+///
+/// An `ident@host` always contains an `@`; an IRC nick never can (RFC 2812
+/// §2.3.1 keeps it out of the nick charset). `/e2e forget` has always used
+/// this rule, and `/e2e reverify` needs the same one because every
+/// trust-change notice tells the user to type a handle verbatim.
+fn looks_like_handle(target: &str) -> bool {
+    target.contains('@')
+}
+
 /// Wrap `resolve_handle_by_nick` with themed-error surfacing.
 ///
 /// Every `/e2e` subcommand that takes a `<nick>` argument needs to map
@@ -1419,6 +1672,118 @@ mod tests {
 
     fn s(x: &str) -> String {
         x.to_string()
+    }
+
+    /// App looking at channel `test/#dupa`, with a live E2E manager.
+    fn app_on_a_channel() -> crate::app::App {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        app.state
+            .add_buffer(crate::state::buffer::Buffer::for_test(
+                "test",
+                crate::state::buffer::BufferType::Channel,
+                "#dupa",
+            ));
+        app.state.set_active_buffer("test/#dupa");
+        let db = crate::storage::db::open_database(false).unwrap();
+        let keyring =
+            crate::e2e::keyring::Keyring::new(std::sync::Arc::new(std::sync::Mutex::new(db)));
+        app.state.e2e_manager = Some(std::sync::Arc::new(
+            crate::e2e::E2eManager::load_or_init(keyring).unwrap(),
+        ));
+        app
+    }
+
+    fn rows(app: &crate::app::App) -> Vec<String> {
+        app.state.buffers["test/#dupa"]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn e2e_on_says_so_when_it_ends_translation_for_the_conversation() {
+        // The exclusion itself runs at the gate, silently and from the next
+        // line. Without this row the user sees both features "on" and a
+        // channel that simply stopped being translated — which reads as a
+        // broken translator, not as encryption winning.
+        let mut app = app_on_a_channel();
+        app.state.translate_buffers.insert(
+            "test/#dupa".to_string(),
+            crate::config::TranslateBufferConfig {
+                incoming: true,
+                outgoing: false,
+                lang: Some("de".to_string()),
+                my_lang: None,
+            },
+        );
+
+        e2e_on(&mut app);
+
+        assert!(
+            rows(&app)
+                .iter()
+                .any(|t| t.contains("no longer be translated")),
+            "the user is told which feature won: {:?}",
+            rows(&app)
+        );
+    }
+
+    #[test]
+    fn e2e_on_stays_quiet_about_translation_where_none_was_configured() {
+        // The warning is about a real conflict. On every ordinary /e2e on it
+        // would be noise that trains the user to ignore it.
+        let mut app = app_on_a_channel();
+        e2e_on(&mut app);
+        assert!(
+            rows(&app).iter().any(|t| t.contains("enabled on")),
+            "precondition: the enable itself succeeded: {:?}",
+            rows(&app)
+        );
+        assert!(
+            !rows(&app).iter().any(|t| t.contains("translated")),
+            "no translation was configured, so nothing to say: {:?}",
+            rows(&app)
+        );
+    }
+
+    #[test]
+    fn e2e_import_refreshes_open_buffer_statuses() {
+        let mut app = app_on_a_channel();
+        app.state.pending_web_events.clear();
+        let network = app
+            .state
+            .connections
+            .get("test")
+            .map(|connection| connection.label.clone())
+            .unwrap_or_default();
+
+        let donor_db = crate::storage::db::open_database(false).unwrap();
+        let donor_keyring = crate::e2e::keyring::Keyring::new(std::sync::Arc::new(
+            std::sync::Mutex::new(donor_db),
+        ));
+        let donor = crate::e2e::E2eManager::load_or_init(donor_keyring).unwrap();
+        donor
+            .keyring()
+            .set_channel_config(&ChannelConfig {
+                channel: crate::e2e::scoped_context(&network, "#dupa"),
+                enabled: true,
+                mode: ChannelMode::Normal,
+            })
+            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("keyring.json");
+        crate::e2e::portable::export_to_path(donor.keyring(), &path).unwrap();
+
+        e2e_import(&mut app, path.to_str());
+
+        let status = app.state.pending_web_events.iter().find_map(|event| match event {
+            crate::web::protocol::WebEvent::BufferE2eChanged { buffer_id, enabled } => {
+                Some((buffer_id.as_str(), *enabled))
+            }
+            _ => None,
+        });
+        assert_eq!(status, Some(("test/#dupa", true)));
     }
 
     // ---------- DM keying context ----------
@@ -1677,6 +2042,148 @@ mod tests {
     // into `App.state`, so we replicate its new contract in a pure helper
     // below and assert each expected outcome.
 
+    #[test]
+    fn reverify_accepts_the_handle_the_notice_tells_the_user_to_type() {
+        // The HandleChanged notice ends with `run /e2e reverify <new
+        // handle> to accept`. Whatever that renders must be recognised as
+        // a handle: the reported bug was that the exact string the user
+        // was instructed to type went through nick resolution instead and
+        // bounced with "cannot resolve handle — has the user spoken yet?".
+        let (body, _) = crate::irc::events::trust_change_body(
+            &crate::e2e::manager::TrustChange::HandleChanged {
+                old_handle: s("freakyy85@hosted.by.nextgamers.eu"),
+                new_handle: s("freaky@hosted.by.nextgamers.eu"),
+                fingerprint: [0xAB; 16],
+            },
+        )
+        .expect("HandleChanged must produce a notice");
+        let typed = body
+            .split("/e2e reverify ")
+            .nth(1)
+            .expect("the notice must tell the user what to run")
+            .split_whitespace()
+            .next()
+            .expect("...followed by an argument");
+        assert_eq!(typed, "freaky@hosted.by.nextgamers.eu");
+        assert!(
+            looks_like_handle(typed),
+            "the notice says to type {typed}, but /e2e reverify would send that through nick resolution"
+        );
+    }
+
+    #[test]
+    fn a_bare_nick_is_not_mistaken_for_a_handle() {
+        assert!(!looks_like_handle("freakyy85"));
+        assert!(!looks_like_handle("kofany"));
+        assert!(looks_like_handle("~bob@user/bob"));
+    }
+
+    #[test]
+    fn reverify_advertises_handle_support_like_forget() {
+        // `/e2e forget` documents `<nick|handle>`; reverify accepts the
+        // same two spellings and must say so, or users keep guessing.
+        let reverify = HELP_ENTRIES
+            .iter()
+            .find(|(name, _)| name.starts_with("reverify"))
+            .expect("reverify must appear in the help index");
+        assert!(
+            reverify.0.contains("<nick|handle>"),
+            "help index still advertises `{}`",
+            reverify.0
+        );
+        match parse_subcommand(&[s("reverify")]) {
+            E2eSub::Usage(u) => assert!(u.contains("<nick|handle>"), "usage still says `{u}`"),
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reverify_takes_an_optional_fingerprint_selector() {
+        // Two keys offered at one `ident@host` are indistinguishable by
+        // handle, so the fingerprint is the only way to resolve them —
+        // without this argument the Ambiguous outcome is a dead end.
+        assert_eq!(
+            parse_subcommand(&[s("reverify"), s("~bob@b.host")]),
+            E2eSub::Reverify {
+                target: s("~bob@b.host"),
+                fingerprint: None,
+            }
+        );
+        assert_eq!(
+            parse_subcommand(&[s("reverify"), s("~bob@b.host"), s("c37c65c773314a48")]),
+            E2eSub::Reverify {
+                target: s("~bob@b.host"),
+                fingerprint: Some(s("c37c65c773314a48")),
+            }
+        );
+        assert!(matches!(
+            parse_subcommand(&[s("reverify"), s("a"), s("b"), s("c")]),
+            E2eSub::Usage(_)
+        ));
+        assert!(REVERIFY_USAGE.contains("[fingerprint]"));
+        let reverify = HELP_ENTRIES
+            .iter()
+            .find(|(name, _)| name.starts_with("reverify"))
+            .expect("reverify must appear in the help index");
+        assert!(
+            reverify.0.contains("[fp]"),
+            "help index does not advertise the selector: `{}`",
+            reverify.0
+        );
+    }
+
+    #[test]
+    fn the_stale_warning_hint_names_a_runnable_command() {
+        // The hint pointed at `/e2e handshake`, which needs a target and
+        // otherwise just prints its own usage — so the documented recovery
+        // could not actually raise the warning again.
+        let args: Vec<String> = REVERIFY_RETRY_CMD
+            .strip_prefix("/e2e ")
+            .expect("the hint must be an /e2e command")
+            .split_whitespace()
+            .map(s)
+            .collect();
+        assert!(
+            !matches!(parse_subcommand(&args), E2eSub::Usage(_)),
+            "`{REVERIFY_RETRY_CMD}` only prints usage"
+        );
+    }
+
+    #[test]
+    fn a_handle_change_is_accepted_by_naming_its_destination() {
+        // One key seen moving to two destinations yields candidates that
+        // share the old handle AND the fingerprint, so a command built
+        // from those two would match both and return Ambiguous forever.
+        // Only the destination separates them.
+        let moved = |to: &str| TrustChange::HandleChanged {
+            old_handle: s("~bob@b.host"),
+            new_handle: s(to),
+            fingerprint: [0xAB; 16],
+        };
+        let vpn = describe_trust_change(&moved("~bob@vpn.host")).expect("actionable");
+        let cafe = describe_trust_change(&moved("~bob@cafe.wifi")).expect("actionable");
+        assert_eq!(vpn.target, "~bob@vpn.host");
+        assert_eq!(cafe.target, "~bob@cafe.wifi");
+        assert_eq!(
+            vpn.fingerprint, cafe.fingerprint,
+            "same key — the fingerprint cannot tell these apart"
+        );
+        assert_ne!(
+            vpn.target, cafe.target,
+            "so the accept command must differ by destination"
+        );
+
+        // A key change is still selected by its handle plus fingerprint.
+        let changed = describe_trust_change(&TrustChange::FingerprintChanged {
+            handle: s("~bob@b.host"),
+            old_fp: [0x11; 16],
+            new_fp: [0x22; 16],
+        })
+        .expect("actionable");
+        assert_eq!(changed.target, "~bob@b.host");
+        assert_eq!(changed.fingerprint, fingerprint_hex(&[0x22; 16]));
+    }
+
     fn strict_resolve(resolved: Option<String>) -> Result<String, &'static str> {
         resolved.ok_or("cannot resolve handle — has the user spoken yet?")
     }
@@ -1795,7 +2302,7 @@ mod tests {
         // The `highlight` flag is what drives the mentions-panel / tab
         // activity indicator. Errors must highlight; info/warning must
         // not (operators should not be paged for a successful /e2e on).
-        assert!(E2eEventLevel::Error == E2eEventLevel::Error);
+        assert_eq!(E2eEventLevel::Error, E2eEventLevel::Error);
         assert_ne!(E2eEventLevel::Info, E2eEventLevel::Error);
         assert_ne!(E2eEventLevel::Warning, E2eEventLevel::Error);
     }
@@ -1809,6 +2316,7 @@ mod tests {
         let text = "accepted bob on #rust";
         let level = E2eEventLevel::Info;
         let msg = Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -1821,6 +2329,8 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            wire_origin: None,
+            translation_suffix_at: None,
         };
         assert_eq!(msg.event_key.as_deref(), Some("e2e_info"));
         assert_eq!(

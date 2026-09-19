@@ -11,7 +11,7 @@ pub mod e2e_gate;
 )]
 pub(crate) mod emote_anim;
 mod image;
-mod input;
+pub mod input;
 mod irc;
 mod log_browser;
 mod maintenance;
@@ -20,6 +20,7 @@ pub mod scripting;
 mod session;
 mod shell;
 pub mod shrink;
+pub mod translate;
 pub mod typing;
 mod web;
 mod who;
@@ -473,6 +474,19 @@ pub struct App {
     pub(crate) web_state_snapshot:
         Option<std::sync::Arc<parking_lot::RwLock<crate::web::server::WebStateSnapshot>>>,
     pub(crate) web_active_buffers: HashMap<String, String>,
+    /// Sessions whose entry in `web_active_buffers` is a GUESS.
+    ///
+    /// A tab changes buffer without telling us whenever it follows the TUI's
+    /// `ActiveBufferChanged`, and whether a given tab follows is a
+    /// localStorage flag (`web_follow_tui_buffer`) only the browser knows —
+    /// so the server cannot deduce it. After such a broadcast the record
+    /// stands as a best guess, which is fine for routing shell I/O but not
+    /// for deciding whether text may be handed back BARE: restoring a bare
+    /// body into a composer that has since moved publishes it to the wrong
+    /// conversation the moment the user presses Enter.
+    ///
+    /// Cleared when the session speaks for itself again.
+    pub(crate) web_buffer_unconfirmed: std::collections::HashSet<String>,
     pub web_restart_pending: bool,
     /// Tracks the current local date for emitting "day changed" markers.
     pub(crate) last_day: chrono::NaiveDate,
@@ -491,6 +505,83 @@ pub struct App {
     /// drains, awaits shrink, and posts an `OutgoingDeliver` back
     /// via `shrink_deliver_rx`.
     pub(crate) shrink_outgoing_tx: mpsc::Sender<shrink::PendingOutgoing>,
+    /// Pre-send queue for outgoing messages that need translation.
+    /// `handle_plain_message` enqueues here; the serial outgoing worker
+    /// drains it and posts an `OutgoingTranslateDeliver` back via
+    /// `translate_deliver_rx`.
+    pub(crate) translate_outgoing_tx: mpsc::Sender<translate::PendingOutgoingTranslate>,
+    /// The configured translation backend. `None` when translation was off
+    /// at startup — the workers are bound in `App::new`, so flipping
+    /// `translate.enabled` at runtime cannot materialise one. Mirrors the
+    /// role `shrink_client` plays for shrink.
+    pub(crate) translate_backend: Option<crate::translate::backend::SharedBackend>,
+    /// Per-buffer translate settings that are following a peer's `/nick`,
+    /// as `(the key the user wrote, where that conversation lives now)`.
+    ///
+    /// Kept HERE and not in `config.translate.buffers`, which is what the
+    /// obvious implementation does and what this replaced: moving the key
+    /// inside the config makes the migration permanent the moment anything
+    /// saves — `/set`, `/translate add*`, several admin commands all write
+    /// the whole config — so a peer's `/nick` silently rewrote a setting the
+    /// user had typed themselves, and a restart then followed a nick that
+    /// existed for five minutes one afternoon.
+    ///
+    /// Applied over the mirror on every `sync_translate_from_config`, so
+    /// re-deriving from the config cannot undo the follow. Ends when the user
+    /// configures that conversation explicitly (see
+    /// `App::materialize_translate_follow`) — that IS them renaming the
+    /// setting, and it is written to disk under the name they chose.
+    pub(crate) translate_follows: Vec<(String, String)>,
+    /// Shared concurrency limiter for the translation workers, so
+    /// `/set translate.max_in_flight` takes effect without a restart.
+    ///
+    /// It owns its own bookkeeping — see
+    /// [`crate::app::translate::TranslateLimiter`]. `App` deliberately keeps
+    /// no mirror of the applied total or the outstanding reduction: holding
+    /// half that pair here while the workers moved the other half is what let
+    /// the two drift apart, and a stale total reapplies a reduction that has
+    /// already landed.
+    pub(crate) translate_in_flight:
+        Option<std::sync::Arc<crate::app::translate::TranslateLimiter>>,
+    /// Which client is currently submitting. Set for the duration of a web
+    /// command so a refusal returns the text to that browser instead of the
+    /// terminal's input line.
+    pub(crate) submit_origin: crate::app::translate::SubmitOrigin,
+    /// How many IRC sessions each `conn_id` has had, bumped every time a
+    /// handle is installed.
+    ///
+    /// A reconnect reuses the `conn_id` and replaces the handle, so "is there
+    /// a handle for this connection" cannot tell a live session from its
+    /// successor. Anything that captures a connection and acts on it later —
+    /// today, a deferred translated send — captures this too and refuses when
+    /// it has moved, rather than putting a pre-disconnect message on a
+    /// post-reconnect session.
+    pub(crate) conn_generations: std::collections::HashMap<String, u64>,
+    /// Per-request backend budget shared with the workers, so
+    /// `/set translate.timeout_ms` retunes them and not just the queue.
+    pub(crate) translate_timeout_ms: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    /// Where `/translate add*|del*` writes the config.
+    ///
+    /// A field rather than a call to `constants::config_path()` so tests
+    /// point it at a temp file. A command handler that saves unconditionally
+    /// will otherwise overwrite the developer's REAL `~/.repartee/config.toml`
+    /// the moment a unit test exercises it — which is exactly what happened.
+    pub(crate) config_path: std::path::PathBuf,
+    /// Both translation workers post their outcomes here; the main loop
+    /// drains and routes them through `apply_translate_deliver`.
+    pub(crate) translate_deliver_rx: mpsc::Receiver<translate::TranslateDeliver>,
+    /// Kept alive for the App's lifetime even when translation is disabled.
+    ///
+    /// With the feature off no worker holds a clone, so dropping this leaves
+    /// the receiver with zero senders — and `recv()` on a closed channel
+    /// returns `None` immediately, forever, spinning the main `select!` at
+    /// 100% CPU. That is the DEFAULT configuration, so it would hit everyone.
+    /// `shrink_deliver_tx` is retained for the same reason.
+    #[expect(
+        dead_code,
+        reason = "held solely to keep the receiver's channel open; see the doc above"
+    )]
+    pub(crate) translate_deliver_tx: mpsc::Sender<translate::TranslateDeliver>,
     /// `/shrink` command + the workers all post their final actions
     /// here; the main loop drains and routes them to
     /// `apply_shrink_deliver`.
@@ -540,6 +631,7 @@ impl App {
         config::apply_credentials(&mut config.servers, &env_vars);
         config::apply_web_credentials(&mut config.web, &env_vars);
         config::apply_shrink_credentials(&mut config.shrink, &env_vars);
+        config::apply_translate_credentials(&mut config.translate, &env_vars);
         let theme_path = constants::theme_dir().join(format!("{}.theme", config.general.theme));
         let theme = theme::load_theme(&theme_path)?;
 
@@ -677,6 +769,21 @@ impl App {
         state.shrink_min_url_length = config.shrink.min_url_length;
         state.shrink_incoming_tx = Some(shrink_incoming_tx);
 
+        // Same wiring shape as shrink: the synchronous `add_message` path
+        // needs the sender and the config mirrors on `state`, so it can
+        // decide between an immediate add and a deferred translate without
+        // reaching into `App`.
+        let translate::TranslateRuntime {
+            backend: translate_backend,
+            in_flight: translate_in_flight,
+            timeout_ms: translate_timeout_ms,
+            incoming_tx: translate_incoming_tx,
+            outgoing_tx: translate_outgoing_tx,
+            deliver_tx: translate_deliver_tx,
+            deliver_rx: translate_deliver_rx,
+        } = translate::TranslateRuntime::build(&config.translate);
+        state.translate_incoming_tx = Some(translate_incoming_tx);
+
         let (mut dcc, dcc_rx) = crate::dcc::DccManager::new();
         dcc.timeout_secs = config.dcc.timeout;
         if !config.dcc.own_ip.is_empty() {
@@ -805,6 +912,7 @@ impl App {
             web_rate_limiter: None,
             web_state_snapshot: None,
             web_active_buffers: HashMap::new(),
+            web_buffer_unconfirmed: std::collections::HashSet::new(),
             web_restart_pending: false,
             last_day: chrono::Local::now().date_naive(),
             shrink_client,
@@ -812,10 +920,36 @@ impl App {
             shrink_outgoing_tx,
             shrink_deliver_tx,
             shrink_deliver_rx,
+            translate_outgoing_tx,
+            translate_deliver_rx,
+            translate_deliver_tx,
+            translate_backend,
+            translate_follows: Vec::new(),
+            translate_in_flight: Some(translate_in_flight),
+            submit_origin: crate::app::translate::SubmitOrigin::Tui,
+            conn_generations: std::collections::HashMap::new(),
+            translate_timeout_ms: Some(translate_timeout_ms),
+            config_path: constants::config_path(),
             cli_bind_override: None,
             typing: crate::app::typing::TypingSender::default(),
         };
         app.recompute_wrap_indent();
+        // Derive every `[translate]` mirror from ONE place, rather than
+        // hand-copying the fields here as well. Hand-copying is how
+        // `translate_max_queue` came to sit at its hardcoded default until
+        // the user happened to run `/set`, `/reload` or `/translate` — with
+        // the ceiling enforced on every insertion, that is a bound that was
+        // simply the wrong number from startup. Any mirror added later is
+        // now covered by construction.
+        app.sync_translate_from_config();
+        // Say out loud what `[translate]` actually resolved to. Both quiet
+        // outcomes mislead: a config asking for translation with no backend
+        // behind it looks exactly like one that is working, and the test
+        // backend looks — to the people reading the channel — like the user
+        // typing their sentences backwards.
+        if let Some(notice) = translate::startup_backend_notice(&app.config.translate) {
+            crate::commands::helpers::add_local_event(&mut app, &notice);
+        }
 
         if app.config.spellcheck.enabled {
             app.init_spellchecker();
@@ -1038,6 +1172,7 @@ impl App {
         self.state.add_local_message(
             &buffer_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: Utc::now(),
                 message_type: MessageType::Event,
@@ -1050,6 +1185,8 @@ impl App {
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
+                wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -1095,6 +1232,7 @@ impl App {
                 autosendcmd: None,
                 sasl_mechanism: None,
                 client_cert_path: None,
+                sasl_key_path: None,
             },
             local_ip: None,
             enabled_caps: HashSet::new(),
@@ -1135,6 +1273,7 @@ impl App {
         state.add_message(
             &buf_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: Utc::now(),
                 message_type: MessageType::Event,
@@ -1150,6 +1289,8 @@ impl App {
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
+                wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -1475,6 +1616,11 @@ impl App {
                     self.handle_netsplit_tick();
                     self.typing_tick();
                     self.expire_typing();
+                    // Drives the queue timeout and ceiling. Without a tick a
+                    // stuck head would hold its channel indefinitely once the
+                    // traffic that would otherwise poke the queue stops.
+                    self.tick_translate_queues();
+                    self.settle_translate_concurrency_debt();
                     self.purge_expired_batches();
                     self.purge_stale_chathistory_requests();
                     self.check_reconnects();
@@ -1544,6 +1690,18 @@ impl App {
                         self.drain_pending_web_events();
                     }
                 },
+                translate_res = self.translate_deliver_rx.recv() => {
+                    if let Some(deliver) = translate_res {
+                        self.apply_translate_deliver(deliver);
+                        // Drain siblings in the same tick: a burst on a busy
+                        // channel arrives as many outcomes at once, and each
+                        // one can unblock the queue head.
+                        while let Ok(extra) = self.translate_deliver_rx.try_recv() {
+                            self.apply_translate_deliver(extra);
+                        }
+                        self.drain_pending_web_events();
+                    }
+                },
                 _ = sigterm.recv() => {
                     self.should_quit = true;
                 },
@@ -1560,6 +1718,12 @@ impl App {
                 },
             }
         }
+
+        // Release anything still waiting on a translation before the buffers
+        // go away. The lines already arrived on the network, and this is the
+        // last moment they can still reach the buffer and the SQLite log —
+        // after this they would be lost with no trace.
+        self.flush_all_translate_queues();
 
         for (_, handle) in self.active_timers.drain() {
             handle.abort();

@@ -149,7 +149,18 @@ fn render_chat_message(
         .unwrap_or_else(|| "$0 $1".to_string());
     let resolved = resolve_abstractions(&msg_format, abstracts, 0);
     // params: $0=displayNick, $1=text, $2=paddedNickMode
-    let body = emotify_message_text(&msg.text, emote_sizing);
+    //
+    // A translated line's body is emotified in TWO HALVES and rejoined, so
+    // the rendered tail is exactly `dim_suffix` and the dimming below can
+    // match it. Emotifying the whole string and then slicing `msg.text` at
+    // the offset compares a raw `:name:` against the placeholder glyphs it
+    // rendered as: the tail never matches and the original stays undimmed
+    // whenever it happens to contain an emote token.
+    //
+    // Splitting is safe because the boundary is the space before ` [`, and
+    // an emote token cannot contain one — so no token straddles the seam and
+    // both halves tokenize exactly as the whole would.
+    let (body, dim_suffix) = split_body_for_dimming(msg, emote_sizing);
     let mut spans = parse_format_string(&resolved, &[&display_nick, &body, &padded_nick_mode]);
 
     // Apply nick color override: recolor spans containing the nick text.
@@ -165,7 +176,100 @@ fn render_chat_message(
         }
     }
 
+    // Dim the ` [original]` suffix of a translated line, if there is one.
+    //
+    // Matched against the suffix as it RENDERS, not as it is stored. The
+    // original is a person's own message and may carry mIRC or theme codes;
+    // those are consumed on the way into spans, so a raw comparison measures
+    // bytes that are not on screen and silently matches nothing — leaving the
+    // suffix undimmed on exactly the lines whose original had formatting in
+    // it, and disagreeing with the web front end, which dims by offset.
+    if let Some(suffix) = dim_suffix {
+        let rendered: String = parse_format_string(&suffix, &[])
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect();
+        dim_trailing_suffix(&mut spans, &rendered);
+    }
+
     spans
+}
+
+/// Emotify a message body, returning it alongside the trailing ` [original]`
+/// run to dim — in the SAME rendered form, so the two can be matched.
+///
+/// Returns `(body, None)` for every ordinary message, which is nearly all of
+/// them. An offset that is out of range or mid-character is treated as
+/// absent: the line renders whole and undimmed, which beats slicing a
+/// message apart on a bad index.
+fn split_body_for_dimming(
+    msg: &Message,
+    emote_sizing: Option<crate::ui::emote_layout::EmoteSizing>,
+) -> (String, Option<String>) {
+    let at = msg
+        .translation_suffix_at
+        .or_else(|| msg.wire_origin.as_ref().and_then(|origin| origin.suffix_at))
+        .filter(|at| *at < msg.text.len() && msg.text.is_char_boundary(*at));
+    let Some(at) = at else {
+        return (emotify_message_text(&msg.text, emote_sizing), None);
+    };
+    let head = emotify_message_text(&msg.text[..at], emote_sizing);
+    let tail = emotify_message_text(&msg.text[at..], emote_sizing);
+    (format!("{head}{tail}"), Some(tail))
+}
+
+/// Dim the trailing run of spans whose combined text is exactly `suffix`.
+///
+/// Used for the ` [original]` appended to a translated line. It works from
+/// the END of the span list rather than from a byte offset, because the
+/// message body is substituted into a theme format string and then parsed
+/// as a whole — the body's own format codes can split it across any number
+/// of spans, so span boundaries carry no fixed relationship to offsets in
+/// `Message::text`.
+///
+/// If the accumulated tail does not match `suffix` exactly, nothing is
+/// dimmed. That case is reachable — a theme whose `pubmsg` format appends
+/// decoration after `$1`, or a body transformed by emote substitution — and
+/// leaving the line undimmed is strictly better than dimming the wrong run.
+fn dim_trailing_suffix(spans: &mut Vec<StyledSpan>, suffix: &str) {
+    if suffix.is_empty() {
+        return;
+    }
+    let mut acc = 0usize;
+    let mut first = None;
+    for (i, span) in spans.iter().enumerate().rev() {
+        acc += span.text.len();
+        if acc >= suffix.len() {
+            first = Some(i);
+            break;
+        }
+    }
+    let Some(first) = first else { return };
+
+    // The suffix may start mid-span; split that span so only its tail dims.
+    let overshoot = acc - suffix.len();
+    if overshoot > 0 {
+        let span = &spans[first];
+        if !span.text.is_char_boundary(overshoot) {
+            return;
+        }
+        let (head, tail) = span.text.split_at(overshoot);
+        let mut head_span = span.clone();
+        let mut tail_span = span.clone();
+        head_span.text = head.to_string();
+        tail_span.text = tail.to_string();
+        spans[first] = head_span;
+        spans.insert(first + 1, tail_span);
+    }
+    let start = if overshoot > 0 { first + 1 } else { first };
+
+    let combined: String = spans[start..].iter().map(|s| s.text.as_str()).collect();
+    if combined != suffix {
+        return;
+    }
+    for span in &mut spans[start..] {
+        span.dim = true;
+    }
 }
 
 /// Replace known `:name:` tokens with PUA placeholders so the wrapper reserves
@@ -309,6 +413,7 @@ mod tests {
 
     fn test_message(nick: &str, text: &str, msg_type: MessageType) -> Message {
         Message {
+            log_key: None,
             id: 1,
             timestamp: Utc::now(),
             message_type: msg_type,
@@ -321,6 +426,311 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            wire_origin: None,
+            translation_suffix_at: None,
+        }
+    }
+
+    fn shipped_theme(src: &str) -> crate::theme::ThemeFile {
+        toml::from_str(src).expect("shipped theme must parse")
+    }
+
+    /// Render a chat message through the default theme and return its spans.
+    fn chat_spans(msg: &Message) -> Vec<StyledSpan> {
+        render_chat_message(msg, false, &default_theme(), &default_config(), None, None)
+    }
+
+    fn dim_text(spans: &[StyledSpan]) -> String {
+        spans
+            .iter()
+            .filter(|s| s.dim)
+            .map(|s| s.text.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn translated_original_suffix_renders_dimmed() {
+        let mut msg = test_message("alice", "albalb [blabla]", MessageType::Message);
+        msg.wire_origin = Some(crate::state::buffer::WireOrigin {
+            text: "blabla".to_string(),
+            suffix_at: Some(6),
+        });
+        let spans = chat_spans(&msg);
+        let all: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert!(
+            all.contains("albalb [blabla]"),
+            "the whole line still renders: {all:?}"
+        );
+        assert_eq!(
+            dim_text(&spans),
+            " [blabla]",
+            "only the appended original is dimmed"
+        );
+    }
+
+    #[test]
+    fn a_formatted_original_is_still_dimmed() {
+        // The original is a person's own message and may carry mIRC or theme
+        // codes — bold, a colour — which are consumed on the way into spans.
+        // Comparing the STORED suffix against rendered spans then measures
+        // bytes that are not on screen, matches nothing, and leaves the
+        // suffix undimmed on exactly the lines whose original was formatted.
+        let original = "\x02bla\x02 %Z112233bla%N";
+        let text = format!("albalb [{original}]");
+        let suffix_at = "albalb".len();
+        let mut msg = test_message("alice", &text, MessageType::Message);
+        msg.wire_origin = Some(crate::state::buffer::WireOrigin {
+            text: "blabla".to_string(),
+            suffix_at: Some(suffix_at),
+        });
+
+        let spans = chat_spans(&msg);
+        assert_eq!(
+            dim_text(&spans),
+            " [bla bla]",
+            "the codes are gone from the text, but the run they styled is \
+             still the run that dims"
+        );
+    }
+
+    #[test]
+    fn an_original_containing_an_emote_is_still_dimmed() {
+        // The body is emotified before it is parsed into spans, so a raw
+        // `:name:` sliced out of `Message::text` no longer matches the
+        // placeholder glyphs the tail actually rendered as — and the whole
+        // original silently stays undimmed.
+        let tag = crate::emotes::tag_names()
+            .first()
+            .expect("the emote set is compiled in");
+        let sizing = crate::ui::emote_layout::EmoteSizing {
+            font_w: 8,
+            font_h: 16,
+            max_cols: 2,
+            max_rows: 1,
+        };
+        let translation = "wave";
+        let text = format!("{translation} [:{tag}:]");
+        let mut msg = test_message("alice", &text, MessageType::Message);
+        msg.wire_origin = Some(crate::state::buffer::WireOrigin {
+            text: format!(":{tag}:"),
+            suffix_at: Some(translation.len()),
+        });
+
+        let spans = render_chat_message(
+            &msg,
+            false,
+            &default_theme(),
+            &default_config(),
+            None,
+            Some(sizing),
+        );
+        let dimmed = dim_text(&spans);
+        assert!(
+            !dimmed.is_empty(),
+            "the appended original must still be dimmed once the emote is \
+             rendered: {dimmed:?}"
+        );
+        assert!(
+            dimmed.starts_with(" ["),
+            "and it must be the original, not some other run: {dimmed:?}"
+        );
+        assert!(
+            dimmed.ends_with(']'),
+            "the whole original, up to its closing bracket: {dimmed:?}"
+        );
+        assert!(
+            !dimmed.contains(tag),
+            "the emote really was replaced by placeholders — otherwise this \
+             test would pass without exercising anything: {dimmed:?}"
+        );
+    }
+
+    #[test]
+    fn message_without_offset_has_no_dim_spans() {
+        // An ordinary message that merely ENDS in brackets must not be
+        // mistaken for a translated one.
+        let msg = test_message("alice", "ordinary [not an original]", MessageType::Message);
+        let spans = chat_spans(&msg);
+        assert!(
+            spans.iter().all(|s| !s.dim),
+            "no offset means no dimming at all"
+        );
+    }
+
+    #[test]
+    fn dim_suffix_spanning_a_multibyte_boundary() {
+        let mut msg = test_message("alice", "zażółć gęślą [jaźń]", MessageType::Message);
+        let offset = "zażółć gęślą".len();
+        msg.wire_origin = Some(crate::state::buffer::WireOrigin {
+            text: "jaźń".to_string(),
+            suffix_at: Some(offset),
+        });
+        let spans = chat_spans(&msg);
+        assert_eq!(dim_text(&spans), " [jaźń]");
+    }
+
+    #[test]
+    fn dim_trailing_suffix_leaves_spans_alone_on_mismatch() {
+        // Fail-safe: when the tail does not match the expected suffix
+        // exactly, nothing is dimmed rather than the wrong run.
+        let mut spans = vec![
+            StyledSpan {
+                text: "hello".to_string(),
+                fg: None,
+                bg: None,
+                bold: false,
+                italic: false,
+                underline: false,
+                dim: false,
+            },
+            StyledSpan {
+                text: " world".to_string(),
+                fg: None,
+                bg: None,
+                bold: false,
+                italic: false,
+                underline: false,
+                dim: false,
+            },
+        ];
+        dim_trailing_suffix(&mut spans, " [other]");
+        assert!(spans.iter().all(|s| !s.dim));
+    }
+
+    #[test]
+    fn dim_trailing_suffix_splits_a_boundary_span() {
+        let mut spans = vec![StyledSpan {
+            text: "albalb [blabla]".to_string(),
+            fg: None,
+            bg: None,
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+        }];
+        dim_trailing_suffix(&mut spans, " [blabla]");
+        assert_eq!(spans.len(), 2, "the boundary span is split in two");
+        assert_eq!(spans[0].text, "albalb");
+        assert!(!spans[0].dim);
+        assert_eq!(spans[1].text, " [blabla]");
+        assert!(spans[1].dim);
+    }
+
+    fn render_event_text(theme_src: &str, event_key: &str, params: &[&str]) -> String {
+        let theme = shipped_theme(theme_src);
+        let msg = Message {
+            log_key: None,
+            id: 1,
+            timestamp: Utc::now(),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text: String::new(),
+            highlight: false,
+            event_key: Some(event_key.to_string()),
+            event_params: Some(params.iter().map(|p| (*p).to_string()).collect()),
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+            wire_origin: None,
+            translation_suffix_at: None,
+        };
+        render_event(&msg, &theme)
+            .into_iter()
+            .map(|s| s.text)
+            .collect()
+    }
+
+    #[test]
+    fn whois_abstract_renders_the_same_visible_text_as_literal_formats() {
+        // The WHOIS formats were rewritten in terms of the `whois` /
+        // `whois_value` abstracts. `substitute_vars` joins an abstract's
+        // arguments with a single space, so the rewrite is only safe if the
+        // visible output is byte-identical to the literal formats it replaced.
+        for src in [
+            include_str!("../../themes/default.theme"),
+            include_str!("../../themes/spring.theme"),
+        ] {
+            assert_eq!(
+                render_event_text(src, "whois_channels", &["alice", "#one #two"]),
+                "  channels: #one #two"
+            );
+            assert_eq!(
+                render_event_text(src, "whois_special", &["alice", "is a Cloaked Connection"]),
+                "  is a Cloaked Connection"
+            );
+            assert_eq!(
+                render_event_text(
+                    src,
+                    "whois_idle_signon",
+                    &["alice", "34m 1s", "2026-07-14 16:08:49"]
+                ),
+                "  idle: 34m 1s, signon: 2026-07-14 16:08:49"
+            );
+            assert_eq!(
+                render_event_text(
+                    src,
+                    "whois_server",
+                    &["alice", "gallium.libera.chat", "Manchester, UK", " (Manchester, UK)"]
+                ),
+                "  server: gallium.libera.chat (Manchester, UK)"
+            );
+            assert_eq!(
+                render_event_text(src, "whois_keyvalue", &["alice", "Languages", "*", "en"]),
+                "  Languages: en"
+            );
+            assert_eq!(
+                render_event_text(src, "whois_away", &["alice", "back later"]),
+                "  away: back later"
+            );
+            assert_eq!(
+                render_event_text(src, "whois_account", &["alice", "alice"]),
+                "  account: alice"
+            );
+            assert_eq!(
+                render_event_text(src, "whois_secure", &["alice", "TLS", "is using TLS"]),
+                "  secure: TLS"
+            );
+            assert_eq!(
+                render_event_text(src, "whois_certfp", &["alice", "ab12cd"]),
+                "  certfp: ab12cd"
+            );
+            assert_eq!(
+                render_event_text(src, "whois_idle", &["alice", "34m 1s"]),
+                "  idle: 34m 1s"
+            );
+            for key in [
+                "whois_registered",
+                "whois_help",
+                "whois_bot",
+                "whois_actually",
+                "whois_host",
+                "whois_modes",
+            ] {
+                assert_eq!(
+                    render_event_text(src, key, &["alice", "some prose"]),
+                    "  some prose",
+                    "{key} must render as an indented block line"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn whois_error_keys_render_through_the_error_abstract() {
+        for src in [
+            include_str!("../../themes/default.theme"),
+            include_str!("../../themes/spring.theme"),
+        ] {
+            let rendered = render_event_text(src, "no_such_nick", &["ghost", "No such nick/channel"]);
+            assert!(
+                rendered.contains("ghost") && rendered.contains("No such nick/channel"),
+                "no_such_nick lost content: {rendered}"
+            );
+            assert!(
+                !rendered.starts_with("  "),
+                "errors are not WHOIS block lines and must not take the block indent: {rendered}"
+            );
         }
     }
 
@@ -422,6 +832,7 @@ mod tests {
     #[test]
     fn render_event_message() {
         let msg = Message {
+            log_key: None,
             id: 1,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -434,6 +845,8 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            wire_origin: None,
+            translation_suffix_at: None,
         };
         let theme = default_theme();
         let config = default_config();

@@ -1,5 +1,5 @@
 ---
-category: Statusbar
+category: Configuration
 description: Manage statusbar items and formats
 ---
 

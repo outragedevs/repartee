@@ -111,10 +111,24 @@ Useful commands:
 ```text
 /e2e fingerprint
 /e2e verify <nick>
-/e2e reverify <nick>
+/e2e reverify <nick|handle> [fingerprint]
 ```
 
-If a peer changes identity or appears under a different `ident@host`, repartee can warn and require you to decide whether to trust the new state.
+If a peer changes identity or appears under a different `ident@host`, repartee warns and blocks the handshake until you decide whether to trust the new state. The warning names the handle to pass to `/e2e reverify`, and that handle is accepted verbatim.
+
+The two cases resolve differently, because they are not equally serious. A changed `ident@host` under an unchanged fingerprint is the same peer on a new connection: accepting re-binds the fingerprint you already verified to the new handle, and your trust is preserved. A changed fingerprint is a new key: accepting replaces the old one, so compare the SAS words out of band first.
+
+Either way, the handshake that raised the warning was refused, so run `/e2e handshake <nick>` afterwards to open a session under the accepted state.
+
+If two different keys are offered at the same `ident@host` before you decide, repartee holds both warnings and `/e2e reverify` refuses to guess between them: it lists the candidates and changes nothing. This matters — accepting the wrong one would install a key you never compared.
+
+Two keys at one handle are indistinguishable by handle, so you resolve it by naming the fingerprint you verified. That is what the listing leads with, and it is the same value you compared out of band:
+
+```text
+/e2e reverify ~bob@b.host c37c65c773314a48
+```
+
+Any unique prefix of the fingerprint works. Accepting one key settles the contest at that handle — the competing claims are dropped, and those peers can re-handshake if they are genuine.
 
 ## Resetting state
 

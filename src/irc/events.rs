@@ -205,6 +205,7 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
                     state.add_message(
                         &buffer_id,
                         Message {
+                            log_key: None,
                             id,
                             timestamp: Utc::now(),
                             message_type: MessageType::Event,
@@ -218,6 +219,8 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
                             log_msg_id: None,
                             log_ref_id: None,
                             tags: None,
+                            wire_origin: None,
+                            translation_suffix_at: None,
                         },
                     );
                 }
@@ -240,7 +243,7 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         // render unthemed outside the WHOIS block. Shorter-than-3-arg forms
         // (no separate nick token) intentionally fall through to that
         // catch-all so the line still displays.
-        Command::Raw(cmd, args) if args.len() >= 3 && whois_freeform_key(cmd).is_some() => {
+        Command::Raw(cmd, args) if args.len() >= 3 && whois_freeform_key(cmd, args).is_some() => {
             handle_whois_freeform(state, conn_id, cmd, args);
         }
         // ircnet.com/extended-join (IRCnet ircd 2.12.0):
@@ -310,6 +313,7 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
             state.add_message(
                 &buffer_id,
                 Message {
+                    log_key: None,
                     id,
                     timestamp: Utc::now(),
                     message_type: MessageType::Event,
@@ -322,6 +326,8 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
                     log_msg_id: None,
                     log_ref_id: None,
                     tags: None,
+                    wire_origin: None,
+                    translation_suffix_at: None,
                 },
             );
         }
@@ -364,6 +370,7 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
     state.add_message(
         &buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -376,6 +383,8 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -487,6 +496,7 @@ pub fn handle_disconnected(state: &mut AppState, conn_id: &str, error: Option<&s
     state.add_message(
         &buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -499,6 +509,8 @@ pub fn handle_disconnected(state: &mut AppState, conn_id: &str, error: Option<&s
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -616,6 +628,7 @@ pub fn handle_cap_new(
     state.add_message(
         &buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -628,6 +641,8 @@ pub fn handle_cap_new(
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 
@@ -685,6 +700,7 @@ pub fn handle_cap_del(
     state.add_message(
         &buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -697,6 +713,8 @@ pub fn handle_cap_del(
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -738,6 +756,7 @@ pub fn handle_cap_ack(
     state.add_message(
         &buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -750,6 +769,8 @@ pub fn handle_cap_ack(
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -791,6 +812,7 @@ pub fn handle_cap_nak(
     state.add_message(
         &buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -803,6 +825,8 @@ pub fn handle_cap_nak(
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -1069,6 +1093,7 @@ pub fn ingest_chathistory_batch(
         let timestamp = message_timestamp(tags.as_ref());
 
         let message = Message {
+            log_key: None,
             id: 0, // store-only: real id assigned if/when spliced into a buffer
             timestamp,
             message_type: msg_type,
@@ -1084,6 +1109,8 @@ pub fn ingest_chathistory_batch(
             log_msg_id: None,
             log_ref_id: None,
             tags,
+            wire_origin: None,
+            translation_suffix_at: None,
         };
 
         // Only count rows the storage layer actually queued. A row dropped by
@@ -1261,6 +1288,38 @@ pub fn push_typing_web_event(state: &mut AppState, buffer_id: &str) {
         });
 }
 
+/// Give back the place held for an own reflection a script just ate.
+///
+/// Script suppression of a non-state-mutating command returns before
+/// `handle_privmsg` ever runs, so the reflection of a translated send never
+/// reaches the code that would fill its reservation. The record is still
+/// filed and the barrier is still up, and nothing else on that path revisits
+/// either: the conversation stalls until the queue's expiry, then delivers
+/// everything that arrived meanwhile in a burst.
+///
+/// The message is dropped either way — that is what the script asked for, and
+/// it is what a suppressed reflection has always done on a non-translated
+/// buffer. Only the barrier is wrong.
+pub fn release_suppressed_own_echo(state: &mut AppState, conn_id: &str, msg: &IrcMessage) {
+    let Command::PRIVMSG(target, text) = &msg.command else {
+        return;
+    };
+    let Some(our_nick) = state.connections.get(conn_id).map(|c| c.nick.clone()) else {
+        return;
+    };
+    let (nick, ..) = extract_nick_userhost(msg.prefix.as_ref());
+    // Case-insensitively, for the same reason `handle_privmsg` does it: a
+    // server may echo our nick back in a different case.
+    if our_nick.is_empty() || !nick.eq_ignore_ascii_case(&our_nick) {
+        return;
+    }
+    // `is_own` reflections route to the TARGET's buffer, never the sender's.
+    let buffer_id = make_buffer_id(conn_id, target);
+    if let Some(d) = state.take_own_echo_decoration(&buffer_id, text) {
+        state.abandon_own_reflection(&buffer_id, d.echo_id);
+    }
+}
+
 #[expect(clippy::too_many_lines, reason = "linear message handler")]
 fn handle_privmsg(
     state: &mut AppState,
@@ -1369,6 +1428,25 @@ fn handle_privmsg(
     }
     let text: &str = decrypted_owned.as_deref().unwrap_or(text);
 
+    // Our own reflection of a translated send, on a buffer configured to show
+    // the original. The wire carried only the translation, so this is where
+    // the ` [original]` suffix is put back on — the reflection is kept, not
+    // replaced by a locally-written row, because it is the copy carrying the
+    // server's `@time` and `@msgid`, and those are what a later CHATHISTORY
+    // replay dedups against. Matching is consuming and exact; a miss renders
+    // the reflection plain, exactly as every non-translated send does.
+    let decoration = if is_own {
+        state.take_own_echo_decoration(&buffer_id, text)
+    } else {
+        None
+    };
+    let (text, own_origin): (&str, Option<crate::state::buffer::WireOrigin>) = decoration
+        .as_ref()
+        .and_then(|d| d.display.as_ref())
+        .map_or((text, None), |(display, origin)| {
+            (display.as_str(), Some(origin.clone()))
+        });
+
     // Check if this is a CTCP (ACTION or other)
     let is_ctcp = text.starts_with('\x01') && text.ends_with('\x01');
     let is_action = is_ctcp && text.len() > 2 && text[1..text.len() - 1].starts_with("ACTION ");
@@ -1409,6 +1487,14 @@ fn handle_privmsg(
             &ignore_level,
             channel,
         ) {
+            // An ignore mask can match US — `*!*@*` on a noisy channel, or any
+            // pattern that happens to cover our own host. The decoration was
+            // consumed just above, so this reflection is now the ONLY thing
+            // that could ever fill the place reserved when the user pressed
+            // Enter, and we are about to drop it. Hand the place back.
+            if let Some(d) = decoration.as_ref() {
+                state.abandon_own_reflection(&buffer_id, d.echo_id);
+            }
             return;
         }
     }
@@ -1461,11 +1547,7 @@ fn handle_privmsg(
     // CTCP framing from NOTICEs) is routed to `try_dispatch_rpe2e_ctcp` below,
     // which performs its own DM handle migration. Skip it here so the migration
     // (and its keyring cache write) does not run twice for the same message.
-    let is_rpe2e_handshake = {
-        let stripped = text.strip_prefix('\x01').unwrap_or(text);
-        let stripped = stripped.strip_suffix('\x01').unwrap_or(stripped);
-        stripped.starts_with(crate::e2e::handshake::CTCP_TAG)
-    };
+    let is_rpe2e_handshake = rpe2e_handshake_body(text).is_some();
     if !target_is_channel && !is_own && !is_rpe2e_handshake {
         let new_handle = format!("{ident}@{host}");
         // `Some(old)` only when the handle is new for this buffer (old may be
@@ -1495,6 +1577,9 @@ fn handle_privmsg(
                 } else {
                     prev
                 };
+            }
+            if observed {
+                state.push_buffer_e2e_status(&buffer_id);
             }
         }
     }
@@ -1530,13 +1615,15 @@ fn handle_privmsg(
                 ActivityLevel::Activity
             };
             let mode_prefix = nick_prefix(state, &buffer_id, &nick);
+            // A reflection of our own send takes the id held for it at
+            // submission, so it fills that place in the reorder queue rather
+            // than landing after the replies that arrived meanwhile.
             let id = state.next_message_id();
             let ts = message_timestamp(tags.as_ref());
             // Save nick before moving into Message — needed for mentions buffer below.
             let nick_saved = if is_mention { Some(nick.clone()) } else { None };
-            state.add_message_with_activity(
-                &buffer_id,
-                Message {
+            let action_row = Message {
+                log_key: None,
                     id,
                     timestamp: ts,
                     message_type: MessageType::Action,
@@ -1549,49 +1636,60 @@ fn handle_privmsg(
                     log_msg_id: None,
                     log_ref_id: None,
                     tags,
-                },
-                activity,
-            );
+                    // Set only for a decorated reflection of our own send —
+                    // the row shows `translation [original]` while the wire
+                    // carried the translation alone.
+                    wire_origin: own_origin,
+                    translation_suffix_at: None,
+            };
+            // `true` when translation took the row over — see the plain
+            // branch below.
+            let deferred;
+            if let Some(d) = decoration.as_ref() {
+                // Takes the place reserved when the user pressed Enter, so
+                // our own message keeps its position among the lines that
+                // arrived while it was being translated. The reserved id is
+                // the ORDER key only — the row keeps its own transport id,
+                // or the web client would take a second chunk of the same
+                // message for a duplicate and drop it.
+                //
+                // A split send is several reflections: all but the last are
+                // parked at the reservation, because closing it early lets
+                // everything behind the barrier drain between the chunks.
+                deferred = false;
+                if d.is_last {
+                    state.add_own_message(&buffer_id, d.echo_id, action_row);
+                } else {
+                    state.hold_own_message_chunk(&buffer_id, d.echo_id, action_row);
+                }
+            } else {
+                deferred = state.add_message_with_activity(&buffer_id, action_row, activity);
+            }
 
-            // Push to mentions buffer — channel highlights only.
-            if is_mention && target_is_channel && state.buffers.contains_key("_mentions") {
+            // Push to mentions buffer — channel highlights only. Skipped when
+            // translation took the row: the aggregate is built at release
+            // instead, so it carries the same text the channel shows.
+            if is_mention && target_is_channel && !deferred {
                 let nick = nick_saved.unwrap_or_default();
-                let conn_label = state
-                    .connections
-                    .get(conn_id)
-                    .map_or(conn_id, |c| c.label.as_str());
-                let datetime = ts
-                    .with_timezone(&chrono::Local)
-                    .format("%Y/%m/%d %H:%M:%S")
-                    .to_string();
                 let action_body = format!("* {nick} {action_text}");
-                let mention_text = crate::ui::format_mention_line(
-                    &datetime,
-                    conn_label,
-                    target,
-                    &nick,
-                    &action_body,
-                    state.nick_color_sat,
-                    state.nick_color_lit,
-                );
-                let mention_msg = Message {
-                    id: state.next_message_id(),
-                    timestamp: ts,
-                    message_type: MessageType::MentionLog,
-                    nick: None,
-                    nick_mode: None,
-                    text: mention_text,
-                    highlight: true,
-                    event_key: None,
-                    event_params: None,
-                    log_msg_id: None,
-                    log_ref_id: None,
-                    tags: None,
-                };
-                state.add_mention_to_buffer(mention_msg);
+                state.fan_out_mention(conn_id, target, &nick, &action_body, ts);
             }
 
             return;
+        }
+
+        // Every remaining exit from this branch DROPS the line — the CTCP
+        // flood cut-off, a consumed RPE2E handshake, or the plain
+        // "not an ACTION, nothing to show" fall-through. If a decoration was
+        // consumed for it, the place reserved at submission has to go back
+        // here, before any of them, rather than at each one.
+        //
+        // Not reachable today: the seam and the send both refuse `\x01` in a
+        // translated body, so an own reflection cannot be a non-ACTION CTCP.
+        // It is written once here so that stays true by construction and not
+        // by that argument holding.
+        if let Some(d) = decoration.as_ref() {
+            state.abandon_own_reflection(&buffer_id, d.echo_id);
         }
 
         // Other CTCP — flood check
@@ -1629,11 +1727,34 @@ fn handle_privmsg(
         && try_dispatch_rpe2e_ctcp(state, conn_id, prefix, target, text)
             == Some(RpEe2eOutcome::Handled)
     {
+        // The dispatcher just ATE this line, so it exits like every other
+        // dropped reflection: the place reserved at submission goes back.
+        // Reachable, unlike the non-ACTION CTCP case above: the seam refuses
+        // `\x01` but not prose that merely BEGINS with the handshake tag, so
+        // a broken backend answering `RPEE2E …` produces a reflection the
+        // dispatcher swallows as our own handshake echo — and the barrier
+        // would stand until the queue's expiry with the whole conversation
+        // behind it.
+        if let Some(d) = decoration.as_ref() {
+            state.abandon_own_reflection(&buffer_id, d.echo_id);
+        }
         return;
     }
 
     // --- Flood checks for regular messages ---
-    if state.flood_protection && nick != our_nick && !flood_exempt {
+    //
+    // `!is_own`, not `nick != our_nick`. IRC nicks are case-insensitive and an
+    // `echo-message` reflection may carry ours in a different case — the very
+    // reason `is_own` is computed that way thirty lines up, and the spelling
+    // `flood_exempt` already uses. Compared exactly, our own reflection reads
+    // as a stranger's and goes through checks meant for other people:
+    // duplicate-text suppression then eats the SECOND time the user sends the
+    // same line, so their own message disappears from their own buffer. With
+    // a translated send that is worse than cosmetic — the decoration was
+    // consumed above, so the place held for the reflection is left with
+    // nothing that can ever fill it, and the conversation stalls behind the
+    // barrier until the queue's expiry.
+    if state.flood_protection && !is_own && !flood_exempt {
         let now = Instant::now();
 
         if ident.starts_with('~') {
@@ -1701,6 +1822,7 @@ fn handle_privmsg(
     // Save nick before moving into Message — needed for mentions buffer below.
     let nick_saved = if is_mention { Some(nick.clone()) } else { None };
     let msg = Message {
+        log_key: None,
         id,
         timestamp: ts,
         message_type: MessageType::Message,
@@ -1720,50 +1842,40 @@ fn handle_privmsg(
         // real message and leave the placeholder showing until restart. Real
         // messages keep their tags.
         tags: if e2e_transient_line { None } else { tags },
+        // Set only for a decorated reflection of our own send — the row shows
+        // `translation [original]` while the wire carried the translation
+        // alone, so identity has to come from the wire text.
+        wire_origin: own_origin,
+        translation_suffix_at: None,
     };
     // Placeholders are delivered transiently (never logged) so they don't
     // persist; the decrypted replay is logged + surfaced under the real @msgid.
+    // `true` when translation took the row over: its mention is then built
+    // at release, from the text the channel actually ends up showing.
+    let deferred_for_translation;
     if e2e_transient_line {
+        deferred_for_translation = false;
         state.add_transient_message_with_activity(&buffer_id, msg, activity);
+    } else if let Some(d) = decoration.as_ref() {
+        // A reflection of our own send: takes the place reserved when the
+        // user pressed Enter, so it keeps its position among the lines that
+        // arrived while it was being translated. See the ACTION branch on
+        // why the reserved id is the order key and not the row's own, and on
+        // why every chunk but the last is parked rather than delivered.
+        deferred_for_translation = false;
+        if d.is_last {
+            state.add_own_message(&buffer_id, d.echo_id, msg);
+        } else {
+            state.hold_own_message_chunk(&buffer_id, d.echo_id, msg);
+        }
     } else {
-        state.add_message_with_activity(&buffer_id, msg, activity);
+        deferred_for_translation = state.add_message_with_activity(&buffer_id, msg, activity);
     }
 
     // Push to mentions buffer — channel highlights only (not PMs/queries).
-    if is_mention && target_is_channel && state.buffers.contains_key("_mentions") {
+    if is_mention && target_is_channel && !deferred_for_translation {
         let nick = nick_saved.unwrap_or_default();
-        let conn_label = state
-            .connections
-            .get(conn_id)
-            .map_or(conn_id, |c| c.label.as_str());
-        let datetime = ts
-            .with_timezone(&chrono::Local)
-            .format("%Y/%m/%d %H:%M:%S")
-            .to_string();
-        let mention_text = crate::ui::format_mention_line(
-            &datetime,
-            conn_label,
-            target,
-            &nick,
-            text,
-            state.nick_color_sat,
-            state.nick_color_lit,
-        );
-        let mention_msg = Message {
-            id: state.next_message_id(),
-            timestamp: ts,
-            message_type: MessageType::MentionLog,
-            nick: None,
-            nick_mode: None,
-            text: mention_text,
-            highlight: true,
-            event_key: None,
-            event_params: None,
-            log_msg_id: None,
-            log_ref_id: None,
-            tags: None,
-        };
-        state.add_mention_to_buffer(mention_msg);
+        state.fan_out_mention(conn_id, target, &nick, text, ts);
     }
 }
 
@@ -1837,12 +1949,19 @@ fn handle_notice(
         } else {
             None
         };
+        let is_handshake = state.e2e_manager.as_ref().and_then(|_| rpe2e_handshake_body(text)).is_some();
+        let level = if (text.starts_with('\x01') && text.ends_with('\x01')) || is_handshake
+        {
+            IgnoreLevel::Ctcps
+        } else {
+            IgnoreLevel::Notices
+        };
         if should_ignore(
             &state.ignores,
             &n,
             Some(&ident),
             Some(&host),
-            &IgnoreLevel::Notices,
+            &level,
             channel,
         ) {
             return;
@@ -1877,6 +1996,7 @@ fn handle_notice(
     state.add_message(
         &buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: message_timestamp(tags.as_ref()),
             message_type: MessageType::Notice,
@@ -1889,6 +2009,8 @@ fn handle_notice(
             log_msg_id: None,
             log_ref_id: None,
             tags,
+            wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -2067,6 +2189,7 @@ fn handle_join(
     state.add_message(
         &buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: message_timestamp(tags.as_ref()),
             message_type: MessageType::Event,
@@ -2089,6 +2212,8 @@ fn handle_join(
             log_msg_id: None,
             log_ref_id: None,
             tags,
+            wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -2169,6 +2294,7 @@ fn handle_account(
         state.add_message(
             &buf_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: message_timestamp(tags.as_ref()),
                 message_type: MessageType::Event,
@@ -2181,6 +2307,8 @@ fn handle_account(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: tags.clone(),
+                wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -2472,6 +2600,7 @@ fn observe_dm_peer_handle(state: &mut AppState, conn_id: &str, nick: &str, new_h
         && buf.buffer_type == BufferType::Query
     {
         buf.peer_handle = Some(new_handle.to_string());
+        state.push_buffer_e2e_status(&dm_buffer_id);
     }
 }
 
@@ -2532,6 +2661,7 @@ fn handle_chghost(
         || track_dm_handle_change(state, conn_id, &nick, prev_handle.as_deref(), &new_handle);
 
     // Update ident/host + the cached DM peer_handle in shared buffers.
+    let mut changed_query_ids = Vec::new();
     for buf in state.buffers.values_mut() {
         if buf.connection_id != conn_id {
             continue;
@@ -2549,7 +2679,11 @@ fn handle_chghost(
             && buf.name.eq_ignore_ascii_case(&nick)
         {
             buf.peer_handle = Some(new_handle.clone());
+            changed_query_ids.push(buf.id.clone());
         }
+    }
+    for buffer_id in changed_query_ids {
+        state.push_buffer_e2e_status(&buffer_id);
     }
 
     // Log a subtle event in every shared channel
@@ -2571,6 +2705,7 @@ fn handle_chghost(
         state.add_message(
             &buf_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: message_timestamp(tags.as_ref()),
                 message_type: MessageType::Event,
@@ -2587,6 +2722,8 @@ fn handle_chghost(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: tags.clone(),
+                wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -2649,6 +2786,7 @@ fn handle_part(
         state.add_message(
             &buffer_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: message_timestamp(tags.as_ref()),
                 message_type: MessageType::Event,
@@ -2667,6 +2805,8 @@ fn handle_part(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags,
+                wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -2720,6 +2860,22 @@ fn handle_quit(
         push_typing_web_event(state, &buf_id);
     }
 
+    // A translated private message may be in the worker right now, addressed
+    // to this nick. A rename is answerable — the conversation moved and is
+    // followed — but a quit answers nothing: the server simply frees the
+    // name, and the next person to ask for it gets it. Sending immediately
+    // races that by milliseconds; holding the text for a translation makes
+    // the race seconds wide, so the mechanism that opened it has to record
+    // the fact. Recorded BEFORE the ignore and netsplit returns below: those
+    // decide what is shown, and this is about who the name means.
+    //
+    // Only for a conversation with a send actually in flight, so a netsplit's
+    // thousand quits do not become a thousand entries.
+    let query_id = crate::state::buffer::make_buffer_id(conn_id, &nick);
+    if state.has_outgoing_in_flight(&query_id, AppState::redirect_ttl()) {
+        state.note_query_departure(&query_id);
+    }
+
     // --- Ignore check ---
     if should_ignore(
         &state.ignores,
@@ -2751,6 +2907,7 @@ fn handle_quit(
         state.add_message(
             buf_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: ts,
                 message_type: MessageType::Event,
@@ -2776,6 +2933,8 @@ fn handle_quit(
                     Some(primary_msg_id.clone())
                 },
                 tags: tags.clone(),
+                wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -2783,7 +2942,39 @@ fn handle_quit(
 
 /// Rename query buffers in `affected` to `new_nick`.
 /// Re-keys the buffer in the `IndexMap` and updates `active_buffer_id`.
-fn rename_query_buffers(state: &mut AppState, conn_id: &str, new_nick: &str, affected: &[String]) {
+/// Test hook for [`rename_query_buffers`], which is where a peer's nick
+/// change is turned into a redirect.
+#[cfg(test)]
+pub fn rename_query_buffers_for_test(
+    state: &mut AppState,
+    conn_id: &str,
+    old_nick: &str,
+    new_nick: &str,
+    affected: &[String],
+) {
+    rename_query_buffers(state, conn_id, old_nick, new_nick, affected);
+}
+
+fn rename_query_buffers(
+    state: &mut AppState,
+    conn_id: &str,
+    old_nick: &str,
+    new_nick: &str,
+    affected: &[String],
+) {
+    // A query whose window was CLOSED is not in `affected`, so nothing below
+    // would record that this conversation moved — and a translated private
+    // message still in the worker would then be addressed to the abandoned
+    // nick, which somebody else may already hold. The in-flight marker
+    // outlives the window precisely so this case is still answerable.
+    let old_id = make_buffer_id(conn_id, old_nick);
+    let new_id = make_buffer_id(conn_id, new_nick);
+    if old_id != new_id
+        && !state.buffers.contains_key(&old_id)
+        && state.has_outgoing_in_flight(&old_id, AppState::redirect_ttl())
+    {
+        state.rekey_buffer_state(&old_id, &new_id);
+    }
     for buf_id in affected {
         let is_query = state
             .buffers
@@ -2796,10 +2987,29 @@ fn rename_query_buffers(state: &mut AppState, conn_id: &str, new_nick: &str, aff
         if let Some(mut buf) = state.buffers.shift_remove(buf_id) {
             buf.name = new_nick.to_string();
             buf.id.clone_from(&new_buf_id);
+            // The nick being renamed ONTO may still hold a previous
+            // conversation, queue and all — somebody who quit or renamed away
+            // moments ago, with lines the network delivered still waiting on
+            // their translations. The insert below replaces that window
+            // wholesale, so the queue must be dealt with FIRST and while its
+            // own conversation is still the one at this id: released normally
+            // it would print, log and broadcast one person's private lines
+            // inside another's window. `rekey_buffer_state` releases a stale
+            // queue for the callers that do not replace the buffer; this one
+            // does, so it retires it instead.
+            state.retire_translate_queue(&new_buf_id);
             state.buffers.insert(new_buf_id.clone(), buf);
             if state.active_buffer_id.as_deref() == Some(buf_id.as_str()) {
-                state.active_buffer_id = Some(new_buf_id);
+                state.active_buffer_id.clone_from(&Some(new_buf_id.clone()));
             }
+            // Everything else keyed by buffer id has to move with it.
+            // Anything left under the old key is not merely stale: the queue
+            // would keep releasing lines toward a buffer that no longer
+            // exists (so they are dropped), and the per-buffer translate
+            // settings would stop matching, silently ending translation
+            // mid-conversation because the person on the other end typed
+            // `/nick`.
+            state.rekey_buffer_state(buf_id, &new_buf_id);
         }
     }
 }
@@ -2891,7 +3101,7 @@ fn handle_nick_change(
             for buf_id in &affected {
                 state.update_nick(buf_id, &old_nick, new_nick);
             }
-            rename_query_buffers(state, conn_id, new_nick, &affected);
+            rename_query_buffers(state, conn_id, &old_nick, new_nick, &affected);
             return;
         }
     }
@@ -2956,6 +3166,7 @@ fn handle_nick_change(
         state.add_message(
             buf_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: ts,
                 message_type: MessageType::Event,
@@ -2976,14 +3187,20 @@ fn handle_nick_change(
                     Some(primary_msg_id.clone())
                 },
                 tags: tags.clone(),
+                wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
 
-    rename_query_buffers(state, conn_id, new_nick, &affected);
+    rename_query_buffers(state, conn_id, &old_nick, new_nick, &affected);
 }
 
-#[expect(clippy::too_many_arguments, reason = "IRC KICK has many parameters")]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "IRC KICK handling owns the channel, server, and landing-buffer updates"
+)]
 fn handle_kick(
     state: &mut AppState,
     conn_id: &str,
@@ -2997,13 +3214,11 @@ fn handle_kick(
     let (kicker, kicker_ident, kicker_host) = extract_nick_userhost(prefix);
     let buffer_id = make_buffer_id(conn_id, channel);
     let reason_str = reason.unwrap_or("");
-
     // The person who was kicked stopped typing — not the kicker, and
     // regardless of ignore (spec §1.2).
     if state.typing.clear(&buffer_id, kicked_user) {
         push_typing_web_event(state, &buffer_id);
     }
-
     // --- Ignore check (never ignore kicks against us) ---
     if kicked_user != our_nick
         && should_ignore(
@@ -3019,7 +3234,6 @@ fn handle_kick(
         state.remove_nick(&buffer_id, kicked_user);
         return;
     }
-
     let ts = message_timestamp(tags.as_ref());
     if kicked_user == our_nick {
         let text = format!("You were kicked from {channel} by {kicker} ({reason_str})");
@@ -3042,9 +3256,9 @@ fn handle_kick(
                              p: Option<Vec<String>>,
                              tg: Option<HashMap<String, String>>|
          -> Message {
-            let id = state.next_message_id();
             Message {
-                id,
+                log_key: None,
+                id: state.next_message_id(),
                 timestamp: ts,
                 message_type: MessageType::Event,
                 nick: None,
@@ -3056,6 +3270,8 @@ fn handle_kick(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: tg,
+                wire_origin: None,
+                translation_suffix_at: None,
             }
         };
 
@@ -3092,6 +3308,7 @@ fn handle_kick(
         state.add_message(
             &buffer_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: ts,
                 message_type: MessageType::Event,
@@ -3109,6 +3326,8 @@ fn handle_kick(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags,
+                wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -3139,6 +3358,7 @@ fn handle_topic(
         state.add_message(
             &buffer_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: message_timestamp(tags.as_ref()),
                 message_type: MessageType::Event,
@@ -3151,6 +3371,8 @@ fn handle_topic(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags,
+                wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -3206,6 +3428,7 @@ fn handle_mode(
         state.add_message(
             &buffer_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: ts,
                 message_type: MessageType::Event,
@@ -3218,6 +3441,8 @@ fn handle_mode(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags,
+                wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     } else {
@@ -3230,6 +3455,7 @@ fn handle_mode(
         state.add_message(
             &server_buf,
             Message {
+                log_key: None,
                 id,
                 timestamp: ts,
                 message_type: MessageType::Event,
@@ -3242,6 +3468,8 @@ fn handle_mode(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags,
+                wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -3513,6 +3741,7 @@ fn handle_invite(
         state.add_message(
             &buffer_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: message_timestamp(tags.as_ref()),
                 message_type: MessageType::Event,
@@ -3525,6 +3754,8 @@ fn handle_invite(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags,
+                wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     } else {
@@ -3535,6 +3766,7 @@ fn handle_invite(
             state.add_message(
                 &buffer_id,
                 Message {
+                    log_key: None,
                     id,
                     timestamp: message_timestamp(tags.as_ref()),
                     message_type: MessageType::Event,
@@ -3547,6 +3779,8 @@ fn handle_invite(
                     log_msg_id: None,
                     log_ref_id: None,
                     tags,
+                    wire_origin: None,
+                    translation_suffix_at: None,
                 },
             );
         }
@@ -4158,6 +4392,33 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
         // Silently consume RPL_ENDOFNAMES — we already have the nick list
         Response::RPL_ENDOFNAMES => {}
 
+        // 401/402/263 can answer a WHOIS but are not WHOIS-specific: 401 also
+        // answers PRIVMSG/NOTICE/INVITE/KICK aimed at a missing nick, 402 any
+        // command taking a server parameter, and 263 throttles any command at
+        // all. Numeric dispatch here is stateless, so it cannot know which
+        // command provoked the reply — the keys stay generic rather than
+        // asserting a WHOIS context we cannot verify, which would also drag
+        // WHOIS block styling onto a failed /msg.
+        Response::ERR_NOSUCHNICK | Response::ERR_NOSUCHSERVER | Response::RPL_TRYAGAIN => {
+            if args.len() >= 3 {
+                let key = match response {
+                    Response::ERR_NOSUCHNICK => "no_such_nick",
+                    Response::ERR_NOSUCHSERVER => "no_such_server",
+                    _ => "try_again",
+                };
+                // RPL_TRYAGAIN is a 2xx, so the catch-all below would route it
+                // to the server buffer — away from the command that provoked it.
+                let target_buf = active_or_server_buffer(state, conn_id);
+                emit_event(
+                    state,
+                    &target_buf,
+                    key,
+                    format!("%Zf7768e! %Za9b1d6{}%N %Z565f89{}%N", args[1], args[2]),
+                    vec![args[1].clone(), args[2].clone()],
+                );
+            }
+        }
+
         _ => {
             if matches!(
                 response,
@@ -4192,6 +4453,7 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
             state.add_message(
                 &buffer_id,
                 Message {
+                    log_key: None,
                     id,
                     timestamp: Utc::now(),
                     message_type: MessageType::Event,
@@ -4202,6 +4464,8 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
                     event_key: None,
                     event_params: None, log_msg_id: None, log_ref_id: None,
                     tags: None,
+                    wire_origin: None,
+                    translation_suffix_at: None,
                 },
             );
         }
@@ -4248,6 +4512,7 @@ pub fn emit(state: &mut AppState, buffer_id: &str, text: &str) {
     state.add_message(
         buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -4260,6 +4525,8 @@ pub fn emit(state: &mut AppState, buffer_id: &str, text: &str) {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -4275,6 +4542,7 @@ fn emit_event(
     state.add_message(
         buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -4287,6 +4555,8 @@ fn emit_event(
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -4337,18 +4607,70 @@ fn handle_whois_account(state: &mut AppState, conn_id: &str, args: &[String]) {
     }
 }
 
+/// Every theme key the WHOIS path can emit, plus the three generic error keys
+/// a WHOIS can provoke. `shipped_themes_define_every_whois_key` tests both
+/// bundled themes against this list, so a new key cannot ship with only one
+/// theme updated — add new keys here.
+#[cfg(test)]
+pub const WHOIS_EVENT_KEYS: &[&str] = &[
+    "whois_header",
+    "whois",
+    "whois_server",
+    "whois_oper",
+    "whois_idle",
+    "whois_idle_signon",
+    "whois_channels",
+    "whois_away",
+    "whois_account",
+    "whois_secure",
+    "whois_certfp",
+    "whois_keyvalue",
+    "whois_special",
+    "whois_registered",
+    "whois_help",
+    "whois_bot",
+    "whois_actually",
+    "whois_host",
+    "whois_modes",
+    "end_of_whois",
+    "no_such_nick",
+    "no_such_server",
+    "try_again",
+];
+
 /// Theme event key for WHOIS numerics whose payload is freeform prose and
 /// which irc-proto has no `Response` variant for. Single source of truth for
 /// both the dispatch guard and the per-numeric theming.
-fn whois_freeform_key(numeric: &str) -> Option<&'static str> {
+///
+/// `args` is the full numeric argument list (`[our_nick, ...]`). It is only
+/// inspected for 377, which is `RPL_SPAM` (post-MOTD announcement text) in
+/// `AustHex` and a WHOIS usermode line elsewhere. The `usermodes` literal is a
+/// protocol token, not admin-authored prose, so keying on it is safe.
+fn whois_freeform_key(numeric: &str, args: &[String]) -> Option<&'static str> {
     match numeric {
         "307" => Some("whois_registered"),
         "310" => Some("whois_help"),
-        "320" => Some("whois_special"),
         "335" => Some("whois_bot"),
         "338" => Some("whois_actually"),
-        "378" => Some("whois_host"),
-        "379" => Some("whois_modes"),
+        // Prose with no dedicated key: 320 is IRCnet's catch-all
+        // `RPL_WHOISEXTRA` (cloak and TLS lines both, with server-configured
+        // text), 337 is hybrid's `RPL_WHOISTEXT` webirc info, and 275 is
+        // `RPL_USINGSSL` on Bahamut but `RPL_STATSDLINE` on hybrid/charybdis —
+        // stateless numeric dispatch cannot tell those two apart, so it
+        // renders 275 as prose rather than asserting "secure: TLS" over a
+        // /stats line.
+        "320" | "337" | "275" => Some("whois_special"),
+        // 378 is Unreal's `RPL_WHOISHOST`, 327 rusnet's.
+        "327" | "378" => Some("whois_host"),
+        // 379 is Unreal's `RPL_WHOISMODES`; 326 carries oper privileges as a
+        // mode string; 377 is the `<me> usermodes <nick> <modes>` form.
+        "326" | "379" => Some("whois_modes"),
+        // The 4-arg length check is load-bearing: 377's nick sits at args[2],
+        // so a 3-arg `<me> usermodes <nick>` has nothing left for the text
+        // slot. Claiming it here would make `handle_whois_freeform` bail and
+        // drop the line entirely; returning None lets it reach the generic
+        // catch-all and still display.
+        "377" if args.len() >= 4 && args[1] == "usermodes" => Some("whois_modes"),
         _ => None,
     }
 }
@@ -4395,20 +4717,24 @@ pub fn join_fields(command: &Command) -> Option<JoinFields<'_>> {
 /// text...]. Middle args (338's host/ip values) join into the text so every
 /// known wire variant renders.
 fn handle_whois_freeform(state: &mut AppState, conn_id: &str, numeric: &str, args: &[String]) {
-    let Some(event_key) = whois_freeform_key(numeric) else {
+    let Some(event_key) = whois_freeform_key(numeric, args) else {
         return;
     };
-    if args.len() < 3 {
+    // 377's WHOIS form is `<me> usermodes <nick> <modes>` — the nick sits one
+    // position further right than in every other freeform numeric, so reading
+    // args[1] there would put the `usermodes` literal in the nick slot.
+    let (nick_idx, text_from) = if numeric == "377" { (2, 3) } else { (1, 2) };
+    if args.len() <= text_from {
         return;
     }
-    let text = args[2..].join(" ");
+    let text = args[text_from..].join(" ");
     let target_buf = whois_buffer(state, conn_id);
     emit_event(
         state,
         &target_buf,
         event_key,
         format!("%Z565f89  %Za9b1d6{text}%N"),
-        vec![args[1].clone(), text],
+        vec![args[nick_idx].clone(), text],
     );
 }
 
@@ -4821,6 +5147,12 @@ enum RpEe2eOutcome {
     NotE2e,
 }
 
+fn rpe2e_handshake_body(text: &str) -> Option<&str> {
+    let trimmed = text.strip_prefix('\x01').unwrap_or(text);
+    let inner = trimmed.strip_suffix('\x01').unwrap_or(trimmed);
+    (inner.split_whitespace().next() == Some(crate::e2e::handshake::CTCP_TAG)).then_some(inner)
+}
+
 /// Try to dispatch an incoming CTCP body as an RPE2E KEYREQ/KEYRSP.
 /// Returns `None` if the E2E manager is not initialized (caller treats
 /// this as "not handled" and falls through to the default rendering).
@@ -4843,11 +5175,9 @@ fn try_dispatch_rpe2e_ctcp(
 
     // Strip optional CTCP framing \x01...\x01. Servers sometimes drop the
     // trailing byte, so accept both variants and anything in between.
-    let trimmed = text.strip_prefix('\x01').unwrap_or(text);
-    let inner = trimmed.strip_suffix('\x01').unwrap_or(trimmed);
-    if !inner.starts_with(crate::e2e::handshake::CTCP_TAG) {
+    let Some(inner) = rpe2e_handshake_body(text) else {
         return Some(RpEe2eOutcome::NotE2e);
-    }
+    };
     let mgr = state.e2e_manager.clone()?;
 
     let (nick, ident, host) = extract_nick_userhost(prefix);
@@ -5135,6 +5465,7 @@ fn emit_e2e_debug(
     state.add_message(
         &target_buffer,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -5147,6 +5478,8 @@ fn emit_e2e_debug(
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -5162,6 +5495,7 @@ fn emit_e2e_message(
     state.add_message(
         buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -5174,6 +5508,8 @@ fn emit_e2e_message(
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -5428,6 +5764,7 @@ pub(crate) fn e2e_event_message(
     highlight: bool,
 ) -> Message {
     Message {
+        log_key: None,
         id,
         timestamp: Utc::now(),
         message_type: MessageType::Event,
@@ -5440,6 +5777,8 @@ pub(crate) fn e2e_event_message(
         log_msg_id: None,
         log_ref_id: None,
         tags: None,
+        wire_origin: None,
+        translation_suffix_at: None,
     }
 }
 
@@ -5617,6 +5956,7 @@ mod tests {
                 autosendcmd: None,
                 sasl_mechanism: None,
                 client_cert_path: None,
+                sasl_key_path: None,
             },
             local_ip: None,
             enabled_caps: std::collections::HashSet::new(),
@@ -5993,6 +6333,254 @@ mod tests {
                 .unwrap()
                 .text
                 .contains("frank is now known as frankie")
+        );
+    }
+
+    #[test]
+    fn a_query_rename_carries_the_translation_state_with_it() {
+        // The peer typing `/nick` re-keys their query buffer. Anything left
+        // under the old id is not merely stale: the reorder queue keeps
+        // releasing lines toward a buffer that no longer exists, so they are
+        // dropped, and the per-buffer settings stop matching, so translation
+        // silently stops mid-conversation.
+        let mut state = make_test_state();
+        state.add_buffer(Buffer::for_test("test", BufferType::Query, "frank"));
+        state.translate_buffers.insert(
+            "test/frank".to_string(),
+            crate::config::TranslateBufferConfig {
+                incoming: true,
+                outgoing: true,
+                lang: Some("de".to_string()),
+                my_lang: None,
+            },
+        );
+        let mut queue = crate::translate::queue::TranslateQueue::new();
+        queue.reserve(1);
+        state
+            .translate_queues
+            .insert("test/frank".to_string(), queue);
+        state.decorate_own_echo(
+            "test/frank",
+            crate::state::AppState::own_echo_decoration(
+                "mein satz".to_string(),
+                7,
+                Some((
+                    "mein satz [moje zdanie]".to_string(),
+                    crate::state::buffer::WireOrigin {
+                        text: "mein satz".to_string(),
+                        suffix_at: Some(9),
+                    },
+                )),
+                true,
+            ),
+        );
+
+        let msg = make_irc_msg(Some("frank!user@host"), Command::NICK("frankie".into()));
+        handle_irc_message(&mut state, "test", &msg);
+
+        assert!(
+            state.translate_buffers.contains_key("test/frankie"),
+            "the settings follow the conversation, not the old nick"
+        );
+        assert!(!state.translate_buffers.contains_key("test/frank"));
+        assert!(
+            state.translate_queues.contains_key("test/frankie"),
+            "in-flight lines still have a buffer to be released into"
+        );
+        assert!(!state.translate_queues.contains_key("test/frank"));
+        assert!(
+            state
+                .take_own_echo_decoration("test/frankie", "mein satz")
+                .is_some(),
+            "and a reflection still in transit is still recognised"
+        );
+        assert_eq!(
+            state.pending_buffer_rekeys,
+            vec![("test/frank".to_string(), "test/frankie".to_string())],
+            "the App is told, so the config key it owns moves too"
+        );
+    }
+
+    /// A channel mid-translation: a place held for our own reflection, and a
+    /// peer's line already resolved and waiting behind that barrier.
+    ///
+    /// Returns the state; the reflection itself is `:me!u@h PRIVMSG #rust
+    /// :mein satz`, whose decoration is filed under `echo_id` 1.
+    fn channel_awaiting_our_own_reflection() -> AppState {
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        let mut queue = crate::translate::queue::TranslateQueue::new();
+        queue.reserve(1);
+        let reply =
+            crate::state::events::tests::make_test_message(&mut state, "odpowiedz kolegi");
+        queue.push_resolved(reply.id, reply, crate::state::buffer::ActivityLevel::Activity);
+        state.translate_queues.insert("test/#rust".to_string(), queue);
+        state.decorate_own_echo(
+            "test/#rust",
+            crate::state::AppState::own_echo_decoration("mein satz".to_string(), 1, None, true),
+        );
+        state
+    }
+
+    fn rows(state: &AppState, buffer_id: &str) -> Vec<String> {
+        state.buffers[buffer_id]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn an_ignore_rule_that_eats_our_own_reflection_still_lifts_the_barrier() {
+        // An ignore mask can cover US — `*!*@*` on a channel someone is
+        // flooding, or any pattern that happens to match our own host. The
+        // decoration is consumed before the ignore check runs, so after this
+        // return NOTHING can ever fill the place reserved when the user
+        // pressed Enter, and the reply that arrived while we were translating
+        // sits behind it until the queue's expiry.
+        let mut state = channel_awaiting_our_own_reflection();
+        ignore(&mut state, "*!*@*", vec![IgnoreLevel::Public]);
+
+        let reflection: IrcMessage = ":me!u@h PRIVMSG #rust :mein satz\r\n"
+            .parse()
+            .expect("valid");
+        handle_irc_message(&mut state, "test", &reflection);
+
+        assert_eq!(
+            rows(&state, "test/#rust"),
+            vec!["odpowiedz kolegi".to_string()],
+            "our own line is dropped, as the ignore asked — but the reply \
+             behind it is not held hostage to a reflection that will never come"
+        );
+        assert!(
+            !state.translate_queues.contains_key("test/#rust"),
+            "and nothing is left holding the queue open"
+        );
+    }
+
+    #[test]
+    fn our_own_reflection_never_goes_through_the_flood_gate() {
+        // Flood protection exists to shield the user from OTHER people. The
+        // gate spelled that `nick != our_nick`, compared exactly — but IRC
+        // nicks are case-insensitive and an `echo-message` server may reflect
+        // ours in a different case, which is precisely why `is_own` is
+        // computed with `eq_ignore_ascii_case` and why `flood_exempt` right
+        // above already uses it.
+        //
+        // Compared exactly, our own reflection reads as a stranger's: send
+        // the same line three times and duplicate-text suppression eats the
+        // third, so the user's own message never appears in their own buffer.
+        // On a translated buffer it also strands the place held for it, since
+        // the decoration was consumed before this check runs.
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        state.flood_protection = true;
+
+        // Fill the duplicate window with somebody else's traffic, so the
+        // next repeated line is inside the window the check looks at.
+        for i in 0..4 {
+            let filler: IrcMessage = format!(":alice!u@h PRIVMSG #rust :filler {i}\r\n")
+                .parse()
+                .expect("valid");
+            handle_irc_message(&mut state, "test", &filler);
+        }
+
+        // Our nick is "me"; the server reflects it as "Me".
+        for _ in 0..3 {
+            let reflection: IrcMessage = ":Me!u@h PRIVMSG #rust :mein satz\r\n"
+                .parse()
+                .expect("valid");
+            handle_irc_message(&mut state, "test", &reflection);
+        }
+
+        let mine = rows(&state, "test/#rust")
+            .iter()
+            .filter(|t| t.contains("mein satz"))
+            .count();
+        assert_eq!(
+            mine, 3,
+            "every one of our own lines is shown; none is mistaken for a stranger \
+             flooding us: {:?}",
+            rows(&state, "test/#rust")
+        );
+    }
+
+    #[test]
+    fn a_handshake_shaped_reflection_the_dispatcher_eats_still_lifts_the_barrier() {
+        // The seam refuses `\x01` but not prose that merely BEGINS with the
+        // handshake tag, so a broken backend can answer `RPEE2E …` and the
+        // send path ships it as a translation. The reflection then matches
+        // its decoration — and, because our own handshake echoes are
+        // swallowed, the RPE2E dispatcher eats the line before delivery.
+        // That exit has to give the reserved place back like every other
+        // dropped reflection, or the reply behind the barrier waits out the
+        // full queue expiry.
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        // The dispatcher only answers at all when a manager exists; without
+        // one the line would fall through to ordinary delivery and this test
+        // would prove nothing.
+        let db = crate::storage::db::open_database(false).unwrap();
+        let keyring = crate::e2e::keyring::Keyring::new(std::sync::Arc::new(
+            std::sync::Mutex::new(db),
+        ));
+        state.e2e_manager = Some(std::sync::Arc::new(
+            crate::e2e::manager::E2eManager::load_or_init(keyring).unwrap(),
+        ));
+
+        let handshake_shaped = "RPEE2E KEYREQ backend nonsense";
+        let mut queue = crate::translate::queue::TranslateQueue::new();
+        queue.reserve(1);
+        let reply =
+            crate::state::events::tests::make_test_message(&mut state, "odpowiedz kolegi");
+        queue.push_resolved(reply.id, reply, crate::state::buffer::ActivityLevel::Activity);
+        state.translate_queues.insert("test/#rust".to_string(), queue);
+        state.decorate_own_echo(
+            "test/#rust",
+            crate::state::AppState::own_echo_decoration(
+                handshake_shaped.to_string(),
+                1,
+                None,
+                true,
+            ),
+        );
+
+        let reflection: IrcMessage = format!(":me!u@h PRIVMSG #rust :{handshake_shaped}\r\n")
+            .parse()
+            .expect("valid");
+        handle_irc_message(&mut state, "test", &reflection);
+
+        assert_eq!(
+            rows(&state, "test/#rust"),
+            vec!["odpowiedz kolegi".to_string()],
+            "the dispatcher ate our line, as it does every own handshake echo — \
+             but the reply behind the barrier is delivered now, not at expiry"
+        );
+        assert!(
+            !state.translate_queues.contains_key("test/#rust"),
+            "and nothing is left holding the queue open"
+        );
+    }
+
+    #[test]
+    fn a_suppressed_line_from_somebody_else_leaves_our_reservation_alone() {
+        // The counterpart: the release is keyed on the line being OURS. A
+        // script eating a peer's message must not hand back the place our own
+        // send is still waiting for, or our line lands after the replies it
+        // came before.
+        let mut state = channel_awaiting_our_own_reflection();
+        let theirs: IrcMessage = ":alice!u@h PRIVMSG #rust :mein satz\r\n"
+            .parse()
+            .expect("valid");
+        release_suppressed_own_echo(&mut state, "test", &theirs);
+
+        assert!(
+            rows(&state, "test/#rust").is_empty(),
+            "the barrier stands: our own reflection is still coming"
+        );
+        assert!(
+            state.translate_queues["test/#rust"].has_reservation(),
+            "and the place held for it is untouched"
         );
     }
 
@@ -7146,6 +7734,66 @@ mod tests {
 
         let buf = state.buffers.get("test/bob").unwrap();
         assert_eq!(buf.peer_handle.as_deref(), Some("~bob@user/bob"));
+    }
+
+    #[test]
+    fn learning_a_query_peer_handle_refreshes_the_web_e2e_status() {
+        use crate::e2e::keyring::{ChannelConfig, ChannelMode, Keyring};
+        use crate::e2e::manager::E2eManager;
+        use std::sync::{Arc, Mutex};
+
+        let conn = crate::storage::db::open_database(false).unwrap();
+        let manager = E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(conn)))).unwrap();
+        manager
+            .keyring()
+            .set_channel_config(&ChannelConfig {
+                channel: crate::e2e::scoped_context("TestServer", "@~bob@new.host"),
+                enabled: true,
+                mode: ChannelMode::Normal,
+            })
+            .unwrap();
+
+        let mut state = make_test_state();
+        state.e2e_manager = Some(Arc::new(manager));
+        state.add_buffer(Buffer {
+            id: "test/bob".to_string(),
+            connection_id: "test".to_string(),
+            buffer_type: BufferType::Query,
+            name: "bob".to_string(),
+            messages: VecDeque::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
+            peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
+            log_initial_loaded: false,
+            pin_backlog: false,
+        });
+        state.pending_web_events.clear();
+
+        let msg = make_irc_msg(
+            Some("bob!~bob@new.host"),
+            Command::PRIVMSG("me".into(), "hello".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let status = state.pending_web_events.iter().find_map(|event| match event {
+            crate::web::protocol::WebEvent::BufferE2eChanged { buffer_id, enabled } => {
+                Some((buffer_id.as_str(), *enabled))
+            }
+            _ => None,
+        });
+        assert_eq!(status, Some(("test/bob", true)));
     }
 
     #[test]
@@ -9148,6 +9796,188 @@ mod tests {
     }
 
     #[test]
+    fn shipped_themes_define_every_whois_key() {
+        for (name, src) in [
+            ("default.theme", include_str!("../../themes/default.theme")),
+            ("spring.theme", include_str!("../../themes/spring.theme")),
+        ] {
+            let theme: crate::theme::ThemeFile =
+                toml::from_str(src).unwrap_or_else(|e| panic!("{name} must parse: {e}"));
+            for key in WHOIS_EVENT_KEYS {
+                assert!(
+                    theme.formats.events.contains_key(*key),
+                    "{name} is missing event format `{key}`"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn whois_extra_freeform_numerics_get_event_keys() {
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        for (numeric, expected_key, text) in [
+            ("326", "whois_modes", "has oper privs: +Aa"),
+            ("327", "whois_host", "real.host.example 1.2.3.4 Real hostname/IP"),
+            ("337", "whois_special", "is connected via a webirc gateway"),
+            ("275", "whois_special", "is using a secure connection (SSL)"),
+        ] {
+            let msg = make_irc_msg(
+                None,
+                Command::Raw(
+                    numeric.to_string(),
+                    vec!["me".to_string(), "alice".to_string(), text.to_string()],
+                ),
+            );
+            handle_irc_message(&mut state, "test", &msg);
+
+            let buf = state.buffers.get("test/testserver").unwrap();
+            let m = buf.messages.back().unwrap();
+            assert_eq!(
+                m.event_key.as_deref(),
+                Some(expected_key),
+                "numeric {numeric} should map to {expected_key}"
+            );
+            assert_eq!(
+                m.event_params.as_deref(),
+                Some(&["alice".to_string(), text.to_string()][..]),
+                "numeric {numeric} params"
+            );
+        }
+    }
+
+    #[test]
+    fn whois_377_maps_to_modes_only_with_usermodes_literal() {
+        // AustHex uses 377 as RPL_SPAM for post-MOTD announcement text. Only
+        // the `<me> usermodes <nick> <modes>` shape is a WHOIS usermode line,
+        // and `usermodes` is a protocol literal rather than admin-authored
+        // prose, so keying on it is safe.
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        let whois_form = make_irc_msg(
+            None,
+            Command::Raw(
+                "377".to_string(),
+                vec![
+                    "me".to_string(),
+                    "usermodes".to_string(),
+                    "alice".to_string(),
+                    "+iwx".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &whois_form);
+        let buf = state.buffers.get("test/testserver").unwrap();
+        let m = buf.messages.back().unwrap();
+        assert_eq!(m.event_key.as_deref(), Some("whois_modes"));
+        assert_eq!(
+            m.event_params.as_deref(),
+            Some(&["alice".to_string(), "+iwx".to_string()][..]),
+            "377 must put the nick in $0, not the `usermodes` literal"
+        );
+
+        let spam_form = make_irc_msg(
+            None,
+            Command::Raw(
+                "377".to_string(),
+                vec![
+                    "me".to_string(),
+                    "alice".to_string(),
+                    "Network announcement text".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &spam_form);
+        let buf = state.buffers.get("test/testserver").unwrap();
+        let m = buf.messages.back().unwrap();
+        assert_eq!(
+            m.event_key, None,
+            "RPL_SPAM form of 377 must not be themed as a WHOIS line"
+        );
+    }
+
+    #[test]
+    fn every_whois_line_puts_the_nick_first() {
+        // $0 is the nick for every whois_* key, so a theme author can write
+        // "$0" without checking which numeric produced the line.
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        for (numeric, args) in [
+            ("307", vec!["me", "alice", "is a registered nick"]),
+            ("310", vec!["me", "alice", "is available for help"]),
+            ("320", vec!["me", "alice", "is a Cloaked Connection (Spoof)"]),
+            ("326", vec!["me", "alice", "has oper privs: +Aa"]),
+            ("327", vec!["me", "alice", "real.host 1.2.3.4"]),
+            ("335", vec!["me", "alice", "is a Bot"]),
+            ("337", vec!["me", "alice", "webirc gateway"]),
+            ("338", vec!["me", "alice", "is actually using host"]),
+            ("275", vec!["me", "alice", "is using a secure connection (SSL)"]),
+            ("378", vec!["me", "alice", "is connecting from *@h 1.2.3.4"]),
+            ("379", vec!["me", "alice", "is using modes +iwx"]),
+            ("377", vec!["me", "usermodes", "alice", "+iwx"]),
+        ] {
+            let msg = make_irc_msg(
+                None,
+                Command::Raw(
+                    numeric.to_string(),
+                    args.iter().map(|s| (*s).to_string()).collect(),
+                ),
+            );
+            handle_irc_message(&mut state, "test", &msg);
+
+            let buf = state.buffers.get("test/testserver").unwrap();
+            let m = buf.messages.back().unwrap();
+            assert!(
+                m.event_key
+                    .as_deref()
+                    .is_some_and(|k| k.starts_with("whois")),
+                "numeric {numeric} lost its whois key"
+            );
+            assert_eq!(
+                m.event_params
+                    .as_ref()
+                    .and_then(|p| p.first())
+                    .map(String::as_str),
+                Some("alice"),
+                "numeric {numeric} must put the nick in $0"
+            );
+        }
+    }
+
+    #[test]
+    fn whois_377_short_form_still_displays() {
+        // `<me> usermodes <nick>` with no mode string passes the usermodes
+        // guard but has nothing left for the text slot. It must fall through
+        // to the generic catch-all rather than being silently dropped.
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Raw(
+                "377".to_string(),
+                vec![
+                    "me".to_string(),
+                    "usermodes".to_string(),
+                    "alice".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/testserver").unwrap();
+        let m = buf
+            .messages
+            .back()
+            .expect("short 377 must still display something");
+        assert_eq!(m.event_key, None);
+        assert_eq!(m.text, "usermodes alice");
+    }
+
+    #[test]
     fn whois_raw_320_short_form_falls_to_catch_all() {
         // A 2-arg freeform numeric (no separate nick token) must not be
         // swallowed — it should fall through to the generic numeric
@@ -9216,6 +10046,75 @@ mod tests {
         let buf = state.buffers.get("test/testserver").unwrap();
 
         assert_eq!(buf.messages[0].event_key.as_deref(), Some("whois_idle"));
+    }
+
+    #[test]
+    fn whois_error_numerics_get_event_keys() {
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        for (response, args, expected_key) in [
+            (
+                Response::ERR_NOSUCHNICK,
+                vec!["me", "ghost", "No such nick/channel"],
+                "no_such_nick",
+            ),
+            (
+                Response::ERR_NOSUCHSERVER,
+                vec!["me", "irc.example.net", "No such server"],
+                "no_such_server",
+            ),
+            (
+                Response::RPL_TRYAGAIN,
+                vec!["me", "WHOIS", "Please wait a while and try again."],
+                "try_again",
+            ),
+        ] {
+            let msg = make_irc_msg(
+                None,
+                Command::Response(response, args.iter().map(|s| (*s).to_string()).collect()),
+            );
+            handle_irc_message(&mut state, "test", &msg);
+
+            let buf = state.buffers.get("test/testserver").unwrap();
+            let m = buf.messages.back().unwrap();
+            assert_eq!(
+                m.event_key.as_deref(),
+                Some(expected_key),
+                "{response:?} should map to {expected_key}"
+            );
+            assert_eq!(
+                m.event_params.as_deref(),
+                Some(&[args[1].to_string(), args[2].to_string()][..]),
+                "{response:?} params"
+            );
+        }
+    }
+
+    #[test]
+    fn try_again_lands_in_active_window_not_server_buffer() {
+        // 263 is a 2xx, so the generic catch-all sent it to the server buffer
+        // while the rest of the WHOIS reply went to the active window —
+        // splitting one logical reply across two buffers.
+        let mut state = make_test_state();
+        state.set_active_buffer("test/#test");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::RPL_TRYAGAIN,
+                vec![
+                    "me".to_string(),
+                    "WHOIS".to_string(),
+                    "Please wait a while and try again.".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").expect("active buffer");
+        let m = buf.messages.back().expect("263 must land in active window");
+        assert_eq!(m.event_key.as_deref(), Some("try_again"));
     }
 
     #[test]
@@ -10490,6 +11389,60 @@ mod tests {
     }
 
     #[test]
+    fn a_quit_invalidates_a_private_message_still_in_the_translator() {
+        // A rename can be followed; a quit cannot. The server frees the nick
+        // there and then, and the next person to ask for it gets it — so a
+        // translated private message finishing a few seconds later would be
+        // addressed to whoever that turned out to be.
+        //
+        // Recorded whatever the display rules say: an ignored quit and a
+        // netsplit quit free the name exactly as loudly as any other.
+        for ignored in [false, true] {
+            let mut state = make_test_state();
+            state.add_buffer(make_channel_buffer("test", "#rust"));
+            handle_irc_message(
+                &mut state,
+                "test",
+                &":alice!u@h JOIN #rust\r\n".parse::<IrcMessage>().expect("valid"),
+            );
+            if ignored {
+                ignore(&mut state, "alice", vec![IgnoreLevel::All]);
+            }
+            let dispatched = std::time::Instant::now();
+            state.note_outgoing_dispatch("test/alice");
+
+            let quit: IrcMessage = ":alice!u@h QUIT :bye\r\n".parse().expect("valid");
+            handle_irc_message(&mut state, "test", &quit);
+
+            assert!(
+                state.query_departed_since("test/alice", dispatched),
+                "ignored={ignored}: the send in the translator was addressed \
+                 to a name that has just been freed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quit_with_nothing_in_flight_is_not_recorded() {
+        // The record exists for one question — "may this pending send still
+        // be addressed to that name" — and nothing else asks it. Writing one
+        // per quitting nick would turn a netsplit into thousands of entries
+        // that answer a question nobody has.
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        handle_irc_message(
+            &mut state,
+            "test",
+            &":alice!u@h JOIN #rust\r\n".parse::<IrcMessage>().expect("valid"),
+        );
+        let before = std::time::Instant::now();
+        let quit: IrcMessage = ":alice!u@h QUIT :bye\r\n".parse().expect("valid");
+        handle_irc_message(&mut state, "test", &quit);
+        assert!(!state.query_departed_since("test/alice", before));
+        assert!(state.query_departures.is_empty());
+    }
+
+    #[test]
     fn quit_from_an_ignored_user_still_clears_their_typing() {
         // Ignore suppresses the notification, not the state change — the same
         // convention the nick-list update right next to it follows.
@@ -10514,6 +11467,61 @@ mod tests {
             levels,
             channels: None,
         });
+    }
+
+    #[test]
+    fn notice_ctcp_uses_ctcps_instead_of_notices_level() {
+        for (level, text, suppressed) in [
+            (IgnoreLevel::Ctcps, "\x01VERSION client\x01", true),
+            (IgnoreLevel::Ctcps, "ordinary notice", false),
+            (IgnoreLevel::Notices, "\x01VERSION client\x01", false),
+            (IgnoreLevel::Notices, "ordinary notice", true),
+            (IgnoreLevel::Notices, "\x01VERSION incomplete", true),
+            (IgnoreLevel::Ctcps, "\x01VERSION incomplete", false),
+        ] {
+            let mut state = make_test_state();
+            state.add_buffer(make_channel_buffer("test", "#rust"));
+            ignore(&mut state, "alice", vec![level]);
+            let message: IrcMessage = format!(":alice!u@h NOTICE #rust :{text}\r\n")
+                .parse().unwrap();
+            handle_irc_message(&mut state, "test", &message);
+            assert_eq!(state.buffers["test/#rust"].messages.is_empty(), suppressed);
+        }
+    }
+
+    #[test]
+    fn similar_protocol_prefix_keeps_private_message_handle_tracking() {
+        let mut state = make_test_state();
+        let db = crate::storage::db::open_database(false).unwrap();
+        let keyring = crate::e2e::keyring::Keyring::new(std::sync::Arc::new(std::sync::Mutex::new(db)));
+        state.e2e_manager = Some(std::sync::Arc::new(crate::e2e::manager::E2eManager::load_or_init(keyring).unwrap()));
+        let message: IrcMessage = ":alice!u@new.host PRIVMSG me :RPEE2Extra ordinary message\r\n".parse().unwrap();
+        handle_irc_message(&mut state, "test", &message);
+        assert_eq!(state.resolve_query_peer_handle("test/alice", "alice").unwrap().as_deref(), Some("u@new.host"));
+    }
+
+    #[test]
+    fn handshake_recognition_requires_the_complete_protocol_tag() {
+        assert!(rpe2e_handshake_body("RPEE2Ex ordinary notice").is_none());
+        assert!(rpe2e_handshake_body("\x01RPEE2Ex ordinary notice").is_none());
+        assert!(rpe2e_handshake_body("RPEE2E KEYREQ truncated").is_some());
+    }
+
+    #[test]
+    fn ctcp_ignore_blocks_lenient_e2e_notice_dispatch() {
+        for text in ["\x01RPEE2E KEYREQ truncated", "RPEE2E KEYREQ truncated\x01", "RPEE2E KEYREQ truncated"] {
+            for (level, expected_dispatch) in [(IgnoreLevel::Ctcps, false), (IgnoreLevel::Notices, true)] {
+                let mut state = make_test_state();
+                let db = crate::storage::db::open_database(false).unwrap();
+                let keyring = crate::e2e::keyring::Keyring::new(std::sync::Arc::new(std::sync::Mutex::new(db)));
+                state.e2e_manager = Some(std::sync::Arc::new(crate::e2e::manager::E2eManager::load_or_init(keyring).unwrap()));
+                ignore(&mut state, "alice", vec![level]);
+                let message: IrcMessage = format!(":alice!u@h NOTICE me :{text}\r\n").parse().unwrap();
+                handle_irc_message(&mut state, "test", &message);
+                let handle = state.resolve_query_peer_handle("test/alice", "alice").unwrap();
+                assert_eq!(handle.is_some(), expected_dispatch);
+            }
+        }
     }
 
     #[test]

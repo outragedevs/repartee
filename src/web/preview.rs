@@ -268,7 +268,7 @@ pub async fn preview_handler(
     }
 
     // 4. Try the on-disk cache first.
-    let cache_path = extractor.cache_dir.join(format!("{}.jpg", &q.h));
+    let cache_path = extractor.cache_dir.join(format!("{}.jpg", q.h));
     if let Ok(bytes) = tokio::fs::read(&cache_path).await {
         return jpeg_response(bytes);
     }

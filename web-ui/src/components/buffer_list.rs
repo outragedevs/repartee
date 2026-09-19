@@ -73,6 +73,7 @@ pub fn BufferList() -> impl IntoView {
                     } else {
                         name
                     };
+                    let display_name = buffer_display_name(display_name, buf.e2e_enabled);
                     views.push(
                         view! {
                             <button type="button" class=class on:click=on_click
@@ -89,5 +90,28 @@ pub fn BufferList() -> impl IntoView {
                 views
             }}
         </div>
+    }
+}
+
+fn buffer_display_name(name: String, e2e_enabled: bool) -> String {
+    if e2e_enabled {
+        format!("{name} 🔒")
+    } else {
+        name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::buffer_display_name;
+
+    #[test]
+    fn enabled_e2e_appends_a_lock() {
+        assert_eq!(buffer_display_name("#rust".to_string(), true), "#rust 🔒");
+    }
+
+    #[test]
+    fn disabled_e2e_keeps_the_name_unchanged() {
+        assert_eq!(buffer_display_name("#rust".to_string(), false), "#rust");
     }
 }

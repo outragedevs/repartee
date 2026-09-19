@@ -8,6 +8,11 @@ use leptos::prelude::*;
 use crate::protocol::{SaveServerCmd, WebCommand};
 use crate::state::AppState;
 
+// The native crate's SASL mechanism list, verbatim. `web-ui` cannot depend on
+// the binary crate, and a hand-kept copy is exactly the thing that goes stale
+// the one time it matters — so the definition is shared instead of mirrored.
+include!("../../../src/irc/sasl_mechanism_names.rs");
+
 #[component]
 pub fn ServerWizard() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
@@ -35,6 +40,7 @@ pub fn ServerWizard() -> impl IntoView {
     let reconnect_max_retries = RwSignal::new(String::new());
     let autosendcmd = RwSignal::new(String::new());
     let client_cert_path = RwSignal::new(String::new());
+    let sasl_key_path = RwSignal::new(String::new());
     let page = RwSignal::new(0u8);
     let error = RwSignal::new(Option::<String>::None);
 
@@ -62,6 +68,7 @@ pub fn ServerWizard() -> impl IntoView {
             reconnect_max_retries.set(String::new());
             autosendcmd.set(String::new());
             client_cert_path.set(String::new());
+            sasl_key_path.set(String::new());
             page.set(0);
             error.set(None);
         }
@@ -118,6 +125,7 @@ pub fn ServerWizard() -> impl IntoView {
             sasl_mechanism: sasl_mechanism.get(),
             autosendcmd: autosendcmd.get(),
             client_cert_path: client_cert_path.get(),
+            sasl_key_path: sasl_key_path.get(),
             auto_reconnect: auto_reconnect.get(),
             reconnect_delay: reconnect_delay.get(),
             reconnect_max_retries: reconnect_max_retries.get(),
@@ -175,6 +183,7 @@ pub fn ServerWizard() -> impl IntoView {
                         {text_row("Reconnect max retries", reconnect_max_retries)}
                         {text_row("Autosendcmd", autosendcmd)}
                         {text_row("Client cert path", client_cert_path)}
+                        {text_row("SASL ECDSA key path", sasl_key_path)}
                     </Show>
                 </div>
                 {move || error.get().map(|e| view! { <p class="wizard-error" role="alert">{e}</p> })}
@@ -237,7 +246,12 @@ fn check_row(label: &'static str, sig: RwSignal<bool>) -> impl IntoView {
 }
 
 fn select_row(label: &'static str, sig: RwSignal<String>) -> impl IntoView {
-    let opts = ["Auto", "PLAIN", "EXTERNAL"];
+    // `SASL_MECHANISM_NAMES` is the native crate's own list, included above
+    // rather than copied — this picker and the TUI's are the same definition,
+    // so a mechanism added to the protocol shows up in both or neither.
+    let opts: Vec<&str> = std::iter::once("Auto")
+        .chain(SASL_MECHANISM_NAMES.iter().copied())
+        .collect();
     view! {
         <label class="wizard-row">
             <span class="wizard-label">{label}</span>

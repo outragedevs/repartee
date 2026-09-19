@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 
+use crate::e2e::crypto::fingerprint::fingerprint_hex;
 use crate::e2e::error::E2eError;
 use crate::e2e::keyring::{ChannelConfig, ChannelMode, IncomingSession, Keyring, TrustStatus};
 use crate::e2e::manager::{DecryptOutcome, E2eManager, ReverifyOutcome, TrustChange};
@@ -1440,7 +1441,7 @@ fn reverify_applies_pending_fingerprint_change() {
     //   2. Bob regenerates his identity (bob_new) and retries a KEYREQ
     //      from the same handle — alice MUST reject with a
     //      FingerprintChanged PendingTrustNotice.
-    //   3. User runs `/e2e reverify` — `mgr.reverify_peer("~bob@b.host")`
+    //   3. User runs `/e2e reverify` — `mgr.reverify_peer("~bob@b.host", None)`
     //      consumes the notice, deletes the old peer + sessions, and
     //      installs bob_new's pubkey.
     //   4. A third handshake attempt from bob_new under the SAME handle
@@ -1478,7 +1479,7 @@ fn reverify_applies_pending_fingerprint_change() {
     // consumes it instead.
 
     // (3) user runs /e2e reverify — manager consumes the pending notice.
-    let outcome = alice.reverify_peer(bob_handle).unwrap();
+    let outcome = alice.reverify_peer(bob_handle, None).unwrap();
     match outcome {
         ReverifyOutcome::Applied { old_fp, new_fp } => {
             assert_eq!(old_fp, bob_orig.fingerprint());
@@ -1574,7 +1575,7 @@ fn reverify_without_pending_notice_purges_handle() {
     assert!(alice.take_pending_trust_changes().is_empty());
 
     // Reverify with no pending notice → Cleared.
-    match alice.reverify_peer(bob_handle).unwrap() {
+    match alice.reverify_peer(bob_handle, None).unwrap() {
         ReverifyOutcome::Cleared { deleted } => {
             assert!(deleted >= 1, "expected at least one row purged");
         }
@@ -1601,9 +1602,1110 @@ fn reverify_without_pending_notice_purges_handle() {
 #[test]
 fn reverify_unknown_handle_is_not_found() {
     let alice = make_manager();
-    match alice.reverify_peer("~ghost@nowhere.test").unwrap() {
+    match alice.reverify_peer("~ghost@nowhere.test", None).unwrap() {
         ReverifyOutcome::NotFound => {}
         other => panic!("expected NotFound, got {other:?}"),
+    }
+}
+
+/// Drive a HandleChanged into `alice`: bob handshakes from `old_handle`,
+/// then re-appears under `new_handle` with the same identity key. Returns
+/// the refused KEYREQ so callers can replay it after reverify (bob still
+/// has a live pending entry for `#x`, so a second `build_keyreq` would
+/// race it — see `reverify_applies_pending_fingerprint_change`).
+///
+/// The notice is drained exactly as `surface_pending_trust_changes` does
+/// in production: the IRC dispatcher takes the queue to render the
+/// `[E2E] notice: known key … appeared under new handle` line, long
+/// before the user gets a chance to type `/e2e reverify`.
+fn stage_handle_change(
+    alice: &E2eManager,
+    bob: &E2eManager,
+    old_handle: &str,
+    new_handle: &str,
+) -> crate::e2e::handshake::KeyReq {
+    let req1 = bob.build_keyreq("#x").unwrap();
+    alice.handle_keyreq(old_handle, &req1).unwrap().unwrap();
+    assert!(alice.take_pending_trust_changes().is_empty());
+
+    let req2 = bob.build_keyreq("#x").unwrap();
+    alice
+        .handle_keyreq(new_handle, &req2)
+        .expect_err("must refuse to auto-rebind the handle");
+
+    let notices = alice.take_pending_trust_changes();
+    assert_eq!(notices.len(), 1, "the handle change must be surfaced once");
+    assert!(matches!(
+        notices[0].change,
+        TrustChange::HandleChanged { .. }
+    ));
+    req2
+}
+
+#[test]
+fn reverify_accepts_a_known_key_under_its_new_handle() {
+    // The reported bug. A peer reconnects with a different ident, so the
+    // same already-trusted key arrives under a new handle. The notice
+    // tells the user to `/e2e reverify <new handle>` "to accept" — and
+    // accepting must re-bind the existing trusted identity to the new
+    // handle, not purge it and not report "no keyring state".
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+
+    let old_handle = "freakyy85@hosted.by.nextgamers.eu";
+    let new_handle = "freaky@hosted.by.nextgamers.eu";
+    let req2 = stage_handle_change(&alice, &bob, old_handle, new_handle);
+
+    match alice.reverify_peer(new_handle, None).unwrap() {
+        ReverifyOutcome::Rebound {
+            fingerprint,
+            old_handle: from,
+            new_handle: to,
+        } => {
+            assert_eq!(fingerprint, bob.fingerprint());
+            assert_eq!(from, old_handle);
+            assert_eq!(to, new_handle);
+        }
+        other => panic!("expected Rebound, got {other:?}"),
+    }
+
+    // The identity survived — same fingerprint, same trust, new handle.
+    let peer = alice
+        .keyring()
+        .get_peer_by_fingerprint(&bob.fingerprint())
+        .unwrap()
+        .expect("the trusted peer row must survive a handle change");
+    assert_eq!(peer.last_handle.as_deref(), Some(new_handle));
+    // Carried over, not raised: alice only answered bob's KEYREQ, which
+    // leaves the peer row Pending even under AutoAccept. See
+    // `a_rebind_carries_the_peers_trust_status_over_unchanged`.
+    assert_eq!(peer.global_status, TrustStatus::Pending);
+
+    // The stale per-handle rows are gone so nothing keys off the old ident.
+    assert!(
+        alice
+            .keyring()
+            .get_incoming_session(old_handle, "#x")
+            .unwrap()
+            .is_none(),
+        "the old handle's session must be purged"
+    );
+
+    // And the handshake that was refused now completes without a warning.
+    alice
+        .handle_keyreq(new_handle, &req2)
+        .unwrap()
+        .expect("after reverify the peer handshakes under the new handle");
+    assert!(alice.take_pending_trust_changes().is_empty());
+}
+
+#[test]
+fn reverify_accepts_a_handle_change_named_by_the_old_handle() {
+    // The notice prints both handles, so either one is a plausible thing
+    // for the user to type. Naming the OLD handle must also re-bind —
+    // never fall through to the destructive purge, which would throw away
+    // a trusted key whose fingerprint never changed.
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+
+    let old_handle = "~bob@home.host";
+    let new_handle = "~bob@vpn.mullvad.net";
+    stage_handle_change(&alice, &bob, old_handle, new_handle);
+
+    match alice.reverify_peer(old_handle, None).unwrap() {
+        ReverifyOutcome::Rebound { new_handle: to, .. } => assert_eq!(to, new_handle),
+        other => panic!("expected Rebound, got {other:?}"),
+    }
+    let peer = alice
+        .keyring()
+        .get_peer_by_fingerprint(&bob.fingerprint())
+        .unwrap()
+        .expect("the trusted peer row must survive a handle change");
+    assert_eq!(peer.last_handle.as_deref(), Some(new_handle));
+}
+
+#[test]
+fn reverify_picks_the_handle_change_the_user_named() {
+    // Bob flips idents twice without a reverify in between, so alice holds
+    // two HandleChanged notices that share the same `old_handle`. Naming
+    // one destination must re-bind to THAT one, not to whichever arrived
+    // first.
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+
+    let home = "~bob@home.host";
+    let vpn = "~bob@vpn.mullvad.net";
+    let cafe = "~bob@cafe.wifi";
+
+    stage_handle_change(&alice, &bob, home, vpn);
+    let req3 = bob.build_keyreq("#x").unwrap();
+    alice
+        .handle_keyreq(cafe, &req3)
+        .expect_err("still pinned to the original handle");
+    assert_eq!(alice.take_pending_trust_changes().len(), 1);
+
+    match alice.reverify_peer(cafe, None).unwrap() {
+        ReverifyOutcome::Rebound { new_handle, .. } => assert_eq!(new_handle, cafe),
+        other => panic!("expected Rebound to {cafe}, got {other:?}"),
+    }
+    let peer = alice
+        .keyring()
+        .get_peer_by_fingerprint(&bob.fingerprint())
+        .unwrap()
+        .unwrap();
+    assert_eq!(peer.last_handle.as_deref(), Some(cafe));
+}
+
+#[test]
+fn reverify_refuses_when_two_keys_are_waiting_at_one_handle() {
+    // Bob's key is pinned at H, then two DIFFERENT keys handshake at H
+    // before the user gets round to reverifying. The user compares one
+    // fingerprint out of band — but `/e2e reverify H` carries no way to
+    // say which, so accepting either risks installing the key they did
+    // NOT verify. Refuse, and keep both warnings so the choice survives.
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+    let handle = "~bob@b.host";
+
+    let req = bob.build_keyreq("#x").unwrap();
+    alice.handle_keyreq(handle, &req).unwrap().unwrap();
+
+    let claimant_a = make_manager();
+    let claimant_b = make_manager();
+    for m in [&claimant_a, &claimant_b] {
+        enable_channel(m, "#x", ChannelMode::AutoAccept);
+        let r = m.build_keyreq("#x").unwrap();
+        alice
+            .handle_keyreq(handle, &r)
+            .expect_err("a changed fingerprint must be refused");
+    }
+    assert_eq!(
+        alice.take_pending_trust_changes().len(),
+        2,
+        "both key changes must be surfaced — neither may replace the other"
+    );
+
+    match alice.reverify_peer(handle, None).unwrap() {
+        ReverifyOutcome::Ambiguous { candidates } => assert_eq!(candidates.len(), 2),
+        other => panic!("expected Ambiguous, got {other:?}"),
+    }
+
+    // Nothing was installed: the originally pinned key is untouched.
+    let peer = alice
+        .keyring()
+        .get_peer_by_fingerprint(&bob.fingerprint())
+        .unwrap()
+        .expect("the pinned key must survive a refused reverify");
+    assert_eq!(peer.last_handle.as_deref(), Some(handle));
+    for m in [&claimant_a, &claimant_b] {
+        assert!(
+            alice
+                .keyring()
+                .get_peer_by_fingerprint(&m.fingerprint())
+                .unwrap()
+                .is_none(),
+            "no unverified key may be installed by an ambiguous reverify"
+        );
+    }
+    // And nothing was consumed, so the user can still resolve it —
+    // which naming the handle again cannot do, since both candidates
+    // carry that same handle. The fingerprint they compared out of band
+    // is the discriminator. A short, upper-case prefix must work: it is
+    // pasted back off the candidate list by hand.
+    assert!(matches!(
+        alice.reverify_peer(handle, None).unwrap(),
+        ReverifyOutcome::Ambiguous { .. }
+    ));
+    let chosen = fingerprint_hex(&claimant_a.fingerprint());
+    match alice
+        .reverify_peer(handle, Some(&chosen[..8].to_uppercase()))
+        .unwrap()
+    {
+        ReverifyOutcome::Applied { old_fp, new_fp } => {
+            assert_eq!(old_fp, bob.fingerprint());
+            assert_eq!(new_fp, claimant_a.fingerprint());
+        }
+        other => panic!("expected Applied, got {other:?}"),
+    }
+    assert!(
+        alice
+            .keyring()
+            .get_peer_by_fingerprint(&claimant_a.fingerprint())
+            .unwrap()
+            .is_some(),
+        "the named key must be installed"
+    );
+    assert!(
+        alice
+            .keyring()
+            .get_peer_by_fingerprint(&claimant_b.fingerprint())
+            .unwrap()
+            .is_none(),
+        "the key the user did not name must stay out"
+    );
+    // Choosing one settles the contest at that handle: the loser's claim
+    // is not left lying around to be applied by a later reverify.
+    assert!(matches!(
+        alice
+            .reverify_peer(handle, Some(&fingerprint_hex(&claimant_b.fingerprint())))
+            .unwrap(),
+        ReverifyOutcome::NoSuchCandidate { .. }
+    ));
+}
+
+/// Stage the crossing case both orderings share: bob's trusted key moves
+/// `h` → `j`, and a *different* key claims `h`. Two independent pending
+/// decisions. Returns the rival manager.
+fn stage_crossing_change(alice: &E2eManager, bob: &E2eManager, h: &str, j: &str) -> E2eManager {
+    stage_handle_change(alice, bob, h, j);
+    let claimant = make_manager();
+    enable_channel(&claimant, "#x", ChannelMode::AutoAccept);
+    let req = claimant.build_keyreq("#x").unwrap();
+    alice
+        .handle_keyreq(h, &req)
+        .expect_err("a changed fingerprint must be refused");
+    assert_eq!(alice.take_pending_trust_changes().len(), 1);
+    claimant
+}
+
+#[test]
+fn rebinding_a_moved_key_leaves_a_rival_claim_on_the_old_handle_unresolved() {
+    // Accepting the move to J says nothing about who may use H. Retiring
+    // the rival's warning here would drop a decision the user never made
+    // — and leave the handle free for that same key to be TOFU-pinned
+    // without any warning at all.
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+    let h = "~bob@b.host";
+    let j = "~bob@vpn.host";
+    let claimant = stage_crossing_change(&alice, &bob, h, j);
+
+    assert!(matches!(
+        alice.reverify_peer(j, None).unwrap(),
+        ReverifyOutcome::Rebound { .. }
+    ));
+
+    // The claim on H is still the user's to make.
+    match alice.reverify_peer(h, None).unwrap() {
+        ReverifyOutcome::Applied { new_fp, .. } => assert_eq!(new_fp, claimant.fingerprint()),
+        other => panic!("the rival claim on {h} must still be applicable, got {other:?}"),
+    }
+    // And the moved key, now at J, was not disturbed by that decision.
+    let peer = alice
+        .keyring()
+        .get_peer_by_fingerprint(&bob.fingerprint())
+        .unwrap()
+        .expect("the moved key must survive a decision about the handle it left");
+    assert_eq!(peer.last_handle.as_deref(), Some(j));
+}
+
+#[test]
+fn accepting_a_rival_key_keeps_the_moved_identity_rebindable() {
+    // The inverse ordering. Accepting the rival at H must not delete the
+    // moved key's row just because that row still names H: its H → J
+    // warning is unresolved, so the identity is not finished. Accepting
+    // the move afterwards has to RE-BIND it, per the documented promise
+    // that a handle change preserves the fingerprint you verified — not
+    // discover the row gone and degrade to a purge.
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+    let h = "~bob@b.host";
+    let j = "~bob@vpn.host";
+    let claimant = stage_crossing_change(&alice, &bob, h, j);
+
+    match alice.reverify_peer(h, None).unwrap() {
+        ReverifyOutcome::Applied { new_fp, .. } => assert_eq!(new_fp, claimant.fingerprint()),
+        other => panic!("expected Applied at {h}, got {other:?}"),
+    }
+
+    match alice.reverify_peer(j, None).unwrap() {
+        ReverifyOutcome::Rebound {
+            fingerprint,
+            new_handle,
+            ..
+        } => {
+            assert_eq!(fingerprint, bob.fingerprint());
+            assert_eq!(new_handle, j);
+        }
+        other => panic!("expected Rebound at {j}, got {other:?}"),
+    }
+    let peer = alice
+        .keyring()
+        .get_peer_by_fingerprint(&bob.fingerprint())
+        .unwrap()
+        .expect("the moved identity must survive");
+    assert_eq!(peer.last_handle.as_deref(), Some(j));
+    assert_eq!(peer.global_status, TrustStatus::Pending);
+    // ...and the rival still holds H.
+    assert_eq!(
+        alice
+            .keyring()
+            .get_peer_by_handle(h)
+            .unwrap()
+            .expect("the accepted rival must hold H")
+            .fingerprint,
+        claimant.fingerprint()
+    );
+}
+
+/// Give `alice` a trusted incoming session for `peer` under `handle`.
+///
+/// A responder learns nothing from answering a KEYREQ — the session key
+/// travels in the KEYRSP — so this drives the direction that installs
+/// alice's own side of the session.
+fn open_session(alice: &E2eManager, peer: &E2eManager, handle: &str) {
+    let req = alice.build_keyreq("#x").unwrap();
+    let rsp = peer
+        .handle_keyreq("~alice@a.host", &req)
+        .unwrap()
+        .expect("the peer answers the KEYREQ");
+    alice.handle_keyrsp(handle, &rsp).unwrap();
+}
+
+#[test]
+fn a_stale_handle_change_does_not_purge_the_handles_new_owner() {
+    // Forgetting a peer by the handle it is moving *away from* deletes its
+    // row but leaves the warning, which is filed under the destination. If
+    // somebody else then claims the vacated handle, reverifying that handle
+    // selects the stale warning through its old-handle alias — and must not
+    // take the new owner's state down with it. The key the warning is about
+    // no longer exists, so there is nothing to re-bind and nothing of its
+    // to clean up.
+    let alice = make_manager();
+    let bob = make_manager();
+    let newcomer = make_manager();
+    for m in [&alice, &bob, &newcomer] {
+        enable_channel(m, "#x", ChannelMode::AutoAccept);
+    }
+    let h = "~bob@b.host";
+    let j = "~bob@vpn.host";
+
+    stage_handle_change(&alice, &bob, h, j);
+    alice.forget_peer_everywhere(h).unwrap();
+    assert!(
+        alice
+            .keyring()
+            .get_peer_by_fingerprint(&bob.fingerprint())
+            .unwrap()
+            .is_none(),
+        "forget removed bob's row but left the warning filed under J"
+    );
+
+    // Somebody else takes the vacated handle the ordinary way.
+    open_session(&alice, &newcomer, h);
+
+    match alice.reverify_peer(h, None).unwrap() {
+        ReverifyOutcome::Stale { fingerprint } => assert_eq!(fingerprint, bob.fingerprint()),
+        other => panic!("expected Stale, got {other:?}"),
+    }
+    assert_eq!(
+        alice
+            .keyring()
+            .get_peer_by_handle(h)
+            .unwrap()
+            .expect("the new owner's row must survive")
+            .fingerprint,
+        newcomer.fingerprint()
+    );
+    assert!(
+        alice
+            .keyring()
+            .get_incoming_session(h, "#x")
+            .unwrap()
+            .is_some(),
+        "the new owner's session must survive"
+    );
+    // The stale warning is retired — it could never be applied.
+    assert!(matches!(
+        alice.reverify_peer(j, None).unwrap(),
+        ReverifyOutcome::NotFound
+    ));
+}
+
+#[test]
+fn a_rebind_carries_the_peers_trust_status_over_unchanged() {
+    // Accepting a handle change is consent about the binding, not the key.
+    // A peer whose first exchange is still awaiting `/e2e accept` holds a
+    // Pending row, and a handle change is classified without regard to
+    // that — so the rebind must not promote it. An already-trusted key
+    // must likewise not be demoted.
+    let h = "~bob@b.host";
+    let j = "~bob@vpn.host";
+
+    // Pending: alice only answered bob's KEYREQ. That leaves the peer row
+    // Pending even under AutoAccept — only consuming a KEYRSP, which is
+    // our own explicit outbound consent, promotes it.
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+    stage_handle_change(&alice, &bob, h, j);
+    assert_eq!(
+        alice
+            .keyring()
+            .get_peer_by_fingerprint(&bob.fingerprint())
+            .unwrap()
+            .unwrap()
+            .global_status,
+        TrustStatus::Pending,
+        "answering a KEYREQ must not trust the identity globally"
+    );
+    assert!(matches!(
+        alice.reverify_peer(j, None).unwrap(),
+        ReverifyOutcome::Rebound { .. }
+    ));
+    assert_eq!(
+        alice
+            .keyring()
+            .get_peer_by_fingerprint(&bob.fingerprint())
+            .unwrap()
+            .unwrap()
+            .global_status,
+        TrustStatus::Pending,
+        "accepting a handle change must not promote an unaccepted peer"
+    );
+
+    // Trusted: alice consumed a KEYRSP, so the identity really is trusted.
+    let carol = make_manager();
+    let dave = make_manager();
+    enable_channel(&carol, "#x", ChannelMode::AutoAccept);
+    enable_channel(&dave, "#x", ChannelMode::AutoAccept);
+    open_session(&carol, &dave, h);
+    assert_eq!(
+        carol
+            .keyring()
+            .get_peer_by_fingerprint(&dave.fingerprint())
+            .unwrap()
+            .unwrap()
+            .global_status,
+        TrustStatus::Trusted
+    );
+    let req = dave.build_keyreq("#x").unwrap();
+    carol
+        .handle_keyreq(j, &req)
+        .expect_err("must refuse to auto-rebind");
+    carol.take_pending_trust_changes();
+    assert!(matches!(
+        carol.reverify_peer(j, None).unwrap(),
+        ReverifyOutcome::Rebound { .. }
+    ));
+    assert_eq!(
+        carol
+            .keyring()
+            .get_peer_by_fingerprint(&dave.fingerprint())
+            .unwrap()
+            .unwrap()
+            .global_status,
+        TrustStatus::Trusted,
+        "a trusted key must not be demoted by a handle change"
+    );
+}
+
+#[test]
+fn accepting_a_detached_peers_move_leaves_its_old_handle_alone() {
+    // A rival accepted at H detaches the original key (`last_handle =
+    // None`) because its H→J move is still pending. If the rival then
+    // handshakes at H, accepting that move must not resurrect H as the
+    // original's "current" binding: a detached peer has nothing to clean,
+    // and H belongs to the rival now.
+    let alice = make_manager();
+    let bob = make_manager();
+    let rival = make_manager();
+    for m in [&alice, &bob, &rival] {
+        enable_channel(m, "#x", ChannelMode::AutoAccept);
+    }
+    let h = "~bob@b.host";
+    let j = "~bob@vpn.host";
+
+    stage_handle_change(&alice, &bob, h, j);
+
+    // The rival claims H and is accepted there, detaching bob.
+    let rival_req = rival.build_keyreq("#x").unwrap();
+    alice
+        .handle_keyreq(h, &rival_req)
+        .expect_err("a changed fingerprint must be refused");
+    alice.take_pending_trust_changes();
+    assert!(matches!(
+        alice.reverify_peer(h, None).unwrap(),
+        ReverifyOutcome::Applied { .. }
+    ));
+    assert_eq!(
+        alice
+            .keyring()
+            .get_peer_by_fingerprint(&bob.fingerprint())
+            .unwrap()
+            .expect("bob's key is kept, only unbound")
+            .last_handle,
+        None
+    );
+
+    // The rival settles in at H.
+    open_session(&alice, &rival, h);
+    assert!(
+        alice
+            .keyring()
+            .get_incoming_session(h, "#x")
+            .unwrap()
+            .is_some()
+    );
+
+    // Accepting bob's still-pending move must not reach back into H.
+    assert!(matches!(
+        alice.reverify_peer(j, None).unwrap(),
+        ReverifyOutcome::Rebound { .. }
+    ));
+    assert!(
+        alice
+            .keyring()
+            .get_incoming_session(h, "#x")
+            .unwrap()
+            .is_some(),
+        "a detached peer has no binding at H to clean — the rival's session must survive"
+    );
+}
+
+#[test]
+fn installing_a_key_cleans_the_binding_it_already_held() {
+    // A key change at H is recorded, and before it is accepted the new key
+    // is TOFU-pinned at a free handle J. Accepting at H reassigns the key
+    // to H, so its session at J is stale — and decryption is keyed by
+    // `(handle, channel)` without re-checking the peer row, so leaving it
+    // would keep trusting traffic from J.
+    let alice = make_manager();
+    let bob = make_manager();
+    let newkey = make_manager();
+    for m in [&alice, &bob, &newkey] {
+        enable_channel(m, "#x", ChannelMode::AutoAccept);
+    }
+    let h = "~bob@b.host";
+    let j = "~other@elsewhere.host";
+
+    let bob_req = bob.build_keyreq("#x").unwrap();
+    alice.handle_keyreq(h, &bob_req).unwrap().unwrap();
+
+    let nk_req = newkey.build_keyreq("#x").unwrap();
+    alice
+        .handle_keyreq(h, &nk_req)
+        .expect_err("a changed fingerprint must be refused");
+    assert_eq!(alice.take_pending_trust_changes().len(), 1);
+
+    // Meanwhile it takes the free handle J the ordinary way.
+    open_session(&alice, &newkey, j);
+    assert!(
+        alice
+            .keyring()
+            .get_incoming_session(j, "#x")
+            .unwrap()
+            .is_some()
+    );
+
+    match alice.reverify_peer(h, None).unwrap() {
+        ReverifyOutcome::Applied { new_fp, .. } => assert_eq!(new_fp, newkey.fingerprint()),
+        other => panic!("expected Applied at {h}, got {other:?}"),
+    }
+    assert_eq!(
+        alice
+            .keyring()
+            .get_peer_by_fingerprint(&newkey.fingerprint())
+            .unwrap()
+            .unwrap()
+            .last_handle
+            .as_deref(),
+        Some(h)
+    );
+    assert!(
+        alice
+            .keyring()
+            .get_incoming_session(j, "#x")
+            .unwrap()
+            .is_none(),
+        "the session under the handle it left must not stay trusted"
+    );
+}
+
+#[test]
+fn equivalent_rebinds_to_one_destination_are_a_single_decision() {
+    // H→J is pending; the user accepts a separate H→K move, so the peer
+    // sits at K and its next attempt at J classifies as K→J. Two warnings
+    // now describe the same key arriving at the same handle. That is one
+    // decision — treating it as two returns Ambiguous listing the same
+    // fingerprint twice with identical accept commands, which nothing can
+    // resolve.
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+    let h = "~bob@home.host";
+    let j = "~bob@vpn.host";
+    let k = "~bob@cafe.wifi";
+
+    let req1 = bob.build_keyreq("#x").unwrap();
+    alice.handle_keyreq(h, &req1).unwrap().unwrap();
+    for dest in [j, k] {
+        let req = bob.build_keyreq("#x").unwrap();
+        alice
+            .handle_keyreq(dest, &req)
+            .expect_err("must refuse to auto-rebind");
+    }
+    alice.take_pending_trust_changes();
+
+    assert!(matches!(
+        alice.reverify_peer(k, None).unwrap(),
+        ReverifyOutcome::Rebound { .. }
+    ));
+
+    // bob tries J again — classified K→J now, beside the stale H→J.
+    let req_j = bob.build_keyreq("#x").unwrap();
+    alice
+        .handle_keyreq(j, &req_j)
+        .expect_err("must refuse to auto-rebind");
+    assert_eq!(alice.take_pending_trust_changes().len(), 1);
+
+    match alice.reverify_peer(j, None).unwrap() {
+        ReverifyOutcome::Rebound {
+            fingerprint,
+            new_handle,
+            ..
+        } => {
+            assert_eq!(fingerprint, bob.fingerprint());
+            assert_eq!(new_handle, j);
+        }
+        other => panic!("expected Rebound to {j}, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_second_rebind_cleans_up_the_binding_the_peer_actually_holds() {
+    // One key, two unresolved moves off H: H→K and H→J. Accepting K binds
+    // the peer there and it handshakes, so a trusted session exists at K.
+    // Accepting J afterwards must clean up K — the binding the peer really
+    // holds — not the H the J warning snapshotted. `decrypt_incoming` keys
+    // on `(handle, channel)` and never re-checks the peer row, so a session
+    // left at K would go on decrypting traffic from a handle this peer no
+    // longer owns.
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+    let h = "~bob@home.host";
+    let k = "~bob@cafe.wifi";
+    let j = "~bob@vpn.host";
+
+    // Pin bob at H, then raise both moves before resolving either.
+    let req1 = bob.build_keyreq("#x").unwrap();
+    alice.handle_keyreq(h, &req1).unwrap().unwrap();
+    for dest in [k, j] {
+        let req = bob.build_keyreq("#x").unwrap();
+        alice
+            .handle_keyreq(dest, &req)
+            .expect_err("must refuse to auto-rebind");
+    }
+    assert_eq!(alice.take_pending_trust_changes().len(), 2);
+
+    // Accept K, then let bob handshake there so a trusted session exists.
+    match alice.reverify_peer(k, None).unwrap() {
+        ReverifyOutcome::Rebound { new_handle, .. } => assert_eq!(new_handle, k),
+        other => panic!("expected Rebound to {k}, got {other:?}"),
+    }
+    // Alice learns bob's key only by consuming a KEYRSP, so drive that
+    // direction: her session for bob lands under the handle she names.
+    let a_req = alice.build_keyreq("#x").unwrap();
+    let b_rsp = bob
+        .handle_keyreq("~alice@a.host", &a_req)
+        .unwrap()
+        .expect("bob answers the KEYREQ");
+    alice.handle_keyrsp(k, &b_rsp).unwrap();
+    assert!(
+        alice
+            .keyring()
+            .get_incoming_session(k, "#x")
+            .unwrap()
+            .is_some(),
+        "the handshake must leave a session at K"
+    );
+
+    // Now accept the still-pending move to J.
+    match alice.reverify_peer(j, None).unwrap() {
+        ReverifyOutcome::Rebound {
+            old_handle,
+            new_handle,
+            ..
+        } => {
+            assert_eq!(new_handle, j);
+            assert_eq!(
+                old_handle, k,
+                "it moved from the binding it held, not the warning's snapshot"
+            );
+        }
+        other => panic!("expected Rebound to {j}, got {other:?}"),
+    }
+    assert_eq!(
+        alice
+            .keyring()
+            .get_peer_by_fingerprint(&bob.fingerprint())
+            .unwrap()
+            .unwrap()
+            .last_handle
+            .as_deref(),
+        Some(j)
+    );
+    assert!(
+        alice
+            .keyring()
+            .get_incoming_session(k, "#x")
+            .unwrap()
+            .is_none(),
+        "the session under the handle the peer left must not survive"
+    );
+}
+
+#[test]
+fn a_rebind_does_not_disturb_whoever_took_over_the_old_handle() {
+    // The other half: once a key has moved off H, H can be reassigned.
+    // A later rebind of that key must not reach back and delete the new
+    // occupant's session just because its warning still names H.
+    let alice = make_manager();
+    let bob = make_manager();
+    let newcomer = make_manager();
+    for m in [&alice, &bob, &newcomer] {
+        enable_channel(m, "#x", ChannelMode::AutoAccept);
+    }
+    let h = "~bob@home.host";
+    let k = "~bob@cafe.wifi";
+    let j = "~bob@vpn.host";
+
+    let req1 = bob.build_keyreq("#x").unwrap();
+    alice.handle_keyreq(h, &req1).unwrap().unwrap();
+    for dest in [k, j] {
+        let req = bob.build_keyreq("#x").unwrap();
+        alice
+            .handle_keyreq(dest, &req)
+            .expect_err("must refuse to auto-rebind");
+    }
+    alice.take_pending_trust_changes();
+    assert!(matches!(
+        alice.reverify_peer(k, None).unwrap(),
+        ReverifyOutcome::Rebound { .. }
+    ));
+
+    // H is free now — somebody else takes it and handshakes.
+    let a_req = alice.build_keyreq("#x").unwrap();
+    let new_rsp = newcomer
+        .handle_keyreq("~alice@a.host", &a_req)
+        .unwrap()
+        .expect("the newcomer answers the KEYREQ");
+    alice.handle_keyrsp(h, &new_rsp).unwrap();
+    assert!(
+        alice
+            .keyring()
+            .get_incoming_session(h, "#x")
+            .unwrap()
+            .is_some(),
+        "a vacated handle accepts a new peer"
+    );
+
+    // Accepting bob's stale H→J warning must leave the newcomer alone.
+    assert!(matches!(
+        alice.reverify_peer(j, None).unwrap(),
+        ReverifyOutcome::Rebound { .. }
+    ));
+    assert!(
+        alice
+            .keyring()
+            .get_incoming_session(h, "#x")
+            .unwrap()
+            .is_some(),
+        "the new occupant's session must survive an unrelated peer's rebind"
+    );
+    assert_eq!(
+        alice
+            .keyring()
+            .get_peer_by_handle(h)
+            .unwrap()
+            .expect("the newcomer still owns H")
+            .fingerprint,
+        newcomer.fingerprint()
+    );
+}
+
+#[test]
+fn rebinding_onto_an_occupied_handle_evicts_the_incumbent() {
+    // A handle change is classified by fingerprint alone, so nothing
+    // upstream notices that the destination already belongs to someone.
+    // Accepting the move must still leave exactly one trusted key on that
+    // `ident@host` — otherwise the displaced key keeps classifying as
+    // Known there and can re-handshake as if it were still the owner.
+    let alice = make_manager();
+    let mover = make_manager();
+    let sitting = make_manager();
+    for m in [&alice, &mover, &sitting] {
+        enable_channel(m, "#x", ChannelMode::AutoAccept);
+    }
+    let h = "~mover@one.host";
+    let j = "~shared@two.host";
+
+    // `sitting` is trusted at J; `mover` is trusted at H.
+    let sit_req = sitting.build_keyreq("#x").unwrap();
+    alice.handle_keyreq(j, &sit_req).unwrap().unwrap();
+    let mov_req = mover.build_keyreq("#x").unwrap();
+    alice.handle_keyreq(h, &mov_req).unwrap().unwrap();
+    assert!(alice.take_pending_trust_changes().is_empty());
+
+    // `mover` turns up at J.
+    let mov_req2 = mover.build_keyreq("#x").unwrap();
+    alice
+        .handle_keyreq(j, &mov_req2)
+        .expect_err("must refuse to auto-rebind onto an occupied handle");
+    assert_eq!(alice.take_pending_trust_changes().len(), 1);
+
+    match alice.reverify_peer(j, None).unwrap() {
+        ReverifyOutcome::Rebound { fingerprint, .. } => {
+            assert_eq!(fingerprint, mover.fingerprint());
+        }
+        other => panic!("expected Rebound, got {other:?}"),
+    }
+
+    // Exactly one identity owns J, and it is the one just accepted.
+    assert_eq!(
+        alice
+            .keyring()
+            .get_peer_by_handle(j)
+            .unwrap()
+            .expect("J must have an owner")
+            .fingerprint,
+        mover.fingerprint()
+    );
+    let displaced = alice
+        .keyring()
+        .get_peer_by_fingerprint(&sitting.fingerprint())
+        .unwrap()
+        .expect("the displaced key is kept, only unbound");
+    assert_eq!(
+        displaced.last_handle, None,
+        "the displaced key must not still claim J"
+    );
+
+    // And it can no longer pass as the owner of J.
+    let sit_req2 = sitting.build_keyreq("#x").unwrap();
+    alice
+        .handle_keyreq(j, &sit_req2)
+        .expect_err("the displaced key must not classify as Known at J");
+}
+
+#[test]
+fn forgetting_a_peer_counts_the_warning_it_retires() {
+    // The dispatcher drains the render queue the moment it prints a
+    // warning, so by the time the user forgets the peer the pending
+    // consent entry is the only state left. Reporting "0 row(s)" then
+    // reads as "nothing happened" when a real decision was removed.
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+    let h = "~bob@b.host";
+    let j = "~bob@vpn.host";
+    stage_handle_change(&alice, &bob, h, j);
+
+    let removed = alice.forget_peer_everywhere(j).unwrap();
+    assert!(
+        removed >= 1,
+        "forget retired the pending warning but reported {removed} row(s)"
+    );
+    // ...and it really is gone.
+    assert!(matches!(
+        alice.reverify_peer(j, None).unwrap(),
+        ReverifyOutcome::NotFound
+    ));
+}
+
+#[test]
+fn reverify_with_an_unknown_fingerprint_changes_nothing() {
+    // A mistyped selector must not fall through to the destructive
+    // purge — the pinned key has to survive a wrong answer, and the
+    // warning has to survive it too.
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+    let handle = "~bob@b.host";
+
+    let req = bob.build_keyreq("#x").unwrap();
+    alice.handle_keyreq(handle, &req).unwrap().unwrap();
+
+    let claimant = make_manager();
+    enable_channel(&claimant, "#x", ChannelMode::AutoAccept);
+    let req2 = claimant.build_keyreq("#x").unwrap();
+    alice
+        .handle_keyreq(handle, &req2)
+        .expect_err("a changed fingerprint must be refused");
+    assert_eq!(alice.take_pending_trust_changes().len(), 1);
+
+    match alice.reverify_peer(handle, Some("deadbeef")).unwrap() {
+        ReverifyOutcome::NoSuchCandidate { candidates } => assert_eq!(candidates.len(), 1),
+        other => panic!("expected NoSuchCandidate, got {other:?}"),
+    }
+    assert!(
+        alice
+            .keyring()
+            .get_peer_by_fingerprint(&bob.fingerprint())
+            .unwrap()
+            .is_some(),
+        "a wrong selector must not purge the pinned key"
+    );
+    // The warning survived, so the right answer still works.
+    assert!(matches!(
+        alice
+            .reverify_peer(handle, Some(&fingerprint_hex(&claimant.fingerprint())))
+            .unwrap(),
+        ReverifyOutcome::Applied { .. }
+    ));
+}
+
+#[test]
+fn reverify_answers_the_warning_filed_under_the_handle_named() {
+    // Bob's trusted key moves from H to J — a HandleChanged that names H
+    // only as the handle being moved *away from*. A different key then
+    // appears at H, raising a FingerprintChanged filed under H.
+    //
+    // `/e2e reverify H` is the command that second warning tells the user
+    // to run, so it must install that key: not re-bind bob to J on the
+    // strength of an alias match, and not eat the handle-change warning,
+    // which is a separate decision.
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+
+    let h = "~bob@b.host";
+    let j = "~bob@vpn.host";
+    stage_handle_change(&alice, &bob, h, j);
+
+    let other = make_manager();
+    enable_channel(&other, "#x", ChannelMode::AutoAccept);
+    let req = other.build_keyreq("#x").unwrap();
+    alice
+        .handle_keyreq(h, &req)
+        .expect_err("a changed fingerprint at H must be refused");
+    assert_eq!(alice.take_pending_trust_changes().len(), 1);
+
+    match alice.reverify_peer(h, None).unwrap() {
+        ReverifyOutcome::Applied { old_fp, new_fp } => {
+            assert_eq!(old_fp, bob.fingerprint());
+            assert_eq!(new_fp, other.fingerprint());
+        }
+        outcome => panic!("expected Applied at {h}, got {outcome:?}"),
+    }
+    assert_eq!(
+        alice
+            .keyring()
+            .get_peer_by_handle(h)
+            .unwrap()
+            .expect("the accepted key must be installed at H")
+            .fingerprint,
+        other.fingerprint()
+    );
+    assert!(
+        !matches!(
+            alice.reverify_peer(j, None).unwrap(),
+            ReverifyOutcome::NotFound
+        ),
+        "the handle-change warning must survive a decision about a different handle"
+    );
+}
+
+#[test]
+fn accepting_one_warning_leaves_an_unrelated_one_on_screen() {
+    // Same shape as the test above, but nothing is drained: after the key
+    // change at H is accepted, the handle-change warning about J must
+    // still be queued for rendering. Clearing per-handle state for H must
+    // not suppress a warning that merely names H as the handle a
+    // different decision is moving a key away from.
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+    let h = "~bob@b.host";
+    let j = "~bob@vpn.host";
+
+    let req1 = bob.build_keyreq("#x").unwrap();
+    alice.handle_keyreq(h, &req1).unwrap().unwrap();
+    let req2 = bob.build_keyreq("#x").unwrap();
+    alice
+        .handle_keyreq(j, &req2)
+        .expect_err("the handle change must be refused");
+
+    let other = make_manager();
+    enable_channel(&other, "#x", ChannelMode::AutoAccept);
+    let req3 = other.build_keyreq("#x").unwrap();
+    alice
+        .handle_keyreq(h, &req3)
+        .expect_err("the key change must be refused");
+
+    assert!(matches!(
+        alice.reverify_peer(h, None).unwrap(),
+        ReverifyOutcome::Applied { .. }
+    ));
+
+    let still_queued = alice.take_pending_trust_changes();
+    assert_eq!(
+        still_queued.len(),
+        1,
+        "only the warning the user answered may be cleared"
+    );
+    assert!(matches!(
+        still_queued[0].change,
+        TrustChange::HandleChanged { .. }
+    ));
+}
+
+#[test]
+fn reverify_still_applies_a_fingerprint_change_after_the_ui_rendered_it() {
+    // `reverify_applies_pending_fingerprint_change` never drains the
+    // notice queue, but production always does — the IRC dispatcher takes
+    // it to render the warning the moment the handshake is refused. The
+    // consent state must outlive that render, or the documented one-step
+    // "install the new key" path is unreachable and every reverify
+    // silently degrades to the destructive purge.
+    let alice = make_manager();
+    let bob_orig = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob_orig, "#x", ChannelMode::AutoAccept);
+
+    let bob_handle = "~bob@b.host";
+    let alice_handle = "~alice@a.host";
+
+    let req1 = bob_orig.build_keyreq("#x").unwrap();
+    let rsp1 = alice.handle_keyreq(bob_handle, &req1).unwrap().unwrap();
+    bob_orig.handle_keyrsp(alice_handle, &rsp1).unwrap();
+
+    let bob_new = make_manager();
+    enable_channel(&bob_new, "#x", ChannelMode::AutoAccept);
+    let req2 = bob_new.build_keyreq("#x").unwrap();
+    alice
+        .handle_keyreq(bob_handle, &req2)
+        .expect_err("must reject changed fingerprint");
+
+    // The UI renders the warning — and drains the queue doing it.
+    assert_eq!(alice.take_pending_trust_changes().len(), 1);
+
+    match alice.reverify_peer(bob_handle, None).unwrap() {
+        ReverifyOutcome::Applied { old_fp, new_fp } => {
+            assert_eq!(old_fp, bob_orig.fingerprint());
+            assert_eq!(new_fp, bob_new.fingerprint());
+        }
+        other => panic!("expected Applied, got {other:?}"),
     }
 }
 

@@ -155,6 +155,7 @@ impl App {
                 self.state.add_message(
                     &buffer_id,
                     Message {
+                        log_key: None,
                         id: msg_id,
                         timestamp: Utc::now(),
                         message_type: MessageType::Event,
@@ -167,6 +168,8 @@ impl App {
                         log_msg_id: None,
                         log_ref_id: None,
                         tags: None,
+                        wire_origin: None,
+                        translation_suffix_at: None,
                     },
                 );
 
@@ -205,6 +208,7 @@ impl App {
                     self.state.add_message_with_activity(
                         &buffer_id,
                         Message {
+                            log_key: None,
                             id: msg_id,
                             timestamp: Utc::now(),
                             message_type: MessageType::Message,
@@ -217,6 +221,8 @@ impl App {
                             log_msg_id: None,
                             log_ref_id: None,
                             tags: None,
+                            wire_origin: None,
+                            translation_suffix_at: None,
                         },
                         ActivityLevel::Mention,
                     );
@@ -239,6 +245,7 @@ impl App {
                 self.state.add_message_with_activity(
                     &buffer_id,
                     Message {
+                        log_key: None,
                         id: msg_id,
                         timestamp: Utc::now(),
                         message_type: MessageType::Action,
@@ -251,6 +258,8 @@ impl App {
                         log_msg_id: None,
                         log_ref_id: None,
                         tags: None,
+                        wire_origin: None,
+                        translation_suffix_at: None,
                     },
                     ActivityLevel::Mention,
                 );
@@ -282,6 +291,7 @@ impl App {
                     self.state.add_message(
                         &buffer_id,
                         Message {
+                            log_key: None,
                             id: msg_id,
                             timestamp: Utc::now(),
                             message_type: MessageType::Event,
@@ -294,6 +304,8 @@ impl App {
                             log_msg_id: None,
                             log_ref_id: None,
                             tags: None,
+                            wire_origin: None,
+                            translation_suffix_at: None,
                         },
                     );
                 }
