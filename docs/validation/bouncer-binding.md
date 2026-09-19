@@ -48,8 +48,26 @@ rename without reconnect, deletion with stale events, parent suspension/reconnec
 manual disconnect and reopening closed children. Native/web focus remains stable
 for background discovery, replayed joins and newly arriving DMs; explicit joins
 still activate their target. Web rename/resync tests preserve valid buffer IDs.
-PASS-specific explicit binding, server-owned history and the remaining feature
-matrix are separate pending work.
+PASS-specific explicit binding and the remaining feature matrix are separate
+pending work. Server-owned history regressions cover memory-only BEFORE ingestion,
+reloading after buffer trimming, web page completion and timeout replies, equal
+timestamp cursors, retained local rows that are not implicitly loaded, and
+volatile account-scoped mentions, including seven-day expiration. Unsolicited
+private-message replay creates its missing query in the background without
+unread activity or local logging. DCC regressions verify local message writes,
+backlog loading and persistent mentions. Web page completion follows all queued
+inserts so its final exhaustion flag remains authoritative. Legacy timestamp-only
+web cursors retain complete equal-timestamp groups. A BEFORE page arriving after
+the user leaves its buffer cannot re-pin it or prevent later reloading. Automatic
+channel history waits for NAMES completion, including background channels. An
+incomplete BEFORE batch leaves the original retry anchor unchanged. Reconnect
+gap-fills all retained bouncer queries without changing focus. Recreating the
+Mentions buffer restores same-session volatile entries even without SQLite. The real upstream
+fixtures seed 300 messages in each bouncer's store. An automatically discovered
+child fetches the latest 200, retrieves the remaining 100 with BEFORE, verifies
+ordering and exhaustion, and confirms that no message entered the local log
+queue. Soju runs with its upstream disabled, exercising stored history while the
+IRC network is offline.
 
 Cancellation regression tests drop registration during CAP negotiation and
 network confirmation and verify peer EOF. A separate synthetic 16 MiB PASS write

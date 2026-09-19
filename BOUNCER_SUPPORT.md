@@ -81,10 +81,11 @@ pretend older messages are retrievable. Ordinary direct IRC retains its existing
 history policy. An explicit local-history override, if provided, must be visible
 and opt-in.
 
-Current Repartee history ingestion/pagination is tied to SQLite
-(`src/irc/batch.rs`, `src/app/backlog.rs`); removing persistence without replacing
-that path would break scrollback. Native, web, reconnect, search, exports, session
-restore, and logging paths all need review for the ownership rule.
+Explicit bouncer connections use memory-backed history ingestion and pagination
+(`src/irc/batch.rs`, `src/app/backlog.rs`, `src/app/server_history.rs`). Direct IRC
+keeps SQLite-backed history. Native and web requests avoid implicit local reads;
+existing logs remain available through explicit log browsing. Server-side search
+and full history discovery remain separate acceptance items.
 
 ## Ordered PRs
 
@@ -189,3 +190,14 @@ large to review, retaining the acceptance rows and dependencies.
   removal. The pinned Soju and Lurker fixtures both establish an automatically
   generated child through the real App event loop. Server-owned history and the
   remaining extension matrix are still pending.
+
+- Explicit bouncer channel/query buffers now skip the chat log writer. DCC
+  conversations retain local storage because their history is peer-to-peer. BEFORE pages surface
+  in memory; collapsing a backlog resets its server pagination watermark before
+  future trimming can discard rows. Native seeding and reconnect anchors avoid
+  SQLite. Web requests use memory cursors and wait for server pages; mention text
+  remains volatile with seven-day retention. Both pinned upstream fixtures fetch
+  300 ordered messages through an automatically generated child in LATEST/BEFORE
+  pages without queuing local log rows. Synthetic tests also cover web completion,
+  timeouts, equal timestamps and existing local rows remaining intact but unused.
+  TARGETS discovery, bounded hydration and server search remain pending.

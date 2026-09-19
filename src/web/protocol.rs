@@ -246,6 +246,8 @@ pub enum WebCommand {
         /// with clients that don't send it.
         #[serde(default)]
         before_id: Option<i64>,
+        #[serde(default)]
+        before_message_id: Option<u64>,
     },
     /// Request full nick list for a channel buffer.
     FetchNickList { buffer_id: String },

@@ -1150,7 +1150,13 @@ pub fn ingest_chathistory_batch(
         // `oldest_ingested` watermark and clear `history_exhausted` for rows that
         // never paginate — making BEFORE scroll-up re-request server history while
         // the visible backlog never grows.
-        let stored = state.ingest_history_message(&buffer_id, &message);
+        let server_owned = state.connections.get(conn_id)
+            .is_some_and(crate::state::connection::Connection::server_owns_history);
+        let stored = if server_owned {
+            collect_display
+        } else {
+            state.ingest_history_message(&buffer_id, &message)
+        };
         if stored {
             ingested += 1;
             let ingested_ms = message.timestamp.timestamp_millis();

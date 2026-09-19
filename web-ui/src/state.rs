@@ -450,7 +450,7 @@ impl AppState {
                 } else {
                     MAX_BUFFER_MESSAGES
                 };
-                let mut trimmed = false;
+                let mut inserted = false;
                 self.messages.update(|msgs| {
                     let entry = msgs.entry(buffer_id.clone()).or_default();
                     if !message_already_present(entry, &message) {
@@ -464,15 +464,11 @@ impl AppState {
                             .position(|m| insert_order_key(m) > key)
                             .unwrap_or(entry.len());
                         entry.insert(pos, message);
-                        trimmed = cap_messages(entry, cap);
+                        cap_messages(entry, cap);
+                        inserted = true;
                     }
                 });
-                // A trim dropped the oldest loaded rows, so older history exists
-                // below the in-memory head again — re-arm scroll-up even if a
-                // previous fetch had reached the start and set has_more=false
-                // (mirrors the NewMessage path). Without this, a gap-fill insert at
-                // a full buffer could permanently suppress further scroll-back.
-                if trimmed {
+                if inserted {
                     self.backlog_has_more.update(|m| {
                         m.insert(buffer_id.clone(), true);
                     });

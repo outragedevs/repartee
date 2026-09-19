@@ -226,6 +226,9 @@ pub(crate) fn cmd_clear(app: &mut App, _args: &[String]) {
         buf.messages.clear();
         buf.messages.shrink_to(0);
     }
+    if is_mentions {
+        app.volatile_mentions.clear();
+    }
     // Truncate the mentions DB table when clearing the mentions buffer.
     if is_mentions
         && let Some(storage) = &app.storage

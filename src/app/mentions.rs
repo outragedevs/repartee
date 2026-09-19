@@ -5,6 +5,10 @@ use crate::state::buffer::{ActivityLevel, Buffer, BufferType, Message, MessageTy
 use super::App;
 
 impl App {
+    pub(crate) fn mention_uses_server_history(network: &str, buffer: &str) -> bool {
+        crate::config::network_scope::is_bouncer_scope(network) && !buffer.starts_with('=')
+    }
+
     pub(crate) fn mention_target(&self, network: &str) -> Option<(String, String)> {
         if let Some(connection) = self.state.connections.values().find(|connection| {
             connection
@@ -83,14 +87,26 @@ impl App {
 
     /// Load recent mentions from DB into the mentions buffer (7 days, max 1000).
     pub(crate) fn load_mentions_history(&mut self) {
-        let Some(storage) = &self.storage else { return };
-        let Ok(db) = storage.db.lock() else { return };
         let seven_days_ago = chrono::Utc::now().timestamp() - 7 * 24 * 3600;
-        let Ok(mut rows) = crate::storage::query::load_recent_mentions(&db, seven_days_ago, 1000)
-        else {
-            return;
-        };
-        drop(db);
+        let mut rows = self.storage.as_ref().and_then(|storage| {
+            let db = storage.db.lock().ok()?;
+            crate::storage::query::load_recent_mentions(&db, seven_days_ago, 1000).ok()
+        }).unwrap_or_default();
+        rows.retain(|row| !Self::mention_uses_server_history(&row.network, &row.buffer));
+        rows.extend(self.volatile_mentions.iter().filter(|(_, mention)| mention.timestamp >= seven_days_ago)
+            .map(|(network, mention)| crate::storage::types::MentionRow {
+                id: mention.id,
+                timestamp: mention.timestamp,
+                network: network.clone(),
+                buffer: crate::web::snapshot::split_buffer_id(&mention.buffer_id).1.to_string(),
+                channel: mention.channel.clone(),
+                nick: mention.nick.clone(),
+                text: mention.text.clone(),
+            }));
+        rows.sort_by_key(|row| row.timestamp);
+        if rows.len() > 1000 {
+            rows.drain(..rows.len() - 1000);
+        }
         for row in &mut rows {
             row.network = self.mention_target(&row.network).map_or_else(
                 || "Previous bouncer network".to_string(),

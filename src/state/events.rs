@@ -17,6 +17,17 @@ enum ParkedShrinkRules {
 }
 
 impl AppState {
+    pub(crate) fn buffer_uses_server_history(&self, buffer_id: &str) -> bool {
+        buffer_id.split_once('/')
+            .and_then(|(conn_id, _)| self.connections.get(conn_id))
+            .is_some_and(Connection::server_owns_history)
+            && self.buffers.get(buffer_id).map_or_else(|| {
+                buffer_id.split_once('/').is_some_and(|(_, target)| !target.starts_with('='))
+            }, |buffer| {
+                matches!(buffer.buffer_type, crate::state::buffer::BufferType::Channel | crate::state::buffer::BufferType::Query)
+            })
+    }
+
     pub fn new() -> Self {
         Self {
             connections: std::collections::HashMap::new(),
@@ -236,6 +247,11 @@ impl AppState {
                 let excess = buf.messages.len() - limit;
                 buf.messages.drain(..excess);
                 buf.messages.shrink_to(limit);
+            }
+            if let Some(conn) = self.connections.get_mut(&buf.connection_id)
+                && conn.server_owns_history()
+            {
+                conn.chathistory.reset_pagination(&buf.name);
             }
         }
     }
@@ -1994,6 +2010,10 @@ impl AppState {
         let Some((conn_id, buf_name)) = buffer_id.split_once('/') else {
             return false;
         };
+
+        if self.buffer_uses_server_history(buffer_id) {
+            return false;
+        }
 
         // Use the connection label as network name (falls back to conn_id)
         let network = self

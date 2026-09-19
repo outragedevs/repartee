@@ -181,6 +181,7 @@ impl App {
         self.last_mention_purge = Instant::now();
 
         let seven_days_ago = Utc::now().timestamp() - 7 * 24 * 3600;
+        self.volatile_mentions.retain(|(_, mention)| mention.timestamp >= seven_days_ago);
 
         if let Some(storage) = &self.storage {
             let db = Arc::clone(&storage.db);
