@@ -47,6 +47,8 @@ The fix should define consistent read-after-write semantics for scripting action
 
 ### Merge and revalidate the mobile preview reflow fix
 
+Status: completed on `fix/webui-mobile-preview-reflow`; web build, Clippy, 2268 native tests, 138 web tests, WebKit validation, and Sol medium review passed. See [validation results](docs/validation/2026-09-19-mobile-preview.md).
+
 Pull request: [#39](https://github.com/outragedevs/repartee/pull/39)
 
 The branch contains fixes for mobile image-preview layout shifts, tail-following behavior, scroll intent detection, and iOS text inflation, but it has not been merged into `main`.

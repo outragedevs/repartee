@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::state::{AppState, ScrollMode, is_history_drag, is_resize, mode_after_reader_scroll};
+use crate::state::{AppState, ScrollMode, is_history_drag, is_history_key, is_resize, is_scrollbar_press, mode_after_reader_scroll};
 
 /// Distance in pixels from the absolute bottom that still counts as
 /// "user is at bottom". Mirrors thelounge's value — generous enough
@@ -194,8 +194,6 @@ pub fn ChatView() -> impl IntoView {
     // Consumed by the first scroll it explains, cleared on mouseup and on buffer
     // switch (a release outside the window can leak one stale flag; the switch
     // reset and the consume-once semantics bound the damage to a single scroll).
-    // Overlay scrollbars (macOS, mobile) have no gutter, so this never arms
-    // there — behaviour is unchanged where the gutter doesn't exist.
     let scrollbar_grab = StoredValue::new(false);
 
     // Scrolls. That is all it does. It deliberately does NOT decide whether the
@@ -536,6 +534,8 @@ pub fn ChatView() -> impl IntoView {
     let observer_handle: StoredValue<ObserverHandle, leptos::prelude::LocalStorage> =
         StoredValue::new_local(None);
     let resize_throttle = StoredValue::new(false);
+    let last_client_height = StoredValue::new(None::<i32>);
+    let last_scroll_top = StoredValue::new(None::<i32>);
     Effect::new(move || {
         let Some(el) = chat_ref.get() else { return };
         let el_dom: web_sys::Element = el.into();
@@ -558,6 +558,9 @@ pub fn ChatView() -> impl IntoView {
             drop(old_cb);
         }
         let cb = wasm_bindgen::prelude::Closure::<dyn Fn()>::new(move || {
+            if let Some(el) = chat_ref.get_untracked() {
+                last_client_height.set_value(Some(el.client_height()));
+            }
             if resize_throttle.get_value() {
                 return;
             }
@@ -621,7 +624,6 @@ pub fn ChatView() -> impl IntoView {
     // a reader who has scrolled away when nobody touched anything. The resize
     // path owns the correction in that case. (Same guard lurker uses, from
     // stackblitz-labs/use-stick-to-bottom.)
-    let last_client_height = StoredValue::new(None::<i32>);
 
     // A scroll event is evidence of nothing. The browser emits them when it
     // clamps a scroll position after we swap a buffer's DOM, when the container
@@ -634,13 +636,15 @@ pub fn ChatView() -> impl IntoView {
         let el: &web_sys::Element = target.unchecked_ref();
         let requested = pending_scroll_top.get_value();
         pending_scroll_top.set_value(None);
-        if requested == Some(el.scroll_top()) {
-            return;
-        }
-
+        let scroll_top = el.scroll_top();
+        let toward_tail = last_scroll_top.get_value().is_some_and(|previous| scroll_top > previous);
+        last_scroll_top.set_value(Some(scroll_top));
         let client_height = el.client_height();
         let resized = is_resize(last_client_height.get_value(), client_height);
         last_client_height.set_value(Some(client_height));
+        if requested == Some(el.scroll_top()) {
+            return;
+        }
 
         if state.scroll_mode.get_untracked().is_following_tail() {
             // One exception to "scroll events mean nothing here": a scroll that
@@ -662,7 +666,7 @@ pub fn ChatView() -> impl IntoView {
 
         // ReadingHistory: the reader owns the viewport, so geometry decides
         // whether they have come back to the live tail.
-        let next = mode_after_reader_scroll(is_near_bottom(el));
+        let next = mode_after_reader_scroll(is_near_bottom(el) && toward_tail);
         if next.is_following_tail() {
             state.scroll_mode.set(next);
             debug_log(state, "scrolled back to bottom → FollowingTail");
@@ -699,6 +703,7 @@ pub fn ChatView() -> impl IntoView {
         if el.scroll_height() <= el.client_height() {
             return;
         }
+        last_scroll_top.set_value(Some(el.scroll_top()));
         state.scroll_mode.set(ScrollMode::ReadingHistory);
         debug_log(state, why);
     };
@@ -707,7 +712,7 @@ pub fn ChatView() -> impl IntoView {
     // scroll event it produces: a message arriving in between would otherwise be
     // pinned on top of a reader who has already started scrolling away.
     let on_wheel = move |ev: web_sys::WheelEvent| {
-        if ev.delta_y() < 0.0 {
+        if ev.delta_y() < 0.0 && !ev.ctrl_key() && !ev.meta_key() {
             start_reading("wheel up → ReadingHistory");
         }
     };
@@ -720,10 +725,20 @@ pub fn ChatView() -> impl IntoView {
     // `preventDefault`, so native momentum scrolling is untouched.
     let touch_origin = StoredValue::new(None::<f64>);
     let on_touch_start = move |ev: web_sys::TouchEvent| {
-        touch_origin.set_value(ev.touches().get(0).map(|t| f64::from(t.client_y())));
+        let touches = ev.touches();
+        touch_origin.set_value(if touches.length() == 1 {
+            touches.get(0).map(|t| f64::from(t.client_y()))
+        } else {
+            None
+        });
     };
     let on_touch_move = move |ev: web_sys::TouchEvent| {
-        let (Some(start_y), Some(touch)) = (touch_origin.get_value(), ev.touches().get(0)) else {
+        let touches = ev.touches();
+        if touches.length() != 1 {
+            touch_origin.set_value(None);
+            return;
+        }
+        let (Some(start_y), Some(touch)) = (touch_origin.get_value(), touches.get(0)) else {
             return;
         };
         if is_history_drag(start_y, f64::from(touch.client_y())) {
@@ -744,16 +759,26 @@ pub fn ChatView() -> impl IntoView {
         };
         let el: web_sys::Element = el.into();
         let x = f64::from(ev.client_x()) - el.get_bounding_client_rect().left();
-        scrollbar_grab.set_value(x >= f64::from(el.client_left() + el.client_width()));
+        last_scroll_top.set_value(Some(el.scroll_top()));
+        scrollbar_grab.set_value(ev.button() == 0 && is_scrollbar_press(
+            x,
+            f64::from(el.client_left() + el.client_width()),
+            ev.target() == ev.current_target(),
+        ));
     };
-    let on_mouse_up = move |_: web_sys::MouseEvent| {
-        scrollbar_grab.set_value(false);
-    };
+    let mouse_release = leptos::leptos_dom::helpers::window_event_listener(
+        leptos::ev::mouseup,
+        move |_| scrollbar_grab.set_value(false),
+    );
+    on_cleanup(move || mouse_release.remove());
 
     // Keyboard scrolling, when the container has focus.
     let on_key_down = move |ev: web_sys::KeyboardEvent| {
-        if matches!(ev.key().as_str(), "PageUp" | "Home" | "ArrowUp") {
+        if is_history_key(&ev.key(), ev.shift_key()) {
             start_reading("key up → ReadingHistory");
+        }
+        if matches!(ev.key().as_str(), "Shift" | " " | "PageUp" | "PageDown" | "Home" | "End" | "ArrowUp" | "ArrowDown") {
+            ev.stop_propagation();
         }
     };
 
@@ -830,6 +855,7 @@ pub fn ChatView() -> impl IntoView {
             <div class="chat-messages-outer">
                 <div
                     class="chat-messages"
+                    data-following-tail=move || state.scroll_mode.get().is_following_tail().to_string()
                     node_ref=chat_ref
                     // Focusable so PageUp/Home/ArrowUp reach `on_key_down`: a plain
                     // overflow container takes no keyboard focus, and since
@@ -843,7 +869,6 @@ pub fn ChatView() -> impl IntoView {
                     on:touchstart=on_touch_start
                     on:touchmove=on_touch_move
                     on:mousedown=on_mouse_down
-                    on:mouseup=on_mouse_up
                     on:keydown=on_key_down
                 >
                     <div class="chat-messages-inner">
