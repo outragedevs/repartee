@@ -15,7 +15,7 @@ pub struct HistoryDiscovery {
     active: HashSet<String>,
     hydration_attempts: HashMap<String, usize>,
     seen: HashSet<String>,
-    finished: bool,
+    pub(super) finished: bool,
     attempts: usize,
     retry_at: Instant,
 }

@@ -66,7 +66,7 @@ Mentions buffer restores same-session volatile entries even without SQLite. The 
 fixtures seed 300 messages for a query and 300 for a channel in each bouncer's store. The child discovers both targets through TARGETS without manually creating
 a buffer. It loads 200 messages for each, retrieves the remaining 100 query messages
 with BEFORE, verifies ordering and exhaustion, and confirms that neither target
-enters the local log queue. Soju runs with its upstream disabled, exercising stored history while the
+enters the local log queue. The test also waits until TARGETS pagination finishes. Soju runs with its upstream disabled, exercising stored history while the
 IRC network is offline.
 
 Cancellation regression tests drop registration during CAP negotiation and

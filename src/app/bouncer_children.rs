@@ -794,6 +794,12 @@ async fn pinned_bouncer_generated_children() {
         assert_eq!(message.text, format!("fixture-history-{index}"));
     }
     assert!(app.state.connections[&id].chathistory.is_before_exhausted("history-peer"));
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !app.history_discovery[&id].finished {
+            let event = app.irc_rx.recv().await.expect("connection closed during TARGETS pagination");
+            app.handle_irc_event(event);
+        }
+    }).await.expect("TARGETS discovery did not finish");
     while let Ok(row) = log_rx.try_recv() {
         assert_ne!(row.buffer, "history-peer");
         assert_ne!(row.buffer, "#history-channel");
