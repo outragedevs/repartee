@@ -76,6 +76,7 @@ stringprep = "0.1"
 p256 = { version = "0.13", features = ["pem"] }
 uuid = { version = "1.21", features = ["v4"] }
 hex = "0.4"
+shell-words = "1.1"
 # E2E encryption (RPE2E v1.0)
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }

@@ -63,6 +63,8 @@ Before merging:
 
 ### Parse quoted shell arguments correctly
 
+Status: completed on `fix/shell-quoted-arguments`; Clippy, 2273 native tests, 138 web tests, and Sol medium review passed.
+
 The embedded shell currently uses whitespace splitting. Commands containing quoted paths, escaped spaces, or other shell-style arguments are parsed incorrectly. Replace the simple split with a tested argument parser while preserving the current direct process execution model.
 
 ### Reduce the lifetime of E2E secrets in memory

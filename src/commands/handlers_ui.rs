@@ -1006,12 +1006,15 @@ pub(crate) fn cmd_shell(app: &mut App, args: &[String]) {
     match sub {
         "open" | "" => shell_open(app, None),
         "cmd" => {
-            let command = args.get(1).map(String::as_str);
+            let command = args
+                .get(1..)
+                .filter(|tail| !tail.is_empty())
+                .map(|tail| tail.join(" "));
             if command.is_none() {
                 add_local_event(app, &format!("{C_ERR}Usage: /shell cmd <command>{C_RST}"));
                 return;
             }
-            shell_open(app, command);
+            shell_open(app, command.as_deref());
         }
         "close" => {
             let shell_buf = app.state.active_buffer().and_then(|buf| {
@@ -1049,13 +1052,20 @@ pub(crate) fn cmd_shell(app: &mut App, args: &[String]) {
         }
         _ => {
             // Treat unknown subcommand as a command to run.
-            shell_open(app, Some(sub));
+            shell_open(app, Some(&args.join(" ")));
         }
     }
 }
 
 /// Open a new shell session and create the associated buffer.
 fn shell_open(app: &mut App, command: Option<&str>) {
+    let base_label = match crate::shell::command_label(command) {
+        Ok(label) => label,
+        Err(error) => {
+            add_local_event(app, &format!("{C_ERR}{error}{C_RST}"));
+            return;
+        }
+    };
     // Ensure the "Shell" sidebar header exists.
     app.ensure_shell_connection();
 
@@ -1078,20 +1088,6 @@ fn shell_open(app: &mut App, command: Option<&str>) {
         pty_rows = rows,
         "shell: opening PTY with computed dimensions"
     );
-
-    // Determine the display label from the command basename.
-    let base_label = command
-        .and_then(|c| std::path::Path::new(c).file_name().and_then(|n| n.to_str()))
-        .map(String::from)
-        .or_else(|| {
-            std::env::var("SHELL").ok().and_then(|s| {
-                std::path::Path::new(&s)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(String::from)
-            })
-        })
-        .unwrap_or_else(|| "shell".to_string());
 
     let buf_name = find_unique_shell_name(app, &base_label);
     let buf_id = make_buffer_id(App::SHELL_CONN_ID, &buf_name);

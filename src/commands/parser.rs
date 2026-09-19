@@ -51,7 +51,7 @@ pub fn parse_command(input: &str) -> Option<ParsedCommand> {
     }
     let trimmed = &input[1..];
     let (command, rest) = match trimmed.find(' ') {
-        Some(idx) => (trimmed[..idx].to_lowercase(), trimmed[idx + 1..].trim()),
+        Some(idx) => (trimmed[..idx].to_lowercase(), &trimmed[idx + 1..]),
         None => {
             return Some(ParsedCommand {
                 name: trimmed.to_lowercase(),
@@ -63,6 +63,11 @@ pub fn parse_command(input: &str) -> Option<ParsedCommand> {
     // Greediness is a property of the command, not of the spelling used to
     // reach it, so resolve built-in aliases before deciding.
     let canonical = super::registry::resolve_alias(&command).unwrap_or(command.as_str());
+    let rest = if canonical == "shell" {
+        rest.trim_start()
+    } else {
+        rest.trim()
+    };
 
     if GREEDY_COMMANDS.contains(&canonical) {
         if matches!(canonical, "me" | "quit" | "quote") {
@@ -93,6 +98,16 @@ pub fn parse_command(input: &str) -> Option<ParsedCommand> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_command_tail_preserves_quoting_and_trailing_escaped_space() {
+        for name in ["shell", "sh"] {
+            let command = parse_command(&format!("/{name} cmd echo 'two words' tail\\ ")).unwrap();
+            assert_eq!(command.args, ["cmd", "echo 'two words' tail\\ "]);
+            let direct = parse_command(&format!("/{name} '/path with spaces/tool' 'two words'")).unwrap();
+            assert_eq!(direct.args.join(" "), "'/path with spaces/tool' 'two words'");
+        }
+    }
 
     #[test]
     fn quit_no_args() {
