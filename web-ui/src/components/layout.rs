@@ -53,6 +53,7 @@ pub fn Layout() -> impl IntoView {
                 limit: 100,
                 before: None,
                 before_id: None,
+                before_message_id: None,
             });
         }
         crate::ws::send_command(&WebCommand::FetchNickList { buffer_id: buf_id });

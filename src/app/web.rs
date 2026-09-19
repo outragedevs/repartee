@@ -73,6 +73,10 @@ impl App {
         self.web_state_snapshot = None;
         self.web_active_buffers.clear();
         self.web_buffer_unconfirmed.clear();
+        self.pending_history_pages.clear();
+        while let Some(session_id) = self.state.web_history_buffers.keys().next().cloned() {
+            self.release_web_history(&session_id);
+        }
         // Detach the preview extractor from AppState too — otherwise
         // message_to_wire keeps populating `previews` for messages that
         // no client can render.
@@ -293,6 +297,7 @@ impl App {
             }
             self.broadcast_web(event);
         }
+        self.flush_server_history_pages();
         if structural_change {
             // A new WS session connecting right now would otherwise
             // get up to 1 second of stale `SyncInit` data (buffer
@@ -317,9 +322,11 @@ impl App {
             .and_then(|s| {
                 s.db.try_lock()
                     .ok()
-                    .and_then(|db| crate::storage::query::get_unread_mention_count(&db).ok())
+                    .and_then(|db| crate::storage::query::get_unread_mentions(&db).ok())
+                    .map(|rows| u32::try_from(rows.iter().filter(|row| !Self::mention_uses_server_history(&row.network, &row.buffer)).count()).unwrap_or(u32::MAX))
             })
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .saturating_add(u32::try_from(self.volatile_mentions.len()).unwrap_or(u32::MAX));
         let init = crate::web::snapshot::build_sync_init(
             &self.state,
             mention_count,
@@ -427,7 +434,24 @@ impl App {
     }
 
     /// Insert a mention into the `SQLite` mentions table.
-    pub(crate) fn record_mention(&self, buffer_id: &str, msg: &crate::web::protocol::WireMessage) {
+    pub(crate) fn record_mention(&mut self, buffer_id: &str, msg: &crate::web::protocol::WireMessage) {
+        if self.server_owns_buffer_history(buffer_id) {
+            let (conn_id, target) = crate::web::snapshot::split_buffer_id(buffer_id);
+            let scope = self.state.connections[conn_id].network_key().to_string();
+            let id = self.volatile_mentions.back().map_or(-1, |(_, mention)| mention.id.saturating_sub(1));
+            self.volatile_mentions.push_back((scope, crate::web::protocol::WireMention {
+                id,
+                timestamp: msg.timestamp,
+                buffer_id: buffer_id.to_string(),
+                channel: self.state.buffers.get(buffer_id).map_or(target, |buf| buf.name.as_str()).to_string(),
+                nick: msg.nick.clone().unwrap_or_default(),
+                text: msg.text.clone(),
+            }));
+            while self.volatile_mentions.len() > 1000 {
+                self.volatile_mentions.pop_front();
+            }
+            return;
+        }
         let Some(ref storage) = self.storage else {
             return;
         };
@@ -523,6 +547,9 @@ impl App {
                 );
             }
             WebCommand::SwitchBuffer { buffer_id } => {
+                if self.state.web_history_buffers.get(session_id).is_some_and(|id| id != &buffer_id) {
+                    self.release_web_history(session_id);
+                }
                 // Flip the GLOBAL active buffer so the TUI and every other web
                 // session follow (1:1 sync across all clients) — but ONLY for
                 // channels/queries. Shell buffers are per-session terminals
@@ -564,8 +591,18 @@ impl App {
                 limit,
                 before,
                 before_id,
+                before_message_id,
             } => {
-                self.web_fetch_messages(&buffer_id, limit, before, before_id, session_id);
+                if self.server_owns_buffer_history(&buffer_id) {
+                    self.fetch_server_history_page(&buffer_id, limit, before, before_message_id, session_id);
+                } else {
+                    self.web_fetch_messages(&buffer_id, limit, before, before_id, session_id);
+                }
+            }
+            WebCommand::CollapseBacklog { buffer_id } => {
+                if self.state.web_history_buffers.get(session_id) == Some(&buffer_id) {
+                    self.release_web_history(session_id);
+                }
             }
             WebCommand::FetchNickList { buffer_id } => {
                 if let Some(crate::web::protocol::WebEvent::NickList {
@@ -624,6 +661,7 @@ impl App {
                 }
             }
             WebCommand::WebDisconnect => {
+                self.release_web_history(session_id);
                 self.web_active_buffers.remove(session_id);
                 self.web_buffer_unconfirmed.remove(session_id);
                 self.on_web_session_gone(session_id);
@@ -956,30 +994,32 @@ impl App {
 
     /// Fetch unread mentions for a web client.
     fn web_fetch_mentions(&self, session_id: &str) {
-        let Some(ref storage) = self.storage else {
-            return;
-        };
-        let Ok(db) = storage.db.lock() else {
-            return;
-        };
-        if let Ok(mentions) = crate::storage::query::get_unread_mentions(&db) {
-            let wire: Vec<_> = mentions
-                .iter()
-                .map(|m| crate::web::protocol::WireMention {
-                    id: m.id,
-                    timestamp: m.timestamp,
-                    buffer_id: self.mention_target(&m.network)
-                        .map_or_else(String::new, |(id, _)| crate::state::buffer::make_buffer_id(&id, &m.buffer)),
-                    channel: m.channel.clone(),
-                    nick: m.nick.clone(),
-                    text: m.text.clone(),
-                })
-                .collect();
-            self.broadcast_web(crate::web::protocol::WebEvent::MentionsList {
-                mentions: wire,
-                session_id: Some(session_id.to_string()),
-            });
-        }
+        let mut wire = self.storage.as_ref().and_then(|storage| {
+            let db = storage.db.lock().ok()?;
+            crate::storage::query::get_unread_mentions(&db).ok()
+        }).unwrap_or_default().into_iter()
+            .filter(|mention| !Self::mention_uses_server_history(&mention.network, &mention.buffer))
+            .map(|mention| crate::web::protocol::WireMention {
+                id: mention.id,
+                timestamp: mention.timestamp,
+                buffer_id: self.mention_target(&mention.network)
+                    .map_or_else(String::new, |(id, _)| crate::state::buffer::make_buffer_id(&id, &mention.buffer)),
+                channel: mention.channel,
+                nick: mention.nick,
+                text: mention.text,
+            }).collect::<Vec<_>>();
+        wire.extend(self.volatile_mentions.iter().map(|(scope, mention)| {
+            let mut mention = mention.clone();
+            let (_, target) = crate::web::snapshot::split_buffer_id(&mention.buffer_id);
+            mention.buffer_id = self.mention_target(scope)
+                .map_or_else(String::new, |(id, _)| crate::state::buffer::make_buffer_id(&id, target));
+            mention
+        }));
+        wire.sort_by_key(|mention| std::cmp::Reverse(mention.timestamp));
+        self.broadcast_web(crate::web::protocol::WebEvent::MentionsList {
+            mentions: wire,
+            session_id: Some(session_id.to_string()),
+        });
     }
 }
 

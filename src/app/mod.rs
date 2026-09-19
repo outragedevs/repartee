@@ -15,6 +15,7 @@ pub mod input;
 mod irc;
 pub mod bouncer;
 mod bouncer_children;
+mod server_history;
 mod connection_attempt;
 mod log_browser;
 mod maintenance;
@@ -397,6 +398,8 @@ pub struct App {
     pub lag_pings: HashMap<String, Instant>,
     pub(crate) batch_trackers: HashMap<String, crate::irc::batch::BatchTracker>,
     pub storage: Option<crate::storage::Storage>,
+    pub(crate) volatile_mentions: VecDeque<(String, crate::web::protocol::WireMention)>,
+    pub(crate) pending_history_pages: Vec<server_history::PendingHistoryPage>,
     pub(crate) last_event_purge: Instant,
     pub(crate) last_mention_purge: Instant,
     pub quit_message: Option<String>,
@@ -858,6 +861,8 @@ impl App {
             lag_pings: HashMap::new(),
             batch_trackers: HashMap::new(),
             storage,
+            pending_history_pages: Vec::new(),
+            volatile_mentions: VecDeque::new(),
             last_event_purge: Instant::now(),
             last_mention_purge: Instant::now(),
             quit_message: None,

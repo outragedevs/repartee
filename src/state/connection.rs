@@ -72,6 +72,10 @@ pub struct Connection {
 }
 
 impl Connection {
+    pub const fn server_owns_history(&self) -> bool {
+        self.origin_config.bouncer_control || self.origin_config.bouncer_network_id.is_some()
+    }
+
     pub fn network_key(&self) -> &str {
         self.network_scope.as_deref().unwrap_or(&self.label)
     }

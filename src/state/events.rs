@@ -17,10 +17,22 @@ enum ParkedShrinkRules {
 }
 
 impl AppState {
+    pub(crate) fn buffer_uses_server_history(&self, buffer_id: &str) -> bool {
+        buffer_id.split_once('/')
+            .and_then(|(conn_id, _)| self.connections.get(conn_id))
+            .is_some_and(Connection::server_owns_history)
+            && self.buffers.get(buffer_id).map_or_else(|| {
+                buffer_id.split_once('/').is_some_and(|(_, target)| !target.starts_with('='))
+            }, |buffer| {
+                matches!(buffer.buffer_type, crate::state::buffer::BufferType::Channel | crate::state::buffer::BufferType::Query)
+            })
+    }
+
     pub fn new() -> Self {
         Self {
             connections: std::collections::HashMap::new(),
             buffers: indexmap::IndexMap::new(),
+            web_history_buffers: std::collections::HashMap::new(),
             active_buffer_id: None,
             previous_buffer_id: None,
             message_counter: 0,
@@ -192,8 +204,17 @@ impl AppState {
             .push(crate::web::protocol::WebEvent::BufferClosed {
                 buffer_id: id.to_string(),
             });
-        self.buffers.shift_remove(id);
+        if let Some(buffer) = self.buffers.shift_remove(id)
+            && matches!(buffer.buffer_type, crate::state::buffer::BufferType::Channel | crate::state::buffer::BufferType::Query)
+            && let Some(conn) = self.connections.get_mut(&buffer.connection_id)
+            && conn.server_owns_history()
+        {
+            conn.chathistory.reset_pagination(&buffer.name);
+            conn.chathistory.clear_connect_gapfilled(&buffer.name);
+            conn.chathistory.close_target(&buffer.name);
+        }
         self.activity_order.remove(id);
+        self.web_history_buffers.retain(|_, buffer_id| buffer_id != id);
         self.typing.remove_buffer(id);
         // Clean up per-buffer flood tracking to prevent unbounded map growth.
         self.flood_state.remove_buffer(id);
@@ -226,6 +247,9 @@ impl AppState {
     /// so a later scroll-up reloads, and trim back to the normal
     /// `scrollback_limit` — freeing the loaded backlog. No-op if not pinned.
     pub(crate) fn collapse_buffer_backlog(&mut self, buffer_id: &str) {
+        if self.web_history_buffers.values().any(|id| id == buffer_id) {
+            return;
+        }
         let limit = self.scrollback_limit;
         if let Some(buf) = self.buffers.get_mut(buffer_id)
             && buf.pin_backlog
@@ -236,6 +260,11 @@ impl AppState {
                 let excess = buf.messages.len() - limit;
                 buf.messages.drain(..excess);
                 buf.messages.shrink_to(limit);
+            }
+            if let Some(conn) = self.connections.get_mut(&buf.connection_id)
+                && conn.server_owns_history()
+            {
+                conn.chathistory.reset_pagination(&buf.name);
             }
         }
     }
@@ -1071,6 +1100,11 @@ impl AppState {
             return;
         }
         self.rekey_activity(old_id, new_id);
+        for buffer_id in self.web_history_buffers.values_mut() {
+            if buffer_id == old_id {
+                new_id.clone_into(buffer_id);
+            }
+        }
         if let Some(queue) = self.translate_queues.remove(old_id) {
             // The new id may still hold its PREVIOUS occupant's queue — a
             // stale query under the very nick this conversation is renaming
@@ -1995,6 +2029,10 @@ impl AppState {
             return false;
         };
 
+        if self.buffer_uses_server_history(buffer_id) {
+            return false;
+        }
+
         // Use the connection label as network name (falls back to conn_id)
         let network = self
             .connections
@@ -2078,7 +2116,15 @@ impl AppState {
     /// until a restart or log-browser reload. Each spliced row is assigned a
     /// fresh in-memory id; rows are inserted before the first existing message
     /// with a strictly greater timestamp so ordering is preserved.
+    #[cfg(test)]
     pub(crate) fn surface_history_rows(&mut self, buffer_id: &str, rows: Vec<Message>) {
+        self.surface_history_page(buffer_id, rows, false);
+    }
+
+    pub(crate) fn surface_history_page(&mut self, buffer_id: &str, mut rows: Vec<Message>, before: bool) {
+        if before {
+            rows.reverse();
+        }
         // Timestamps of rows actually spliced in — used to clear any matching
         // "[E2E: awaiting our own identity]" placeholder afterwards. The
         // placeholder is transient (no @msgid, deliberately un-dedupable so
@@ -2156,12 +2202,13 @@ impl AppState {
                 .push(crate::web::protocol::WebEvent::InsertMessage {
                     buffer_id: buffer_id.to_string(),
                     message: wire,
+                    before,
                 });
             if let Some(buf) = self.buffers.get_mut(buffer_id) {
                 let pos = buf
                     .messages
                     .iter()
-                    .position(|m| m.timestamp > msg.timestamp)
+                    .position(|m| m.timestamp > msg.timestamp || (before && m.timestamp == msg.timestamp))
                     .unwrap_or(buf.messages.len());
                 buf.messages.insert(pos, msg);
             }

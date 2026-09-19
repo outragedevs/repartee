@@ -283,11 +283,11 @@ pub fn ChatView() -> impl IntoView {
                         } else {
                             msg.timestamp * 1000
                         };
-                        (ms, msg.log_id)
+                        (ms, msg.log_id, Some(msg.id))
                     })
             })
         });
-        let Some((before, before_id)) = cursor else {
+        let Some((before, before_id, before_message_id)) = cursor else {
             return false;
         };
         // Remember the first visible real line and its on-screen offset so the
@@ -308,6 +308,7 @@ pub fn ChatView() -> impl IntoView {
             limit: 100,
             before: Some(before),
             before_id,
+            before_message_id,
         });
         true
     };

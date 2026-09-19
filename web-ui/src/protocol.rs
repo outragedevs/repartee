@@ -50,6 +50,8 @@ pub enum WebEvent {
     InsertMessage {
         buffer_id: String,
         message: WireMessage,
+        #[serde(default)]
+        before: bool,
     },
     /// Remove already-delivered messages from a buffer by in-memory `id`.
     /// Sent when a transient E2E placeholder is swept after its decrypted line
@@ -205,6 +207,11 @@ pub enum WebCommand {
         /// `(before_ms, before_id)` keyset cursor so same-second (including
         /// CHATHISTORY-backfilled) rows aren't dropped.
         before_id: Option<i64>,
+        #[serde(default)]
+        before_message_id: Option<u64>,
+    },
+    CollapseBacklog {
+        buffer_id: String,
     },
     FetchNickList {
         buffer_id: String,

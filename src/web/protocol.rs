@@ -69,6 +69,8 @@ pub enum WebEvent {
     InsertMessage {
         buffer_id: String,
         message: WireMessage,
+        #[serde(default)]
+        before: bool,
     },
     /// Remove already-delivered messages from a buffer, by in-memory `id`.
     /// Emitted when a transient E2E placeholder is swept after its decrypted
@@ -246,7 +248,10 @@ pub enum WebCommand {
         /// with clients that don't send it.
         #[serde(default)]
         before_id: Option<i64>,
+        #[serde(default)]
+        before_message_id: Option<u64>,
     },
+    CollapseBacklog { buffer_id: String },
     /// Request full nick list for a channel buffer.
     FetchNickList { buffer_id: String },
     /// Request unread mentions.

@@ -763,6 +763,41 @@ async fn pinned_bouncer_generated_children() {
     .await
     .expect("discovered network never connected");
     assert_eq!(app.bouncer_children.len(), 1);
+    app.state.scrollback_limit = 1000;
+    app.config.display.backlog_lines = 200;
+    let id = app.bouncer_children.keys().next().unwrap().clone();
+    let buffer_id = make_buffer_id(&id, "history-peer");
+    app.state.add_buffer(crate::state::buffer::Buffer::for_test(
+        &id, crate::state::buffer::BufferType::Query, "history-peer",
+    ));
+    let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(512);
+    app.state.log_tx = Some(log_tx);
+    app.load_backlog(&buffer_id);
+    for expected in [200, 300] {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(event) = app.irc_rx.recv().await {
+                app.handle_irc_event(event);
+                if app.state.buffers[&buffer_id].messages.len() >= expected
+                    && !app.state.connections[&id].chathistory.any_in_flight("history-peer")
+                {
+                    return;
+                }
+            }
+            panic!("connection closed while fetching history");
+        }).await.expect("server history page did not arrive");
+        if expected == 200 {
+            assert!(app.fetch_older_via_chathistory(&buffer_id));
+        }
+    }
+    let messages = &app.state.buffers[&buffer_id].messages;
+    assert_eq!(messages.len(), 300);
+    for (index, message) in messages.iter().enumerate() {
+        assert_eq!(message.text, format!("fixture-history-{index}"));
+    }
+    assert!(app.state.connections[&id].chathistory.is_before_exhausted("history-peer"));
+    while let Ok(row) = log_rx.try_recv() {
+        assert_ne!(row.buffer, "history-peer");
+    }
     app.suspend_bouncer_children("fixture");
     assert!(
         app.bouncer_children
