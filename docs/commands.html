@@ -1207,6 +1207,7 @@ Server credentials (passwords, SASL) are stored in <code>.env</code>.</p>
 <li><code>-autosendcmd=&lt;cmds&gt;</code> — Commands to run on connect (semicolon-separated)</li>
 <li><code>-client-cert=&lt;path&gt;</code> — Client TLS certificate path for SASL EXTERNAL / CertFP</li>
 <li><code>-sasl-key=&lt;path&gt;</code> — P-256 private key path for ECDSA-NIST256P-CHALLENGE</li>
+<li><code>-bouncer-network=&lt;id&gt;</code> — Bind to a Lurker/Soju network ID after successful SASL authentication</li>
 </ul>
 <p>Flag values are parsed as single command arguments, so values with spaces should
 be edited in <code>config.toml</code> or with <code>/set</code>. For a guided form instead of flags,

@@ -264,6 +264,7 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "sasl_mechanism" => server.sasl_mechanism.clone().unwrap_or_default(),
                 "client_cert_path" => server.client_cert_path.clone().unwrap_or_default(),
                 "sasl_key_path" => server.sasl_key_path.clone().unwrap_or_default(),
+                "bouncer_network_id" => server.bouncer_network_id.clone().unwrap_or_default(),
                 _ => return None,
             };
             Some(Resolved {
@@ -682,6 +683,13 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                 "sasl_mechanism" => server.sasl_mechanism = (!raw.is_empty()).then(|| parse_sasl_mechanism(raw)).transpose()?,
                 "client_cert_path" => server.client_cert_path = (!raw.is_empty()).then(|| raw.to_string()),
                 "sasl_key_path" => server.sasl_key_path = (!raw.is_empty()).then(|| raw.to_string()),
+                "bouncer_network_id" => {
+                    server.bouncer_network_id = if raw.is_empty() {
+                        None
+                    } else {
+                        Some(crate::irc::bouncer::normalize_network_id(raw)?)
+                    };
+                }
                 _ => return Err(format!("Unknown field: {path}")),
             }
         }
@@ -899,6 +907,7 @@ const SERVER_FIELDS: &[&str] = &[
     "sasl_mechanism",
     "client_cert_path",
     "sasl_key_path",
+    "bouncer_network_id",
 ];
 
 /// Get all valid setting paths for tab completion.
@@ -1626,6 +1635,7 @@ mod tests {
                 sasl_mechanism: None,
                 client_cert_path: None,
                 sasl_key_path: None,
+                bouncer_network_id: None,
             },
         );
         let paths = get_setting_paths(&config);
@@ -1662,6 +1672,7 @@ mod tests {
                 sasl_mechanism: None,
                 client_cert_path: None,
                 sasl_key_path: None,
+                bouncer_network_id: None,
             },
         );
         config
@@ -1967,6 +1978,26 @@ mod tests {
         for path in ["general.nick".to_string(), format!("servers.{id}.address"), format!("servers.{id}.port")] {
             assert!(set_config_value(&mut config, &path, "").is_err());
         }
+    }
+
+    #[test]
+    fn bouncer_network_setting_round_trips_and_rejects_injection() {
+        let mut config: crate::config::AppConfig = toml::from_str("[servers.fixture]\nlabel = 'fixture'\naddress = 'localhost'\nport = 6697\ntls = true\nchannels = []\n").unwrap();
+        let path = "servers.fixture.bouncer_network_id";
+        set_config_value(&mut config, path, "00042").unwrap();
+        assert_eq!(
+            config.servers["fixture"].bouncer_network_id.as_deref(),
+            Some("42")
+        );
+        assert!(set_config_value(&mut config, path, "42\r\nQUIT").is_err());
+        let restored: crate::config::AppConfig =
+            toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(
+            restored.servers["fixture"].bouncer_network_id.as_deref(),
+            Some("42")
+        );
+        set_config_value(&mut config, path, "").unwrap();
+        assert!(config.servers["fixture"].bouncer_network_id.is_none());
     }
 
 }
