@@ -100,7 +100,7 @@ impl App {
         else {
             return;
         };
-        let Some(millis) = buffer
+        let millis = buffer
             .messages
             .range(..=position)
             .rev()
@@ -111,12 +111,14 @@ impl App {
                     .and_then(|tags| tags.get("time"))
                     .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
                     .map(|time| time.timestamp_millis())
-            })
-        else {
-            return;
-        };
+            });
         let conn_id = buffer.connection_id.clone();
         let target = buffer.name.to_ascii_lowercase();
+        self.state.clear_visible_read_rows(buffer_id, message_id);
+        let Some(millis) = millis else {
+            self.drain_pending_web_events();
+            return;
+        };
         let scope = self.state.connections[&conn_id].network_key().to_string();
         let markers = self.read_markers.entry(conn_id).or_default();
         markers.prepare_scope(&scope);
@@ -150,19 +152,11 @@ impl App {
         let Some(buffer_id) = self.state.active_buffer_id.clone() else {
             return;
         };
-        let message_id = self.state.buffers.get(&buffer_id).and_then(|buffer| {
-            buffer
-                .messages
-                .iter()
-                .rev()
-                .find(|message| {
-                    message
-                        .tags
-                        .as_ref()
-                        .is_some_and(|tags| tags.contains_key("time"))
-                })
-                .map(|message| message.id)
-        });
+        let message_id = self
+            .state
+            .buffers
+            .get(&buffer_id)
+            .and_then(|buffer| buffer.messages.back().map(|message| message.id));
         if let Some(message_id) = message_id {
             self.mark_visible_message_read(&buffer_id, message_id);
         }
@@ -346,6 +340,51 @@ mod tests {
             crate::state::buffer::ActivityLevel::Activity,
         );
         id
+    }
+
+    #[tokio::test]
+    async fn visible_untimed_rows_clear_locally_without_a_server_marker() {
+        let mut app = sending_app();
+        let local =
+            crate::state::events::tests::make_test_message(&mut app.state, "encrypted placeholder");
+        let seen = local.id;
+        app.state.add_transient_message_with_activity(
+            "account/peer",
+            local,
+            crate::state::buffer::ActivityLevel::Activity,
+        );
+        server_message(&mut app, 2456);
+        app.mark_visible_message_read("account/peer", seen);
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 1);
+        assert!(app.irc_handles["account"].sender().captured().is_empty());
+    }
+
+    #[tokio::test]
+    async fn terminal_read_includes_untimed_tail() {
+        let mut app = sending_app();
+        app.terminal =
+            Some(crate::ui::setup_socket_terminal(Box::new(std::io::sink()), 120, 40).unwrap());
+        app.state.set_active_buffer("account/peer");
+        server_message(&mut app, 1123);
+        let local =
+            crate::state::events::tests::make_test_message(&mut app.state, "encrypted placeholder");
+        app.state.add_transient_message_with_activity(
+            "account/peer",
+            local,
+            crate::state::buffer::ActivityLevel::Activity,
+        );
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 2);
+        assert!(app.render_terminal_frame());
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 0);
+        let captured = app.irc_handles["account"].sender().captured();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            captured[0].command,
+            irc::proto::Command::Raw(
+                "MARKREAD".into(),
+                vec!["Peer".into(), "timestamp=1970-01-01T00:00:01.123Z".into()]
+            )
+        );
     }
 
     #[tokio::test]
