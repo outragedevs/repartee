@@ -371,6 +371,7 @@ pub fn ChatView() -> impl IntoView {
         let _ = state.wizard_open.get();
         let _ = state.emote_picker_open.get();
         let _ = state.emoji_picker_open.get();
+        let _ = state.appearance_open.get();
         if !state.scroll_mode.get().is_following_tail() {
             return;
         }

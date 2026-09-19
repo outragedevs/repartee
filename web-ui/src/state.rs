@@ -301,7 +301,7 @@ impl AppState {
         if document.hidden() || !document.has_focus().unwrap_or(false)
             || !self.scroll_mode.get_untracked().is_following_tail()
             || self.wizard_open.get_untracked() || self.emote_picker_open.get_untracked()
-            || self.emoji_picker_open.get_untracked() { return; }
+            || self.emoji_picker_open.get_untracked() || self.appearance_open.get_untracked() { return; }
         let Some(buffer_id) = self.active_buffer.get_untracked() else { return };
         let tail = self.messages.with_untracked(|messages| messages.get(&buffer_id)
             .and_then(|messages| messages.iter().rev().find(|message| message.id != 0))

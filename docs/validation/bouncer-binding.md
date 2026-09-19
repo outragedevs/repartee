@@ -191,3 +191,7 @@ Marker scheduling, acknowledgments and FAIL correlation use the same Unicode
 lowercase keys as buffer IDs, while active buffers retain their wire spelling.
 A regression covers non-ASCII query/channel names with both MARKREAD and legacy
 READ, ensuring acknowledgments retire pending writes and failures match queries.
+
+The web Appearance dialog participates in the same read guard and reactive
+close-to-tail refresh as the other modal dialogs. Incoming messages and font
+changes behind that dialog cannot advance read markers.
