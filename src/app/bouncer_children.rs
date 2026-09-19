@@ -818,6 +818,7 @@ async fn pinned_bouncer_generated_children() {
 #[cfg(test)]
 async fn verify_pinned_read_markers(app: &mut crate::app::App, id: &str, buffer_id: &str) {
     assert!(app.state.connections[id].enabled_caps.contains("draft/read-marker"));
+    assert_eq!(app.state.buffers[buffer_id].unread_count, 300);
     let mut observer_config = app.state.connections[id].origin_config.clone();
     observer_config.sasl_user = Some(std::env::var("REPARTEE_BOUNCER_TEST_USER").unwrap());
     observer_config.sasl_pass = Some("fixture-password".into());
@@ -840,6 +841,7 @@ async fn verify_pinned_read_markers(app: &mut crate::app::App, id: &str, buffer_
             app.handle_irc_event(event);
         }
     }).await.expect("server did not acknowledge the read marker");
+    assert_eq!(app.state.buffers[buffer_id].unread_count, 150);
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let expected = crate::irc::chathistory::rfc3339_millis(seen_time);
         while let Some(event) = observer_events.recv().await {

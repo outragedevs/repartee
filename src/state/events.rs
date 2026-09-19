@@ -2200,6 +2200,7 @@ impl AppState {
             }
             spliced_ts.push(msg.timestamp);
             msg.id = self.next_message_id();
+            self.record_history_read_activity(buffer_id, &msg, own_nick.as_deref());
             // Splicing into buf.messages bypasses add_message's web-event queue,
             // so broadcast the row ourselves — these gap-fill rows are not
             // reachable by the web client's older-only pagination, so without
@@ -2283,6 +2284,7 @@ impl AppState {
                     message_ids: swept_ids,
                 });
         }
+        self.finish_history_read_activity(buffer_id);
     }
 
     #[allow(dead_code, reason = "reserved for scripting API; used in tests")]
