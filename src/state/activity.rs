@@ -22,7 +22,8 @@ impl AppState {
         if old_id == new_id {
             return;
         }
-        if let Some(state) = self.read_activity.remove(old_id) {
+        if let Some(mut state) = self.read_activity.remove(old_id) {
+            state.through = None;
             self.read_activity.insert(new_id.to_string(), state);
         }
         if let Some(order) = self.activity_order.remove(old_id) {

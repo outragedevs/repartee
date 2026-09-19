@@ -137,3 +137,11 @@ Repeated terminal draws leave unchanged read counts silent. If the final marker
 capability disappears, visible terminal buffers clear locally only after a
 focused tail render; background and genuinely scrolled views preserve unread
 rows. The regression uses sixty messages to exercise actual scrollback.
+
+Query renames retain unread message bookkeeping but discard the old target's
+watermark, allowing the new target's lower marker to apply. Standard MARKREAD/READ
+FAIL replies are matched by target or the rejected timestamp criterion used by
+both pinned implementations. Permanent failures suppress the rejected update;
+newer displayed timestamps can proceed. INTERNAL_ERROR retries use increasing
+delays and stop after three rejections. Failures are visible in the connection's
+server buffer, and reconnect resets failed-attempt state.
