@@ -636,6 +636,9 @@ pub async fn connect_server(
     server_config: &crate::config::ServerConfig,
     general: &crate::config::GeneralConfig,
 ) -> Result<(IrcHandle, mpsc::Receiver<IrcEvent>)> {
+    if server_config.bouncer_control && server_config.bouncer_network_id.is_some() {
+        return Err(eyre!("Choose either bouncer control mode or an explicit network ID"));
+    }
     let bouncer_network_id = server_config
         .bouncer_network_id
         .as_deref()
@@ -674,7 +677,7 @@ pub async fn connect_server(
     // Hoisted out of the `Config` literal because `CrateEcho` has to predict the
     // JOIN batch the crate will build from exactly these two values — see
     // `crate::irc::handle`. Two copies of this could drift; one cannot.
-    let channels = if bouncer_network_id.is_some() {
+    let channels = if bouncer_network_id.is_some() || server_config.bouncer_control {
         &[][..]
     } else {
         server_config.channels.as_slice()
@@ -750,16 +753,17 @@ pub async fn connect_server(
         has_client_cert: server_config.client_cert_path.is_some(),
         sasl_key_path: server_config.sasl_key_path.as_deref(),
         bouncer_network_id: bouncer_network_id.as_deref(),
+        bouncer_control: server_config.bouncer_control,
     };
 
     let negotiation = async {
         let mut neg = negotiate_caps(&sender, &mut stream, &reg_params).await?;
-        if let Some(network_id) = bouncer_network_id.as_deref() {
-            bouncer::confirm_binding(&mut stream, network_id, &mut neg.early_messages).await?;
+        if bouncer_network_id.is_some() || server_config.bouncer_control {
+            bouncer::confirm_registration(&mut stream, bouncer_network_id.as_deref(), &mut neg.early_messages).await?;
         }
         Ok::<_, color_eyre::Report>(neg)
     };
-    let result = if bouncer_network_id.is_some() {
+    let result = if bouncer_network_id.is_some() || server_config.bouncer_control {
         tokio::time::timeout(std::time::Duration::from_mins(1), negotiation)
             .await
             .unwrap_or_else(|_| Err(eyre!("Bouncer registration timed out")))
@@ -891,6 +895,7 @@ struct RegistrationParams<'a> {
     /// startup failure.
     sasl_key_path: Option<&'a str>,
     bouncer_network_id: Option<&'a str>,
+    bouncer_control: bool,
 }
 
 /// The frames that open a connection, in order: `CAP LS 302`, optional `PASS`,
@@ -1001,7 +1006,7 @@ async fn negotiate_caps(
         early_messages.push(msg);
     }
 
-    if params.bouncer_network_id.is_some()
+    if (params.bouncer_network_id.is_some() || params.bouncer_control)
         && (!cap_supported || !server_caps.has(bouncer::NETWORKS_CAP))
     {
         return Err(eyre!("Server does not support bouncer network binding"));
@@ -1036,8 +1041,11 @@ async fn negotiate_caps(
 
         // Compute capabilities to request
         let mut caps_to_request = server_caps.negotiate(DESIRED_CAPS);
-        if params.bouncer_network_id.is_some() {
+        if params.bouncer_network_id.is_some() || params.bouncer_control {
             caps_to_request.push(bouncer::NETWORKS_CAP.to_string());
+            if params.bouncer_control && server_caps.has(bouncer::NETWORKS_NOTIFY_CAP) {
+                caps_to_request.push(bouncer::NETWORKS_NOTIFY_CAP.to_string());
+            }
         }
 
         if !want_sasl {
@@ -1156,6 +1164,9 @@ async fn negotiate_caps(
             diag.push("SASL: credentials available but server does not advertise sasl".to_string());
         }
 
+        if params.bouncer_control && (!enabled_caps.contains(bouncer::NETWORKS_CAP) || !enabled_caps.contains("batch")) {
+            return Err(eyre!("Bouncer control mode requires acknowledged network and batch capabilities"));
+        }
         if let Some(network_id) = params.bouncer_network_id {
             if !enabled_caps.contains(bouncer::NETWORKS_CAP) {
                 return Err(eyre!("Bouncer network capability was not acknowledged"));
@@ -1402,6 +1413,7 @@ mod tests {
             has_client_cert: false,
             sasl_key_path: None,
             bouncer_network_id: None,
+            bouncer_control: false,
         }
     }
 
@@ -2025,6 +2037,7 @@ mod tests {
             client_cert_path: None,
             sasl_key_path: None,
             bouncer_network_id: None,
+            bouncer_control: false,
         }
     }
 

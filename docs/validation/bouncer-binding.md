@@ -1,9 +1,12 @@
-# Explicit bouncer network binding
+# Bouncer binding and network discovery
 
 The `pinned_bouncer_registration` test uses the actual Repartee connection path
 against each pinned bouncer, authenticates, binds the configured network ID,
 checks the emitted connection events and ISUPPORT, then reconnects. It is ignored
 in the normal suite because it needs disposable external processes.
+The `pinned_bouncer_discovery` test opens a control connection to the same real
+bouncer and verifies that its initial batched network list reaches the registry
+with the expected stable ID and name.
 
 Prepare the pinned checkouts from `BOUNCER_SUPPORT.md`. In Soju run `make soju`.
 In Lurker install its root npm dependencies and build the `better-sqlite3` native
@@ -25,7 +28,8 @@ The wrapper verifies each upstream commit against the audited revision. Lurker
 uses its own bouncer test harness: the listener, authentication, binding and
 registration are real; its upstream IRC connection is simulated. Soju uses a
 real daemon with a disabled upstream network. These tests prove downstream
-binding and reconnect, not complete bouncer compatibility or live upstream IRC.
+binding, reconnect and initial discovery, not complete bouncer compatibility or
+live upstream IRC.
 
 The normal TCP regression suite additionally exercises CAP rejection, failed
 SASL, rejected BIND, wrong or missing BOUNCER_NETID, premature disconnect,
@@ -34,5 +38,9 @@ autojoins and explicit bouncer binding does not autojoin configured channels.
 The application-level reconnect test also prevents rejoining stale channel
 buffers. Native and web server editors preserve the binding setting.
 
-Network discovery, control-mode lifecycle, PASS-specific explicit binding,
+Scripted tests cover control registration without BIND or autojoin, rejection of
+a login that selects a network, atomic list replacement, partial updates, both
+attribute-removal encodings, deletion, malformed batches and abandoned batches.
+
+Automatic child-connection lifecycle, PASS-specific explicit binding,
 server-owned history and the remaining feature matrix are separate pending work.
