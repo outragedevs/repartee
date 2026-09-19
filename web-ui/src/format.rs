@@ -67,6 +67,10 @@ impl StyledSpan {
     }
 }
 
+pub fn parse_irc_text(text: &str) -> Vec<StyledSpan> {
+    parse_format(&text.replace('%', "%%"))
+}
+
 /// Parse irssi/mIRC format strings into styled spans.
 ///
 /// Supported formats:
@@ -525,14 +529,14 @@ fn mirc_color(code: u8) -> Option<&'static str> {
     MIRC_COLORS.get(code as usize).copied()
 }
 
-/// Remove all mIRC/irssi formatting control codes, returning the visible text.
+/// Remove mIRC formatting control codes, returning the visible text.
 /// Used where plain text is needed (e.g. the mobile topic breadcrumb).
 ///
-/// Implemented in terms of [`parse_format`] so the set of codes it consumes can
+/// Implemented in terms of [`parse_irc_text`] so the set of codes it consumes can
 /// never drift from what the renderer recognises — the visible text is exactly
 /// the concatenation of every parsed span's text.
 pub fn strip_format(text: &str) -> String {
-    parse_format(text).into_iter().map(|s| s.text).collect()
+    parse_irc_text(text).into_iter().map(|s| s.text).collect()
 }
 
 #[cfg(test)]
@@ -568,7 +572,7 @@ mod tests {
         assert_eq!(strip_format("\x02bold\x0f end"), "bold end");
         assert_eq!(strip_format("\x034,2red\x03 plain"), "red plain");
         assert_eq!(strip_format("\x04ff8800hex"), "hex");
-        assert_eq!(strip_format("%Zaabbcc%_x%N y"), "x y");
+        assert_eq!(strip_format("%Zaabbcc%_x%N y"), "%Zaabbcc%_x%N y");
         assert_eq!(strip_format("plain text"), "plain text");
     }
 
@@ -584,14 +588,12 @@ mod tests {
         // (they are inserted as params, after that pass), so leaving `$`
         // alone is what keeps the two front ends showing the same text.
         let rendered = |t: &str| -> String {
-            parse_format(t).iter().map(|s| s.text.as_str()).collect()
+            parse_irc_text(t).iter().map(|s| s.text.as_str()).collect()
         };
         assert_eq!(rendered("echo $$"), "echo $$");
         assert_eq!(rendered("costs $5"), "costs $5");
         assert_eq!(rendered("a $ b $x $0 $*"), "a $ b $x $0 $*");
-        // `%%` is a different matter: both renderers read it as one literal
-        // `%`, and both interpret `%i` in a body, so they still agree.
-        assert_eq!(rendered("printf(\"%%i\")"), "printf(\"%i\")");
+        assert_eq!(rendered("printf(\"%%i\")"), "printf(\"%%i\")");
     }
 
     #[test]
@@ -777,4 +779,15 @@ mod tests {
         let spans = parse_format("plain text");
         assert!(spans.iter().all(|s| s.link.is_none()));
     }
+    #[test]
+    fn irc_text_preserves_percent_signs_and_irc_styles() {
+        for body in ["%", "100%", "%N", "%%", "%Zabcdef", "$0 and %_bold", "https://example.org/a%20b"] {
+            let spans = parse_irc_text(body);
+            let text: String = spans.iter().map(|span| span.text.as_str()).collect();
+            assert_eq!(text, body);
+        }
+        let spans = parse_irc_text("\x02bold 100%\x02");
+        assert!(spans.iter().any(|span| span.bold && span.text == "bold 100%"));
+    }
+
 }
