@@ -14,6 +14,7 @@ mod image;
 pub mod input;
 mod irc;
 pub mod bouncer;
+mod connection_attempt;
 mod log_browser;
 mod maintenance;
 mod mentions;
@@ -382,6 +383,7 @@ pub struct App {
     pub ui_regions: Option<UiRegions>,
     pub irc_handles: HashMap<String, IrcHandle>,
     pub(crate) bouncer_networks: HashMap<String, crate::irc::bouncer::NetworkRegistry>,
+    pub(crate) connection_attempts: HashMap<String, u64>,
     pub(crate) forwarder_handles: HashMap<String, tokio::task::JoinHandle<()>>,
     pub irc_tx: mpsc::Sender<IrcEvent>,
     pub(crate) irc_rx: mpsc::Receiver<IrcEvent>,
@@ -841,6 +843,7 @@ impl App {
             ui_regions: None,
             irc_handles: HashMap::new(),
             bouncer_networks: HashMap::new(),
+            connection_attempts: HashMap::new(),
             forwarder_handles: HashMap::new(),
             irc_tx,
             irc_rx,
@@ -1709,10 +1712,6 @@ impl App {
             handle.abort();
         }
 
-        for (_, handle) in self.forwarder_handles.drain() {
-            handle.abort();
-        }
-
         self.notify_shim_quit();
         self.stop_term_reader();
 
@@ -1731,6 +1730,10 @@ impl App {
             if let Some(oh) = handle.outgoing_handle.take() {
                 oh.abort();
             }
+        }
+
+        for (_, handle) in self.forwarder_handles.drain() {
+            handle.abort();
         }
 
         if let Some(storage) = self.storage.take() {

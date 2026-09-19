@@ -629,6 +629,18 @@ pub struct IrcHandle {
     /// Handle to the outgoing message task spawned by the irc crate.
     /// Aborted on disconnect to prevent CLOSE-WAIT socket leaks.
     pub outgoing_handle: Option<tokio::task::JoinHandle<()>>,
+    pub(crate) reader_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for IrcHandle {
+    fn drop(&mut self) {
+        if let Some(task) = self.reader_handle.take() {
+            task.abort();
+        }
+        if let Some(task) = self.outgoing_handle.take() {
+            task.abort();
+        }
+    }
 }
 
 impl IrcHandle {
@@ -649,6 +661,7 @@ impl IrcHandle {
             sender,
             local_ip,
             outgoing_handle,
+            reader_handle: None,
         }
     }
 

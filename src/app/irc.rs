@@ -265,32 +265,8 @@ impl App {
         label: &str,
     ) {
         if let Some(mut cfg) = server_config {
-            let general = self.config.general.clone();
-            let tx = self.irc_tx.clone();
-            let id = conn_id.to_string();
-            // Same bind-IP fallback as the interactive /connect path —
-            // per-server `bind_ip` wins, then CLI `-h`, then
-            // `general.default_bind_ip`. Pre-resolved here so the
-            // spawned task can stay agnostic.
-            cfg.bind_ip =
-                crate::irc::resolve_bind_ip(&cfg, self.cli_bind_override.as_deref(), &general);
-            tokio::spawn(async move {
-                match crate::irc::connect_server(&id, &cfg, &general).await {
-                    Ok((handle, mut rx)) => {
-                        let _ = tx.send(IrcEvent::HandleReady(Box::new(handle))).await;
-                        while let Some(event) = rx.recv().await {
-                            if tx.send(event).await.is_err() {
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx
-                            .send(IrcEvent::Disconnected(id, Some(e.to_string())))
-                            .await;
-                    }
-                }
-            });
+            cfg.bind_ip = crate::irc::resolve_bind_ip(&cfg, self.cli_bind_override.as_deref(), &self.config.general);
+            self.start_connection_attempt(conn_id, cfg);
         } else {
             if let Some(conn) = self.state.connections.get_mut(conn_id) {
                 conn.should_reconnect = false;
@@ -345,6 +321,11 @@ impl App {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn handle_irc_event(&mut self, event: IrcEvent) {
         match event {
+            IrcEvent::Attempt(id, generation, event) => {
+                if self.connection_attempts.get(&id) == Some(&generation) {
+                    self.handle_irc_event(*event);
+                }
+            }
             IrcEvent::HandleReady(handle) => {
                 // Store local IP on Connection state (for DCC own-IP fallback)
                 if let Some(conn) = self.state.connections.get_mut(&handle.conn_id) {

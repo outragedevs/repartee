@@ -235,9 +235,7 @@ async fn registration(reply: Reply, bound: bool) {
         }
         assert!(connected);
         assert_eq!(confirmed, !control);
-        if let Some(task) = handle.outgoing_handle {
-            task.abort();
-        }
+        drop(handle);
     } else {
         assert!(result.is_err(), "{reply:?} unexpectedly connected");
     }
@@ -347,9 +345,7 @@ async fn pinned_bouncer_registration() {
         })
         .await
         .unwrap();
-        if let Some(task) = handle.outgoing_handle {
-            task.abort();
-        }
+        drop(handle);
         drop(events);
     }
 }
@@ -412,9 +408,7 @@ async fn pinned_bouncer_discovery() {
     })
     .await
     .unwrap();
-    if let Some(task) = handle.outgoing_handle {
-        task.abort();
-    }
+    drop(handle);
 }
 
 #[tokio::test]
@@ -492,4 +486,42 @@ async fn ambiguous_bouncer_authentication_is_rejected_before_connecting() {
         let result = connect_server("fixture", &config, &GeneralConfig::default()).await;
         assert!(result.err().unwrap().to_string().contains("explicit SASL mechanism"));
     }
+}
+
+#[tokio::test]
+async fn dropping_registered_connection_closes_an_idle_socket() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let peer = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let (read, mut write) = socket.into_split();
+        let mut lines = BufReader::new(read).lines();
+        assert_eq!(next_command(&mut lines, &mut write).await.as_deref(), Some("CAP LS 302"));
+        assert!(next_command(&mut lines, &mut write).await.unwrap().starts_with("NICK "));
+        assert!(next_command(&mut lines, &mut write).await.unwrap().starts_with("USER "));
+        write.write_all(b":fixture CAP * LS :\r\n").await.unwrap();
+        assert_eq!(next_command(&mut lines, &mut write).await.as_deref(), Some("CAP END"));
+        write.write_all(b":fixture 001 tester :Welcome\r\n").await.unwrap();
+        assert!(next_command(&mut lines, &mut write).await.is_none());
+    });
+    let mut config: ServerConfig = toml::from_str(
+        "label = 'fixture'\naddress = '127.0.0.1'\nport = 6667\ntls = false\nchannels = []",
+    ).unwrap();
+    config.port = port;
+    config.nick = Some("tester".into());
+    let general = GeneralConfig { flood_protection: false, ..GeneralConfig::default() };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (handle, mut events) = connect_server("fixture", &config, &general).await.unwrap();
+        while let Some(event) = events.recv().await {
+            if matches!(event, IrcEvent::Connected(..)) { break; }
+        }
+        let reader = handle.reader_handle.as_ref().unwrap().abort_handle();
+        let writer = handle.outgoing_handle.as_ref().unwrap().abort_handle();
+        drop(events);
+        drop(handle);
+        tokio::task::yield_now().await;
+        assert!(reader.is_finished());
+        assert!(writer.is_finished());
+        peer.await.unwrap();
+    }).await.expect("cancelled idle reader or writer retained its socket");
 }
