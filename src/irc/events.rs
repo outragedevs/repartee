@@ -39,6 +39,33 @@ fn remove_case_insensitive(set: &mut HashSet<String>, value: &str) -> bool {
     set.remove(&existing)
 }
 
+fn clear_rejected_join_focus(state: &mut AppState, conn_id: &str, command: &Command) {
+    let Some(requested) = state.background_join_connections.get_mut(conn_id) else { return };
+    let (numeric, args) = match command {
+        Command::Response(response, args) => (*response as u16, args),
+        Command::Raw(command, args) if command.eq_ignore_ascii_case("FAIL")
+            && args.first().is_some_and(|value| value.eq_ignore_ascii_case("JOIN")) => {
+            if let Some(channel) = args.get(2).filter(|_| args.len() > 3).filter(|channel| channel.as_str() != "*") {
+                requested.remove(&channel.to_ascii_lowercase());
+            } else {
+                requested.clear();
+            }
+            return;
+        }
+        Command::Raw(command, args) => (command.parse::<u16>().unwrap_or(0), args),
+        _ => return,
+    };
+    if matches!(numeric, 403 | 405 | 437 | 471 | 473 | 474 | 475 | 476 | 477 | 479 | 489 | 520)
+        && let Some(channel) = args.get(1)
+    {
+        requested.remove(&channel.to_ascii_lowercase());
+    } else if matches!(numeric, 263 | 461)
+        && args.get(1).is_some_and(|command| command.eq_ignore_ascii_case("JOIN"))
+    {
+        requested.clear();
+    }
+}
+
 /// Route an incoming IRC protocol message to the appropriate handler,
 /// mutating `AppState` as needed.
 #[expect(
@@ -46,6 +73,7 @@ fn remove_case_insensitive(set: &mut HashSet<String>, value: &str) -> bool {
     reason = "IRC command dispatcher — one arm per message type"
 )]
 pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage) {
+    clear_rejected_join_focus(state, conn_id, &msg.command);
     let our_nick = state
         .connections
         .get(conn_id)
@@ -2076,6 +2104,8 @@ fn handle_join(
     }
 
     if nick == our_nick {
+        let activate = state.background_join_connections.get_mut(conn_id)
+            .is_none_or(|requested| requested.remove(&channel.to_ascii_lowercase()));
         // Defense-in-depth nicklist reset (mirrors weechat irc-protocol.c:1755-1802):
         // a buffer that already has users means this is a duplicate self-JOIN
         // (ZNC bouncer replays JOIN without an intervening disconnect, /sajoin
@@ -2103,7 +2133,7 @@ fn handle_join(
                 buf.list_modes.clear();
             }
         } else {
-            state.add_buffer(Buffer {
+            state.add_buffer_with_focus(Buffer {
                 id: buffer_id.clone(),
                 connection_id: conn_id.to_string(),
                 buffer_type: BufferType::Channel,
@@ -2126,9 +2156,9 @@ fn handle_join(
                 history_exhausted: false,
                 log_initial_loaded: false,
                 pin_backlog: false,
-            });
+            }, activate);
         }
-        state.set_active_buffer(&buffer_id);
+        if activate { state.set_active_buffer(&buffer_id); }
     } else {
         // Someone else joined — add to nick list
         state.add_nick(
@@ -4479,6 +4509,7 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
 /// Only applies to ad-hoc connections where the label still matches the address.
 fn update_label_from_network(state: &mut AppState, conn_id: &str, network_name: &str) {
     let current_label = match state.connections.get(conn_id) {
+        Some(conn) if conn.network_scope.is_some() => return,
         Some(conn) => conn.label.clone(),
         None => return,
     };

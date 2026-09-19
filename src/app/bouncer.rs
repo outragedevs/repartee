@@ -11,7 +11,8 @@ impl super::App {
             return false;
         };
         let event = registry.handle(message);
-        let text = match event {
+        let changed = matches!(event, RegistryEvent::Snapshot | RegistryEvent::Changed(_));
+        let text = match &event {
             RegistryEvent::Unrelated => return false,
             RegistryEvent::Pending => return true,
             RegistryEvent::Snapshot => format!(
@@ -20,7 +21,7 @@ impl super::App {
             ),
             RegistryEvent::Changed(id) => registry
                 .networks
-                .get(&id)
+                .get(id)
                 .map_or_else(|| format!("Bouncer network {id} removed"), network_summary),
             RegistryEvent::Invalid => {
                 "Invalid bouncer network update ignored; the previous list was retained".to_string()
@@ -30,11 +31,14 @@ impl super::App {
             let buffer = make_buffer_id(conn_id, &connection.label);
             self.add_event_to_buffer(&buffer, text);
         }
+        if changed {
+            self.reconcile_bouncer_children(conn_id, &event);
+        }
         true
     }
 }
 
-fn network_summary(network: &Network) -> String {
+pub(super) fn network_summary(network: &Network) -> String {
     let state = network
         .attributes
         .get("state")
@@ -52,6 +56,15 @@ pub fn command(app: &mut super::App, args: &[String]) {
         add_local_event(app, "No active connection");
         return;
     };
+    let id = app.bouncer_children.get(&id).map_or_else(|| id.clone(), |child| child.parent.clone());
+    if args.first().is_some_and(|arg| arg == "connect") && args.len() == 2 {
+        if app.reconnect_bouncer_child(&id, &args[1]) {
+            add_local_event(app, "Connecting to the bouncer network");
+        } else {
+            add_local_event(app, "Network unavailable or already connecting/connected");
+        }
+        return;
+    }
     let Some(registry) = app.bouncer_networks.get_mut(&id) else {
         add_local_event(
             app,
@@ -88,7 +101,7 @@ pub fn command(app: &mut super::App, args: &[String]) {
                 add_local_event(app, "Could not request the bouncer network list");
             }
         }
-        _ => add_local_event(app, "Usage: /bouncer [list|refresh]"),
+        _ => add_local_event(app, "Usage: /bouncer [list|refresh|connect ID]"),
     }
 }
 
@@ -98,8 +111,8 @@ mod tests {
 
     use crate::irc::{IrcEvent, IrcHandle, IrcSender, bouncer::NETWORKS_NOTIFY_CAP};
 
-    #[test]
-    fn control_connect_requests_only_without_notify_and_reconnect_clears_cache() {
+    #[tokio::test]
+    async fn control_connect_requests_only_without_notify_and_reconnect_clears_cache() {
         for notify in [false, true] {
             let mut app = crate::app::input::submit_typing_tests::test_app();
             let mut connection = crate::state::events::tests::make_test_connection();

@@ -513,13 +513,15 @@ impl AppState {
                     }
                 });
             }
-            WebEvent::BufferCreated { buffer } => {
+            WebEvent::BufferCreated { buffer, activate } => {
                 let new_id = buffer.id.clone();
                 self.buffers.update(|bufs| bufs.push(buffer));
                 self.sort_buffers();
                 // Auto-switch to newly created buffer (matches terminal behavior).
-                self.shell_screen.set(None);
-                self.active_buffer.set(Some(new_id));
+                if activate {
+                    self.shell_screen.set(None);
+                    self.active_buffer.set(Some(new_id));
+                }
             }
             WebEvent::BufferE2eChanged { buffer_id, enabled } => {
                 self.buffers.update(|bufs| {
@@ -566,6 +568,28 @@ impl AppState {
                     t.remove(&buffer_id);
                 });
             }
+            WebEvent::ConnectionRemoved { conn_id } => {
+                self.connections.update(|connections| connections.retain(|connection| connection.id != conn_id));
+            }
+            WebEvent::BufferRenamed { old_id, new_id, name } => {
+                self.buffers.update(|buffers| {
+                    if let Some(buffer) = buffers.iter_mut().find(|buffer| buffer.id == old_id) {
+                        buffer.id.clone_from(&new_id);
+                        buffer.name = name;
+                    }
+                });
+                self.messages.update(|values| { if let Some(value) = values.remove(&old_id) { values.insert(new_id.clone(), value); } });
+                self.nick_lists.update(|values| { if let Some(value) = values.remove(&old_id) { values.insert(new_id.clone(), value); } });
+                self.backlog_has_more.update(|values| { if let Some(value) = values.remove(&old_id) { values.insert(new_id.clone(), value); } });
+                self.typing.update(|values| { if let Some(value) = values.remove(&old_id) { values.insert(new_id.clone(), value); } });
+                for set in [self.nick_lists_loaded, self.backlog_loaded, self.backlog_fetching] {
+                    set.update(|values| { if values.remove(&old_id) { values.insert(new_id.clone()); } });
+                }
+                if self.active_buffer.get_untracked().as_deref() == Some(&old_id) {
+                    self.active_buffer.set(Some(new_id));
+                }
+                self.sort_buffers();
+            }
             WebEvent::ConnectionStatus {
                 conn_id,
                 connected,
@@ -576,6 +600,7 @@ impl AppState {
                     if let Some(c) = conns.iter_mut().find(|c| c.id == conn_id) {
                         c.connected = connected;
                         c.nick = nick;
+                        c.label = label;
                     } else {
                         conns.push(ConnectionMeta {
                             id: conn_id,
@@ -587,6 +612,7 @@ impl AppState {
                         });
                     }
                 });
+                self.sort_buffers();
             }
             WebEvent::Messages {
                 buffer_id,
@@ -1239,6 +1265,37 @@ mod tests {
     /// off-wasm — build the storage-free half instead.
     fn headless_state() -> AppState {
         AppState::with_persisted("nightfall".to_string(), None, None, HashSet::new())
+    }
+
+    #[test]
+    fn background_buffers_do_not_steal_the_active_conversation() {
+        let state = headless_state();
+        state.active_buffer.set(Some("existing/#chat".into()));
+        let event: WebEvent = serde_json::from_str(r#"{"type":"BufferCreated","activate":false,"buffer":{"id":"child/Network","connection_id":"child","name":"Network","buffer_type":"server","topic":null,"unread_count":0,"activity":0,"nick_count":0,"modes":null}}"#).unwrap();
+        state.handle_event(event);
+        assert_eq!(state.active_buffer.get_untracked().as_deref(), Some("existing/#chat"));
+        assert_eq!(state.buffers.get_untracked().len(), 1);
+    }
+
+    #[test]
+    fn network_rename_and_removal_preserve_buffer_cache_and_update_connection_label() {
+        let state = headless_state();
+        let event: WebEvent = serde_json::from_str(r#"{"type":"SyncInit","buffers":[{"id":"child/Old","connection_id":"child","name":"Old","buffer_type":"server","topic":null,"unread_count":0,"activity":0,"nick_count":0,"modes":null}],"connections":[{"id":"child","label":"Old","nick":"tester","connected":true,"user_modes":"","lag":null}],"mention_count":0,"active_buffer_id":"child/Old","timestamp_format":"%H:%M"}"#).unwrap();
+        state.handle_event(event);
+        state.messages.update(|messages| { messages.insert("child/Old".into(), Vec::new()); });
+        state.backlog_loaded.update(|loaded| { loaded.insert("child/Old".into()); });
+        state.handle_event(WebEvent::BufferRenamed { old_id: "child/Old".into(), new_id: "child/New".into(), name: "New".into() });
+        state.handle_event(WebEvent::ConnectionStatus { conn_id: "child".into(), label: "New".into(), connected: true, nick: "tester".into() });
+        assert_eq!(state.active_buffer.get_untracked().as_deref(), Some("child/New"));
+        assert!(state.messages.get_untracked().contains_key("child/New"));
+        assert!(!state.messages.get_untracked().contains_key("child/Old"));
+        assert!(state.backlog_loaded.get_untracked().contains("child/New"));
+        assert_eq!(state.buffers.get_untracked()[0].name, "New");
+        assert_eq!(state.connections.get_untracked()[0].label, "New");
+        state.handle_event(WebEvent::BufferClosed { buffer_id: "child/New".into() });
+        state.handle_event(WebEvent::ConnectionRemoved { conn_id: "child".into() });
+        assert!(state.buffers.get_untracked().is_empty());
+        assert!(state.connections.get_untracked().is_empty());
     }
 
     #[test]

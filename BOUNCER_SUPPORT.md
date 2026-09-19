@@ -178,3 +178,14 @@ large to review, retaining the acceptance rows and dependencies.
   stale connection events, pending-task cancellation and an idle registered
   socket closing without further server traffic. Automatic discovery-driven
   child creation and teardown still need to be wired to this infrastructure.
+
+- Control discovery now creates a bound child connection per account/network ID.
+  Committed snapshots and partial updates reconcile creation, rename and removal;
+  parent disconnect suspends children and a fresh list resumes them. Manually
+  disconnected children require `/bouncer connect ID`. Data scopes remain based on
+  the parent account and netid. Tests cover two accounts with identical IDs,
+  rename without reconnect, deletion with stale events, parent reconnect and
+  manual disconnect; web tests cover renamed buffer caches and connection
+  removal. The pinned Soju and Lurker fixtures both establish an automatically
+  generated child through the real App event loop. Server-owned history and the
+  remaining extension matrix are still pending.
