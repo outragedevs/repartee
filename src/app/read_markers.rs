@@ -152,6 +152,22 @@ impl App {
         let Some(buffer_id) = self.state.active_buffer_id.clone() else {
             return;
         };
+        if self.state.buffer_uses_server_history(&buffer_id)
+            && !self.state.uses_read_markers(&buffer_id)
+        {
+            if self.state.buffers.get(&buffer_id).is_some_and(|buffer| {
+                buffer.unread_count != 0
+                    || buffer.activity != crate::state::buffer::ActivityLevel::None
+            }) {
+                self.state.clear_activity(&buffer_id);
+                self.broadcast_web(crate::web::protocol::WebEvent::ActivityChanged {
+                    buffer_id,
+                    activity: 0,
+                    unread_count: 0,
+                });
+            }
+            return;
+        }
         let message_id = self
             .state
             .buffers
@@ -340,6 +356,62 @@ mod tests {
             crate::state::buffer::ActivityLevel::Activity,
         );
         id
+    }
+
+    #[tokio::test]
+    async fn repeated_visible_reads_do_not_broadcast_unchanged_activity() {
+        let mut app = sending_app();
+        let seen = server_message(&mut app, 1123);
+        app.mark_visible_message_read("account/peer", seen);
+        let mut receiver = app.web_broadcaster.subscribe();
+        app.mark_visible_message_read("account/peer", seen);
+        assert!(receiver.try_recv().is_err());
+        let local = crate::state::events::tests::make_test_message(&mut app.state, "placeholder");
+        let seen = local.id;
+        app.state.add_transient_message_with_activity(
+            "account/peer",
+            local,
+            crate::state::buffer::ActivityLevel::Activity,
+        );
+        app.mark_visible_message_read("account/peer", seen);
+        while receiver.try_recv().is_ok() {}
+        app.mark_visible_message_read("account/peer", seen);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn capability_loss_clears_visible_terminal_activity_only_after_focus() {
+        let mut app = sending_app();
+        app.terminal =
+            Some(crate::ui::setup_socket_terminal(Box::new(std::io::sink()), 120, 40).unwrap());
+        app.state.set_active_buffer("account/peer");
+        for time in 1000..1060 {
+            server_message(&mut app, time);
+        }
+        crate::irc::events::handle_cap_del(
+            &mut app.state,
+            "account",
+            Some("draft/read-marker"),
+            None,
+        );
+        app.terminal_focused = false;
+        assert!(app.render_terminal_frame());
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 60);
+        app.terminal_focused = true;
+        app.scroll_offset = 1;
+        assert!(app.render_terminal_frame());
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 60);
+        app.scroll_offset = 0;
+        assert!(app.render_terminal_frame());
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 0);
+        assert_eq!(
+            app.state.buffers["account/peer"].activity,
+            crate::state::buffer::ActivityLevel::None
+        );
+        assert!(app.irc_handles["account"].sender().captured().is_empty());
+        let mut receiver = app.web_broadcaster.subscribe();
+        assert!(app.render_terminal_frame());
+        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]
