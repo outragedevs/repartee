@@ -201,3 +201,11 @@ large to review, retaining the acceptance rows and dependencies.
   pages without queuing local log rows. Synthetic tests also cover web completion,
   timeouts, equal timestamps and existing local rows remaining intact but unused.
   TARGETS discovery, bounded hydration and server search remain pending.
+
+- History discovery now requests TARGETS after MOTD/ISUPPORT and creates query and
+  channel buffers in the background. Initial and reconnect hydration share a
+  queue, with per-connection and aggregate request limits and bounded retries.
+  Both pinned fixtures discover an unknown query and channel and load their
+  stored history; the Soju upstream is disabled. This does not yet establish
+  complete enumeration across large timestamp ties or targets filtered after
+  LIMIT; these remain acceptance gaps, alongside the remaining extension matrix.
