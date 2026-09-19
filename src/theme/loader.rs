@@ -1,3 +1,5 @@
+const LEGACY_SPRING_KICK: &str = "%Zef4444⚡%N %Ze2e8f0%_$0%_%N %Zef4444kicked%N from {channel $1} %Z64748bby%N %Z94a3b8$2%N %Z94a3b8⟨%N$3%Z94a3b8⟩%N";
+
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -66,7 +68,7 @@ pub fn load_theme(path: &Path) -> Result<ThemeFile> {
         default.abstracts
     };
 
-    let formats: ThemeFormats = if let Some(fmts) = parsed.get("formats") {
+    let mut formats: ThemeFormats = if let Some(fmts) = parsed.get("formats") {
         fmts.clone().try_into().unwrap_or_else(|e| {
             tracing::warn!("Failed to parse theme [formats]: {e}, using defaults");
             ThemeFormats::default()
@@ -74,6 +76,13 @@ pub fn load_theme(path: &Path) -> Result<ThemeFile> {
     } else {
         default.formats
     };
+
+    if let Some(kick) = formats.events.get_mut("kick")
+        && kick == LEGACY_SPRING_KICK
+    {
+        *kick = kick.replace("{channel $1}", "{channel $2}")
+            .replace("%Z94a3b8$2%N", "%Z94a3b8$1%N");
+    }
 
     Ok(ThemeFile {
         meta,
@@ -113,4 +122,28 @@ mod tests {
             assert!(theme.formats.messages.contains_key("pubmsg"));
         }
     }
+    #[test]
+    fn legacy_spring_kick_is_corrected_without_rewriting_customizations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spring.theme");
+        let bundled = include_str!("../../themes/spring.theme");
+        let parsed: toml::Value = toml::from_str(bundled).unwrap();
+        let current = parsed["formats"]["events"]["kick"].as_str().unwrap();
+        let legacy = bundled.replace(current, LEGACY_SPRING_KICK)
+            .replace("#e2e8f0", "#abcdef");
+        std::fs::write(&path, &legacy).unwrap();
+        let theme = load_theme(&path).unwrap();
+        let resolved = crate::theme::resolve_abstractions(&theme.formats.events["kick"], &theme.abstracts, 0);
+        let text: String = crate::theme::parse_format_string(&resolved, &["gruG", "gibi`", "#sex", "no reason"])
+            .into_iter().map(|span| span.text).collect();
+        assert!(text.contains("gruG kicked from #sex by gibi` ⟨no reason⟩"), "{text}");
+        assert_eq!(theme.formats.events["kick"], current);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
+
+        let customized = legacy.replace(LEGACY_SPRING_KICK, "$1 removed $0 from $2: $3");
+        std::fs::write(&path, &customized).unwrap();
+        assert_eq!(load_theme(&path).unwrap().formats.events["kick"], "$1 removed $0 from $2: $3");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), customized);
+    }
+
 }
