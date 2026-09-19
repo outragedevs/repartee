@@ -1,4 +1,4 @@
-use std::io::{BufRead, Write};
+use std::io::{Read, Write};
 use std::path::Path;
 
 use aes_gcm::aead::{Aead, KeyInit};
@@ -6,6 +6,7 @@ use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::{Engine, engine::general_purpose::STANDARD};
 
 use crate::constants::APP_NAME;
+use zeroize::Zeroizing;
 
 const SECRET_BLOB_VERSION: u8 = 1;
 
@@ -20,19 +21,17 @@ pub struct EncryptedData {
 }
 
 /// Generate a random 256-bit key and return it as a 64-character hex string.
-pub fn generate_key_hex() -> String {
-    let mut key_bytes = [0u8; 32];
-    rand::fill(&mut key_bytes);
-    hex::encode(key_bytes)
+pub fn generate_key_hex() -> Zeroizing<String> {
+    let mut key_bytes = Zeroizing::new([0u8; 32]);
+    rand::fill(key_bytes.as_mut_slice());
+    Zeroizing::new(hex::encode(&key_bytes))
 }
 
 /// Decode a 64-character hex string into an AES-256-GCM key.
 pub fn import_key(hex_key: &str) -> Result<Key<Aes256Gcm>, String> {
-    let bytes = hex::decode(hex_key).map_err(|e| format!("invalid hex key: {e}"))?;
-    if bytes.len() != 32 {
-        return Err(format!("key must be 32 bytes, got {}", bytes.len()));
-    }
-    Ok(*Key::<Aes256Gcm>::from_slice(&bytes))
+    let mut bytes = Zeroizing::new([0u8; 32]);
+    hex::decode_to_slice(hex_key, bytes.as_mut_slice()).map_err(|e| format!("invalid hex key: {e}"))?;
+    Ok(*Key::<Aes256Gcm>::from_slice(bytes.as_slice()))
 }
 
 /// Encrypt `plaintext` with AES-256-GCM using a random 12-byte IV.
@@ -71,12 +70,12 @@ pub fn decrypt(ciphertext_b64: &str, iv: &[u8], key: &Key<Aes256Gcm>) -> Result<
 }
 
 /// Load or create the encryption key from the default .env path.
-pub fn load_or_create_key() -> Result<String, String> {
+pub fn load_or_create_key() -> Result<Zeroizing<String>, String> {
     let path = crate::constants::env_path();
     load_or_create_named_key_at(&path, "LOG_KEY")
 }
 
-pub fn load_or_create_keyring_key() -> Result<String, String> {
+pub fn load_or_create_keyring_key() -> Result<Zeroizing<String>, String> {
     let path = crate::constants::env_path();
     load_or_create_named_key_at(&path, "KEYRING_KEY")
 }
@@ -85,11 +84,11 @@ pub fn load_or_create_keyring_key() -> Result<String, String> {
 /// (instead of silently generating a fresh key) when `LOG_KEY` is
 /// missing or empty. Used by the log browser, where creating a new key
 /// would produce a wrong cipher and an unreadable history.
-pub fn load_existing_key() -> Result<String, String> {
+pub fn load_existing_key() -> Result<Zeroizing<String>, String> {
     load_existing_named_key_at(&crate::constants::env_path(), "LOG_KEY")
 }
 
-fn load_existing_named_key_at(path: &Path, suffix: &str) -> Result<String, String> {
+fn load_existing_named_key_at(path: &Path, suffix: &str) -> Result<Zeroizing<String>, String> {
     let key_name = env_key_name_with_suffix(suffix);
     if !path.exists() {
         return Err(format!(
@@ -99,17 +98,8 @@ fn load_existing_named_key_at(path: &Path, suffix: &str) -> Result<String, Strin
             path.display()
         ));
     }
-    let file =
-        std::fs::File::open(path).map_err(|e| format!("failed to open {}: {e}", path.display()))?;
-    let reader = std::io::BufReader::new(file);
-    for line in reader.lines() {
-        let line = line.map_err(|e| format!("failed to read line: {e}"))?;
-        if let Some(value) = line.trim().strip_prefix(&format!("{key_name}=")) {
-            let value = value.trim();
-            if !value.is_empty() {
-                return Ok(value.to_string());
-            }
-        }
+    if let Some(key) = read_named_key(path, &key_name)? {
+        return Ok(key);
     }
     Err(format!(
         "{} not found in {} — cannot decrypt log without the key",
@@ -123,11 +113,11 @@ fn load_existing_named_key_at(path: &Path, suffix: &str) -> Result<String, Strin
 /// The .env file is expected to contain lines like `KEY=value`.
 /// If the key line is missing, a new key is generated and appended.
 /// On Unix, the file is chmod 0o600.
-pub fn load_or_create_key_at(path: &Path) -> Result<String, String> {
+pub fn load_or_create_key_at(path: &Path) -> Result<Zeroizing<String>, String> {
     load_or_create_named_key_at(path, "LOG_KEY")
 }
 
-fn load_or_create_named_key_at(path: &Path, suffix: &str) -> Result<String, String> {
+fn load_or_create_named_key_at(path: &Path, suffix: &str) -> Result<Zeroizing<String>, String> {
     let key_name = env_key_name_with_suffix(suffix);
 
     // Try to read existing key from file
@@ -135,18 +125,8 @@ fn load_or_create_named_key_at(path: &Path, suffix: &str) -> Result<String, Stri
         #[cfg(unix)]
         crate::fs_secure::restrict_path(path, 0o600)
             .map_err(|e| format!("failed to set permissions on {}: {e}", path.display()))?;
-        let file = std::fs::File::open(path)
-            .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
-        let reader = std::io::BufReader::new(file);
-        for line in reader.lines() {
-            let line = line.map_err(|e| format!("failed to read line: {e}"))?;
-            let trimmed = line.trim();
-            if let Some(value) = trimmed.strip_prefix(&format!("{key_name}=")) {
-                let value = value.trim();
-                if !value.is_empty() {
-                    return Ok(value.to_string());
-                }
-            }
+        if let Some(key) = read_named_key(path, &key_name)? {
+            return Ok(key);
         }
     }
 
@@ -165,13 +145,26 @@ fn load_or_create_named_key_at(path: &Path, suffix: &str) -> Result<String, Stri
         .open(path)
         .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
 
-    writeln!(file, "{key_name}={new_key}").map_err(|e| format!("failed to write key: {e}"))?;
+    writeln!(file, "{key_name}={}", new_key.as_str()).map_err(|e| format!("failed to write key: {e}"))?;
 
     // Set file permissions to 0600 on Unix
     crate::fs_secure::restrict_path(path, 0o600)
         .map_err(|e| format!("failed to set permissions: {e}"))?;
 
     Ok(new_key)
+}
+
+fn read_named_key(path: &Path, key_name: &str) -> Result<Option<Zeroizing<String>>, String> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
+    let mut contents = Zeroizing::new(String::new());
+    file.read_to_string(&mut contents)
+        .map_err(|e| format!("failed to read key file: {e}"))?;
+    let prefix = format!("{key_name}=");
+    Ok(contents.lines().find_map(|line| {
+        let value = line.trim().strip_prefix(&prefix)?.trim();
+        (!value.is_empty()).then(|| Zeroizing::new(value.to_string()))
+    }))
 }
 
 pub fn encrypt_bytes(plaintext: &[u8], key: &Key<Aes256Gcm>) -> Result<Vec<u8>, String> {
@@ -293,7 +286,7 @@ mod tests {
         let path = dir.join(".env");
         std::fs::write(&path, "REPARTEE_LOG_KEY=cafe1234\n").unwrap();
         let key = load_existing_named_key_at(&path, "LOG_KEY").unwrap();
-        assert_eq!(key, "cafe1234");
+        assert_eq!(key.as_str(), "cafe1234");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -313,7 +306,7 @@ mod tests {
 
         // File contains the key
         let contents = std::fs::read_to_string(&env_file).unwrap();
-        assert!(contents.contains(&key1));
+        assert!(contents.contains(key1.as_str()));
 
         // Cleanup
         std::fs::remove_dir_all(&dir).unwrap();

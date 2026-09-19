@@ -7958,7 +7958,7 @@ mod tests {
                 handle: alice_handle.to_string(),
                 channel: own_ctx.clone(),
                 fingerprint: [0x11; 16],
-                sk: [0x22; 32],
+                sk: [0x22; 32].into(),
                 status: TrustStatus::Trusted,
                 created_at: 0,
             })
@@ -8033,7 +8033,7 @@ mod tests {
                 handle: alice_handle.to_string(),
                 channel: new_own_ctx.clone(),
                 fingerprint: [0x11; 16],
-                sk: [0x22; 32],
+                sk: [0x22; 32].into(),
                 status: TrustStatus::Trusted,
                 created_at: 0,
             })
@@ -8097,7 +8097,7 @@ mod tests {
                 handle: alice_handle.to_string(),
                 channel: own_ctx.clone(),
                 fingerprint: [0x11; 16],
-                sk: [0x22; 32],
+                sk: [0x22; 32].into(),
                 status: TrustStatus::Trusted,
                 created_at: 0,
             })

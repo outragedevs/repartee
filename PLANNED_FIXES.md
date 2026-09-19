@@ -69,6 +69,8 @@ The embedded shell currently uses whitespace splitting. Commands containing quot
 
 ### Reduce the lifetime of E2E secrets in memory
 
+Status: completed on `fix/e2e-secret-lifetimes`; Clippy, 2275 native tests, 138 web tests, and Sol medium review passed. See [ownership scope](docs/validation/2026-09-19-e2e-secrets.md).
+
 Secret zeroization is only partial. Review private keys and exported secret material stored in ordinary arrays, strings, and vectors, and use zeroizing containers wherever ownership and external APIs permit it.
 
 This is security hardening rather than a known functional failure.

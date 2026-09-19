@@ -34,8 +34,8 @@ impl Identity {
     }
 
     #[must_use]
-    pub fn secret_bytes(&self) -> [u8; 32] {
-        self.signing.to_bytes()
+    pub fn secret_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.signing.to_bytes())
     }
 
     #[must_use]
