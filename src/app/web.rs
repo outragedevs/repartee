@@ -584,7 +584,7 @@ impl App {
                 }
             }
             WebCommand::MarkRead { buffer_id, message_id, .. } => {
-                self.web_mark_read(&buffer_id, message_id);
+                self.web_mark_read(&buffer_id, message_id, session_id);
             }
             WebCommand::FetchMessages {
                 buffer_id,
@@ -820,10 +820,15 @@ impl App {
     }
 
     /// Mark a buffer as read from a web client.
-    fn web_mark_read(&mut self, buffer_id: &str, message_id: Option<u64>) {
+    fn web_mark_read(&mut self, buffer_id: &str, message_id: Option<u64>, session_id: &str) {
         if self.state.uses_read_markers(buffer_id) {
             if let Some(message_id) = message_id {
                 self.mark_visible_message_read(buffer_id, message_id);
+            } else {
+                self.broadcast_web(crate::web::protocol::WebEvent::Error {
+                    message: "This browser tab uses an older client. Reload the page to synchronize read status. Your unread messages have been preserved.".into(),
+                    session_id: Some(session_id.to_string()),
+                });
             }
             return;
         }
@@ -1034,6 +1039,23 @@ mod activity_read_tests {
     use crate::state::buffer::{ActivityLevel, Buffer, BufferType};
 
     #[tokio::test]
+    async fn legacy_web_read_requires_reload_and_preserves_unread() {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let config = toml::from_str("label='Bouncer'\naddress='bnc.example.org'\nport=6697\ntls=true\nchannels=[]\nbouncer_network_id='42'").unwrap();
+        app.setup_connection("account", &config);
+        app.state.connections.get_mut("account").unwrap().enabled_caps.insert("draft/read-marker".into());
+        app.state.add_buffer_with_focus(Buffer::empty("account", BufferType::Query, "Peer"), false);
+        let message = crate::state::events::tests::make_test_message(&mut app.state, "unread");
+        app.state.add_transient_message_with_activity("account/peer", message, ActivityLevel::Activity);
+        let mut receiver = app.web_broadcaster.subscribe();
+        let command = serde_json::from_str(r#"{"type":"MarkRead","buffer_id":"account/peer","up_to":9999999999999}"#).unwrap();
+        app.handle_web_command(command, "old-browser");
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 1);
+        assert!(app.read_markers.is_empty());
+        assert!(matches!(receiver.try_recv().unwrap(), crate::web::protocol::WebEvent::Error { message, session_id } if session_id.as_deref() == Some("old-browser") && message.contains("Reload")));
+    }
+
+    #[tokio::test]
     async fn bouncer_without_marker_capability_keeps_local_web_read_clearing() {
         let mut app = crate::app::input::submit_typing_tests::test_app();
         let config = toml::from_str("label='Bouncer'\naddress='bnc.example.org'\nport=6697\ntls=true\nchannels=[]\nbouncer_network_id='42'").unwrap();
@@ -1042,7 +1064,7 @@ mod activity_read_tests {
         let message = crate::state::events::tests::make_test_message(&mut app.state, "unread");
         app.state.add_transient_message_with_activity("account/peer", message, ActivityLevel::Activity);
         assert_eq!(app.state.buffers["account/peer"].unread_count, 1);
-        app.web_mark_read("account/peer", None);
+        app.web_mark_read("account/peer", None, "browser");
         assert_eq!(app.state.buffers["account/peer"].unread_count, 0);
         assert_eq!(app.state.buffers["account/peer"].activity, ActivityLevel::None);
     }
@@ -1056,13 +1078,13 @@ mod activity_read_tests {
         app.state.set_active_buffer("net/#current");
         app.state.set_activity("net/#old", ActivityLevel::Activity);
         app.state.set_activity("net/#new", ActivityLevel::Activity);
-        app.web_mark_read("net/#old", None);
+        app.web_mark_read("net/#old", None, "browser");
         assert_eq!(app.state.next_activity_buffer().as_deref(), Some("net/#new"));
         app.state.set_activity("net/#old", ActivityLevel::Activity);
         assert_eq!(app.state.next_activity_buffer().as_deref(), Some("net/#new"));
         app.set_active_buffer_silent("net/#new");
         assert_eq!(app.state.next_activity_buffer().as_deref(), Some("net/#old"));
-        app.web_mark_read("net/#old", None);
+        app.web_mark_read("net/#old", None, "browser");
         assert!(app.state.next_activity_buffer().is_none());
     }
 }

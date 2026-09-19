@@ -126,3 +126,10 @@ buffer; the renamed target is queried separately. This follows the pinned
 bouncers' target-keyed storage (`GetReadReceipt(networkID, target)` in Soju and
 `newestIdAtOrBefore(networkId, target, ...)` in Lurker), rather than applying an
 old target's timestamp to a different server-side history.
+
+Untimed local rows (including encrypted-message placeholders) clear only through
+the displayed message ID without manufacturing a server timestamp. Terminal
+rendering includes an untimed tail; a later arrival remains unread. Partial reads
+recompute activity navigation from the arrival order of the remaining messages
+at the highest unread priority. Legacy browser commands without a displayed ID
+receive a session-targeted reload requirement and preserve unread state.

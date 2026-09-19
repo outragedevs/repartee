@@ -6,7 +6,7 @@ use super::buffer::{ActivityLevel, BufferType, Message, MessageType};
 #[derive(Default)]
 pub(super) struct ReadActivity {
     pub(super) through: Option<i64>,
-    pub(super) unread: HashMap<u64, (i64, ActivityLevel)>,
+    pub(super) unread: HashMap<u64, (i64, ActivityLevel, u64)>,
 }
 
 impl AppState {
@@ -49,11 +49,18 @@ impl AppState {
         if level == ActivityLevel::None || self.message_already_read(buffer_id, message) {
             return;
         }
+        self.activity_counter = self.activity_counter.saturating_add(1);
+        let order = self.activity_counter;
         self.read_activity
             .entry(buffer_id.to_string())
             .or_default()
             .unread
-            .insert(message.id, (message.timestamp.timestamp_millis(), level));
+            .entry(message.id)
+            .and_modify(|entry| {
+                entry.0 = message.timestamp.timestamp_millis();
+                entry.1 = level;
+            })
+            .or_insert_with(|| (message.timestamp.timestamp_millis(), level, order));
     }
 
     pub(crate) fn activate_connection_read_markers(&mut self, conn_id: &str) {
@@ -153,10 +160,18 @@ impl AppState {
         buffer.activity = state
             .unread
             .values()
-            .map(|(_, level)| *level)
+            .map(|(_, level, _)| *level)
             .max()
             .unwrap_or(ActivityLevel::None);
-        if buffer.activity == ActivityLevel::None {
+        if let Some(order) = state
+            .unread
+            .values()
+            .filter(|(_, level, _)| *level == buffer.activity)
+            .map(|(_, _, order)| *order)
+            .min()
+        {
+            self.activity_order.insert(buffer_id.to_string(), order);
+        } else {
             self.activity_order.remove(buffer_id);
         }
         self.pending_web_events
@@ -167,13 +182,35 @@ impl AppState {
             });
     }
 
+    pub(crate) fn clear_visible_read_rows(&mut self, buffer_id: &str, message_id: u64) {
+        let Some(buffer) = self.buffers.get(buffer_id) else {
+            return;
+        };
+        let Some(position) = buffer
+            .messages
+            .iter()
+            .position(|message| message.id == message_id)
+        else {
+            return;
+        };
+        let ids: std::collections::HashSet<_> = buffer
+            .messages
+            .range(..=position)
+            .map(|message| message.id)
+            .collect();
+        if let Some(state) = self.read_activity.get_mut(buffer_id) {
+            state.unread.retain(|id, _| !ids.contains(id));
+        }
+        self.refresh_read_activity(buffer_id);
+    }
+
     pub(crate) fn apply_server_read_marker(&mut self, buffer_id: &str, millis: i64) {
         let state = self.read_activity.entry(buffer_id.to_string()).or_default();
         if state.through.is_some_and(|previous| previous >= millis) {
             return;
         }
         state.through = Some(millis);
-        state.unread.retain(|_, (time, _)| *time > millis);
+        state.unread.retain(|_, (time, _, _)| *time > millis);
         if let Some(buffer) = self.buffers.get_mut(buffer_id)
             && let Some(timestamp) = chrono::DateTime::from_timestamp_millis(millis)
         {
@@ -208,6 +245,31 @@ mod tests {
         message.timestamp = chrono::DateTime::from_timestamp_millis(time).unwrap();
         message.highlight = level == ActivityLevel::Mention;
         state.add_transient_message_with_activity("account/peer", message, level);
+    }
+
+    #[tokio::test]
+    async fn partial_read_reorders_remaining_activity_by_arrival() {
+        let mut state = state();
+        state.add_buffer_with_focus(Buffer::empty("account", BufferType::Query, "Other"), false);
+        deliver(&mut state, 1000, ActivityLevel::Mention);
+        let mut other = crate::state::events::tests::make_test_message(&mut state, "other");
+        other.timestamp = chrono::DateTime::from_timestamp_millis(2000).unwrap();
+        state.add_transient_message_with_activity("account/other", other, ActivityLevel::Activity);
+        deliver(&mut state, 3000, ActivityLevel::Activity);
+        assert_eq!(
+            state.next_activity_buffer().as_deref(),
+            Some("account/peer")
+        );
+        state.apply_server_read_marker("account/peer", 1000);
+        assert_eq!(
+            state.next_activity_buffer().as_deref(),
+            Some("account/other")
+        );
+        state.apply_server_read_marker("account/other", 2000);
+        assert_eq!(
+            state.next_activity_buffer().as_deref(),
+            Some("account/peer")
+        );
     }
 
     #[tokio::test]
