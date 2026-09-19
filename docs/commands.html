@@ -1013,6 +1013,31 @@ by the exact mask pattern.</p>
 <p>/ignore</p>
 </div>
 <h2 id="cat-connection">Connection</h2>
+<div class="command-entry" data-command="bouncer" data-category="Connection">
+<h1>/bouncer</h1>
+<h2>Syntax</h2>
+<pre><code>/bouncer [list|refresh]
+</code></pre>
+<h2>Description</h2>
+<p>Show the networks belonging to the active bouncer account, including their
+stable IDs, names, connection states and reported errors. <code>refresh</code> requests
+a new list. Complete list responses replace the cached list atomically;
+incomplete or malformed responses retain the previous list.</p>
+<p>Enable <code>bouncer_control = true</code> in the server configuration or use
+<code>/server add -bouncer-control</code>. Use the account login without a network
+selector. Control mode and <code>bouncer_network_id</code> are mutually exclusive.
+The server must support <code>soju.im/bouncer-networks</code> and <code>batch</code>.</p>
+<p>Soju and Lurker notify-capable connections receive subsequent network changes
+automatically. Otherwise, use <code>refresh</code> to request an updated list.
+This command currently lists networks; it does not automatically open their
+connections. Use a separate server entry with <code>bouncer_network_id</code> to bind one.</p>
+<h2>Examples</h2>
+<pre><code>/bouncer
+/bouncer refresh
+</code></pre>
+<h2>See Also</h2>
+<p>/server, /connect, /set</p>
+</div>
 <div class="command-entry" data-command="connect" data-category="Connection">
 <h1>/connect</h1>
 <h2>Syntax</h2>
@@ -1207,6 +1232,7 @@ Server credentials (passwords, SASL) are stored in <code>.env</code>.</p>
 <li><code>-autosendcmd=&lt;cmds&gt;</code> — Commands to run on connect (semicolon-separated)</li>
 <li><code>-client-cert=&lt;path&gt;</code> — Client TLS certificate path for SASL EXTERNAL / CertFP</li>
 <li><code>-sasl-key=&lt;path&gt;</code> — P-256 private key path for ECDSA-NIST256P-CHALLENGE</li>
+<li><code>-bouncer-control</code> — Discover networks through a dedicated bouncer control connection</li>
 <li><code>-bouncer-network=&lt;id&gt;</code> — Bind to a Lurker/Soju network ID after successful SASL authentication</li>
 </ul>
 <p>Flag values are parsed as single command arguments, so values with spaces should

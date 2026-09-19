@@ -1088,6 +1088,7 @@ mod tests {
                 client_cert_path: None,
                 sasl_key_path: None,
                 bouncer_network_id: None,
+                bouncer_control: false,
             },
             local_ip: None,
             enabled_caps: std::collections::HashSet::new(),

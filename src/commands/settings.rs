@@ -265,6 +265,7 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "client_cert_path" => server.client_cert_path.clone().unwrap_or_default(),
                 "sasl_key_path" => server.sasl_key_path.clone().unwrap_or_default(),
                 "bouncer_network_id" => server.bouncer_network_id.clone().unwrap_or_default(),
+                "bouncer_control" => server.bouncer_control.to_string(),
                 _ => return None,
             };
             Some(Resolved {
@@ -683,6 +684,7 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                 "sasl_mechanism" => server.sasl_mechanism = (!raw.is_empty()).then(|| parse_sasl_mechanism(raw)).transpose()?,
                 "client_cert_path" => server.client_cert_path = (!raw.is_empty()).then(|| raw.to_string()),
                 "sasl_key_path" => server.sasl_key_path = (!raw.is_empty()).then(|| raw.to_string()),
+                "bouncer_control" => server.bouncer_control = parse_bool(raw)?,
                 "bouncer_network_id" => {
                     server.bouncer_network_id = if raw.is_empty() {
                         None
@@ -908,6 +910,7 @@ const SERVER_FIELDS: &[&str] = &[
     "client_cert_path",
     "sasl_key_path",
     "bouncer_network_id",
+    "bouncer_control",
 ];
 
 /// Get all valid setting paths for tab completion.
@@ -1636,6 +1639,7 @@ mod tests {
                 client_cert_path: None,
                 sasl_key_path: None,
                 bouncer_network_id: None,
+                bouncer_control: false,
             },
         );
         let paths = get_setting_paths(&config);
@@ -1673,6 +1677,7 @@ mod tests {
                 client_cert_path: None,
                 sasl_key_path: None,
                 bouncer_network_id: None,
+                bouncer_control: false,
             },
         );
         config

@@ -343,6 +343,7 @@ impl Default for ImagePreviewConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[expect(clippy::struct_excessive_bools, reason = "independent server configuration switches")]
 pub struct ServerConfig {
     pub label: String,
     pub address: String,
@@ -404,6 +405,8 @@ pub struct ServerConfig {
     pub sasl_key_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bouncer_network_id: Option<String>,
+    #[serde(default)]
+    pub bouncer_control: bool,
 }
 
 #[expect(
@@ -1358,6 +1361,7 @@ channels = ["#general"]
                 client_cert_path: None,
                 sasl_key_path: None,
                 bouncer_network_id: None,
+                bouncer_control: false,
             },
         );
 

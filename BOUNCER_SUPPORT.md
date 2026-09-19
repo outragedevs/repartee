@@ -147,5 +147,11 @@ large to review, retaining the acceptance rows and dependencies.
   suppressed configured autojoin, and verified BOUNCER_NETID before connection
   success. Socket regressions cover authentication failure, missing/NAK capability,
   invalid binding, mismatched/missing network confirmation, disconnect, and direct
-  IRC autojoin. This is part of stages 1–2; discovery/control lifecycle, PASS-specific
-  binding, history ownership and the remaining matrix rows are still pending.
+  IRC autojoin. Merged in https://github.com/outragedevs/repartee/pull/62 .
+- Control connections and discovery: opt-in `bouncer_control`, `/bouncer list`
+  and `refresh`, atomic batched snapshots, partial notifications, attribute
+  removal and network deletion. Initial discovery and explicit binding pass
+  against both pinned upstream fixtures. Scripted tests cover abandoned and
+  malformed snapshots and control sessions accidentally bound by their login.
+  These complete part of stages 1–2; automatic child-connection lifecycle,
+  PASS-specific binding, history ownership and the remaining matrix are pending.

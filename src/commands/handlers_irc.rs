@@ -130,6 +130,7 @@ pub(crate) fn cmd_connect(app: &mut App, args: &[String]) {
         client_cert_path: None,
         sasl_key_path: None,
         bouncer_network_id: None,
+        bouncer_control: false,
     };
 
     spawn_connection(app, &conn_id, &adhoc_config);

@@ -391,7 +391,7 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
 
 /// Get the list of channels to auto-rejoin after reconnecting.
 pub fn channels_to_rejoin(state: &AppState, conn_id: &str) -> Vec<String> {
-    if state.connections.get(conn_id).is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some()) {
+    if state.connections.get(conn_id).is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some() || conn.origin_config.bouncer_control) {
         return Vec::new();
     }
     // Collect channels from existing channel buffers for this connection
@@ -5962,6 +5962,7 @@ mod tests {
                 client_cert_path: None,
                 sasl_key_path: None,
                 bouncer_network_id: None,
+                bouncer_control: false,
             },
             local_ip: None,
             enabled_caps: std::collections::HashSet::new(),
