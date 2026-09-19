@@ -8,6 +8,29 @@ use crate::ui;
 use super::App;
 
 impl App {
+    pub(crate) fn handle_shim_messages(&mut self, first: crate::session::protocol::ShimMessage) {
+        self.handle_shim_message(first);
+        if let Some(mut receiver) = self.shim_event_rx.take() {
+            while !self.should_detach {
+                let Ok(message) = receiver.try_recv() else { break };
+                self.handle_shim_message(message);
+            }
+            self.shim_event_rx = Some(receiver);
+        }
+        self.drain_pending_web_events();
+    }
+
+    fn handle_shim_message(&mut self, message: crate::session::protocol::ShimMessage) {
+        use crate::session::protocol::ShimMessage;
+        match message {
+            ShimMessage::TermEvent(event) => self.handle_event(event),
+            ShimMessage::Resize { cols, rows } => {
+                self.handle_event(crossterm::event::Event::Resize(cols, rows));
+            }
+            ShimMessage::Detach => self.should_detach = true,
+        }
+    }
+
     /// Start the Unix socket listener for shim connections.
     pub(crate) fn start_socket_listener(&mut self) -> Result<()> {
         if self.socket_listener.is_some() {
@@ -283,6 +306,51 @@ fn same_user_peer(stream: &tokio::net::UnixStream) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::same_user_peer;
+
+    fn terminal_app() -> super::App {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        app.terminal = Some(crate::ui::setup_socket_terminal(Box::new(Vec::<u8>::new()), 80, 24).unwrap());
+        app
+    }
+
+    #[tokio::test]
+    async fn both_resize_sources_update_the_fixed_viewport() {
+        use crate::session::protocol::ShimMessage;
+        let mut app = terminal_app();
+        for message in [
+            ShimMessage::TermEvent(crossterm::event::Event::Resize(120, 40)),
+            ShimMessage::Resize { cols: 120, rows: 40 },
+        ] {
+            app.handle_event(crossterm::event::Event::Resize(80, 24));
+            app.needs_full_redraw = false;
+            app.handle_shim_messages(message);
+            assert_eq!((app.cached_term_cols, app.cached_term_rows), (120, 40));
+            assert_eq!(app.terminal.as_mut().unwrap().get_frame().area(), ratatui::layout::Rect::new(0, 0, 120, 40));
+            assert!(app.needs_full_redraw);
+        }
+        app.handle_shim_messages(ShimMessage::Resize { cols: 0, rows: 0 });
+        assert_eq!((app.cached_term_cols, app.cached_term_rows), (120, 40));
+        assert_eq!(app.terminal.as_mut().unwrap().get_frame().area(), ratatui::layout::Rect::new(0, 0, 120, 40));
+    }
+
+    #[tokio::test]
+    async fn draining_input_preserves_resize_and_detach_in_order() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        use crate::session::protocol::ShimMessage;
+        let mut app = terminal_app();
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        app.shim_event_rx = Some(receiver);
+        sender.try_send(ShimMessage::Resize { cols: 100, rows: 30 }).unwrap();
+        sender.try_send(ShimMessage::TermEvent(Event::Resize(132, 50))).unwrap();
+        sender.try_send(ShimMessage::Detach).unwrap();
+        sender.try_send(ShimMessage::Resize { cols: 60, rows: 20 }).unwrap();
+        app.handle_shim_messages(ShimMessage::TermEvent(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))));
+        assert_eq!(app.input.value, "x");
+        assert_eq!((app.cached_term_cols, app.cached_term_rows), (132, 50));
+        assert_eq!(app.terminal.as_mut().unwrap().get_frame().area(), ratatui::layout::Rect::new(0, 0, 132, 50));
+        assert!(app.should_detach);
+        assert!(matches!(app.shim_event_rx.as_mut().unwrap().try_recv().unwrap(), ShimMessage::Resize { cols: 60, rows: 20 }));
+    }
 
     #[tokio::test]
     async fn same_user_peer_accepts_current_uid() {

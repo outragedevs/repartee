@@ -1481,45 +1481,19 @@ impl App {
                         Some(rx) => rx.recv().await,
                         None => std::future::pending().await,
                     }
-                } => match shim_ev {
-                    Some(crate::session::protocol::ShimMessage::TermEvent(ev)) => {
-                        self.handle_event(ev);
-                        if let Some(mut rx) = self.shim_event_rx.take() {
-                            while let Ok(msg) = rx.try_recv() {
-                                if let crate::session::protocol::ShimMessage::TermEvent(ev) = msg {
-                                    self.handle_event(ev);
-                                }
-                            }
-                            self.shim_event_rx = Some(rx);
-                        }
-                        // Tick arm picks up the rebuild — see the
-                        // term_rx arm above for rationale.
-                        self.drain_pending_web_events();
-                    }
-                    Some(crate::session::protocol::ShimMessage::Resize { cols, rows }) => {
-                        self.cached_term_cols = cols;
-                        self.cached_term_rows = rows;
-                        if let Some(ref mut terminal) = self.terminal {
-                            let _ = terminal.resize(ratatui::layout::Rect::new(0, 0, cols, rows));
-                            self.needs_full_redraw = true;
-                        }
-                        self.resize_all_shells();
-                    }
-                    Some(crate::session::protocol::ShimMessage::Detach) => {
-                        self.should_detach = true;
-                    }
-                    None => {
-                        tracing::info!("shim disconnected, returning to detached mode");
-                        self.terminal = None;
-                        self.socket_output_tx = None;
-                        self.socket_output = None;
-                        self.shim_event_rx = None;
-                        self.is_socket_attached = false;
-                        self.shim_term_env = None;
-                        if let Some(h) = self.shim_output_handle.take() { h.abort(); }
-                        if let Some(h) = self.shim_input_handle.take() { h.abort(); }
-                        self.detached = true;
-                    }
+                } => if let Some(message) = shim_ev {
+                    self.handle_shim_messages(message);
+                } else {
+                    tracing::info!("shim disconnected, returning to detached mode");
+                    self.terminal = None;
+                    self.socket_output_tx = None;
+                    self.socket_output = None;
+                    self.shim_event_rx = None;
+                    self.is_socket_attached = false;
+                    self.shim_term_env = None;
+                    if let Some(h) = self.shim_output_handle.take() { h.abort(); }
+                    if let Some(h) = self.shim_input_handle.take() { h.abort(); }
+                    self.detached = true;
                 },
                 stream = async {
                     match self.socket_listener.as_ref() {
