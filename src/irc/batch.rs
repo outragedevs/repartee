@@ -327,7 +327,7 @@ pub fn process_completed_batch(
                     by_buffer.entry(buf_id).or_default().push(msg);
                 }
                 for (buf_id, msgs) in by_buffer {
-                    if server_owned && !state.buffers.contains_key(&buf_id)
+                    if server_owned && direction.is_none() && !state.buffers.contains_key(&buf_id)
                         && let Some((_, target)) = buf_id.split_once('/')
                     {
                         let name = batch.params.first().filter(|name| name.eq_ignore_ascii_case(target))
@@ -1465,6 +1465,29 @@ mod tests {
         assert_eq!(state.buffers[&buf_id].messages.len(), 1);
         assert!(!state.connections["test"].chathistory.is_before_exhausted("#test"));
         assert!(state.connections["test"].chathistory.oldest_fetched("#test").is_none());
+    }
+
+    #[test]
+    fn requested_bouncer_history_does_not_reopen_a_closed_buffer() {
+        for direction in [crate::irc::chathistory::Direction::Before,
+            crate::irc::chathistory::Direction::Latest,
+            crate::irc::chathistory::Direction::After] {
+            let (mut state, _, buf_id) = setup_ingest_state("test");
+            let conn = state.connections.get_mut("test").unwrap();
+            conn.origin_config.bouncer_network_id = Some("42".into());
+            conn.chathistory.mark_in_flight("#test", direction, 200);
+            state.remove_buffer(&buf_id);
+            let batch = BatchInfo {
+                batch_type: "CHATHISTORY".into(),
+                params: vec!["#test".into()],
+                started_at: Instant::now(),
+                opener_tags: None,
+                dropped_messages: 0,
+                messages: vec![make_history_privmsg_at("a", "#test", "old", "m1", "2024-01-01T00:00:05.200Z")],
+            };
+            process_completed_batch(&mut state, "test", &batch, true);
+            assert!(!state.buffers.contains_key(&buf_id));
+        }
     }
 
     #[test]

@@ -9,6 +9,7 @@ use super::App;
 pub struct PendingHistoryPage {
     buffer_id: String,
     network_scope: Option<String>,
+    server_history_available: bool,
     session_id: String,
     limit: usize,
     before: Option<i64>,
@@ -115,6 +116,10 @@ impl App {
         let before = before.map(|timestamp| timestamp.saturating_mul(cursor_precision_ms));
         let request = PendingHistoryPage {
             buffer_id: buffer_id.to_string(),
+            server_history_available: buffer_id
+                .split_once('/')
+                .and_then(|(id, _)| self.state.connections.get(id))
+                .is_some_and(|conn| conn.enabled_caps.contains("draft/chathistory")),
             network_scope: buffer_id
                 .split_once('/')
                 .and_then(|(id, _)| self.state.connections.get(id))
@@ -225,17 +230,21 @@ impl App {
                 |buffer| {
                     let (messages, more_memory) =
                         memory_page(buffer, page, self.state.web_preview_extractor.as_deref());
-                    let more_server =
-                        matches!(buffer.buffer_type, BufferType::Channel | BufferType::Query)
-                            && buffer.messages.len() < super::backlog::PINNED_BACKLOG_CAP
-                            && self
-                                .state
-                                .connections
-                                .get(&buffer.connection_id)
-                                .is_some_and(|conn| {
-                                    conn.enabled_caps.contains("draft/chathistory")
-                                        && !conn.chathistory.is_before_exhausted(&buffer.name)
-                                });
+                    let more_server = matches!(
+                        buffer.buffer_type,
+                        BufferType::Channel | BufferType::Query
+                    ) && buffer.messages.len()
+                        < super::backlog::PINNED_BACKLOG_CAP
+                        && self
+                            .state
+                            .connections
+                            .get(&buffer.connection_id)
+                            .is_some_and(|conn| {
+                                (conn.enabled_caps.contains("draft/chathistory")
+                                        || (page.server_history_available && conn.status
+                                            != crate::state::connection::ConnectionStatus::Connected))
+                                    && !conn.chathistory.is_before_exhausted(&buffer.name)
+                            });
                     (messages, more_memory || more_server)
                 },
             );
@@ -413,6 +422,24 @@ mod tests {
             app.volatile_mentions[0].1.timestamp,
             (now - chrono::Duration::days(1)).timestamp()
         );
+    }
+
+    #[tokio::test]
+    async fn disconnected_web_history_timeout_remains_retryable() {
+        let mut app = app();
+        let mut web = app.web_broadcaster.subscribe();
+        app.fetch_server_history_page("account/#test", 20, None, None, "browser");
+        let conn = app.state.connections.get_mut("account").unwrap();
+        conn.enabled_caps.clear();
+        conn.status = crate::state::connection::ConnectionStatus::Disconnected;
+        app.pending_history_pages[0].started =
+            Instant::now().checked_sub(Duration::from_secs(36)).unwrap();
+        app.flush_server_history_pages();
+        let WebEvent::Messages { has_more, .. } = web.try_recv().unwrap() else {
+            panic!("expected history response");
+        };
+        assert!(has_more);
+        assert!(app.pending_history_pages.is_empty());
     }
 
     #[tokio::test]
