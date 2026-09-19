@@ -124,6 +124,7 @@ impl App {
         if changed_scope {
             self.state.reset_connection_read_markers(conn_id);
         }
+        self.state.reset_read_identity(conn_id);
         markers.confirmed.clear();
         markers.sent.clear();
         markers.queried.clear();
@@ -655,6 +656,39 @@ mod tests {
         .collect();
         app.state.surface_history_page("account/peer", rows, false);
         assert_eq!(app.state.buffers["account/peer"].unread_count, 1);
+    }
+
+    #[tokio::test]
+    async fn same_scope_reconnect_discards_previous_session_nick_ownership() {
+        let mut app = sending_app();
+        let original = app.state.connections["account"].nick.clone();
+        let seen = server_message(&mut app, 1000);
+        app.mark_visible_message_read("account/peer", seen);
+        app.handle_irc_event(crate::irc::IrcEvent::Message("account".into(), Box::new(
+            format!("@time=1970-01-01T00:00:02.000Z :{original}!user@host NICK :Bob").parse().unwrap()
+        )));
+        app.state.record_read_account("account", "Bob", Some("old-account"));
+        app.handle_irc_event(crate::irc::IrcEvent::Connected("account".into(), HashSet::from(["draft/read-marker".into()]), None));
+        app.handle_irc_event(crate::irc::IrcEvent::Message("account".into(), Box::new(
+            format!(":bnc 001 {original} :Welcome back").parse().unwrap()
+        )));
+        let mut reused = crate::state::events::tests::make_test_message(&mut app.state, "new holder of old nick");
+        reused.nick = Some("Bob".into());
+        reused.timestamp = chrono::DateTime::from_timestamp_millis(3000).unwrap();
+        reused.tags = Some(HashMap::from([("time".into(), reused.timestamp.to_rfc3339())]));
+        let mut old_account = reused.clone();
+        old_account.id = app.state.next_message_id();
+        old_account.nick = Some("AnotherNick".into());
+        old_account.text = "different account after reconnect".into();
+        old_account.tags.as_mut().unwrap().insert("account".into(), "old-account".into());
+        let mut already_read = reused.clone();
+        already_read.id = app.state.next_message_id();
+        already_read.text = "already read history".into();
+        already_read.timestamp = chrono::DateTime::from_timestamp_millis(500).unwrap();
+        already_read.tags = Some(HashMap::from([("time".into(), already_read.timestamp.to_rfc3339())]));
+        app.state.surface_history_page("account/peer", vec![reused, old_account, already_read], false);
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 2);
+        assert_eq!(app.state.buffers["account/peer"].last_read.timestamp_millis(), 1000);
     }
 
     #[tokio::test]

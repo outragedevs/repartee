@@ -195,3 +195,9 @@ READ, ensuring acknowledgments retire pending writes and failures match queries.
 The web Appearance dialog participates in the same read guard and reactive
 close-to-tail refresh as the other modal dialogs. Incoming messages and font
 changes behind that dialog cannot advance read markers.
+
+Each reconnect discards session-specific nick ownership and account identity,
+including reconnects to the same network. Network-scoped read thresholds remain.
+A regression changes the own nick, reconnects under the original nick, and
+verifies that new holders of the previous nick/account remain unread while old
+rows covered by the preserved marker remain read.
