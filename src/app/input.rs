@@ -2925,6 +2925,8 @@ pub mod submit_typing_tests {
             lag_pings: HashMap::new(),
             batch_trackers: HashMap::new(),
             storage: None,
+            pending_history_pages: Vec::new(),
+            volatile_mentions: std::collections::VecDeque::new(),
             last_event_purge: Instant::now(),
             last_mention_purge: Instant::now(),
             quit_message: None,

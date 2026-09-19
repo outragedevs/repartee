@@ -228,6 +228,11 @@ pub fn process_completed_batch(
                     .get(conn_id)
                     .and_then(|c| c.chathistory.in_flight_direction(target))
             });
+            let server_owned = state.connections.get(conn_id)
+                .is_some_and(crate::state::connection::Connection::server_owns_history);
+            let request_started = batch.params.first().and_then(|target| {
+                state.connections.get(conn_id).and_then(|conn| conn.chathistory.request_started_at(target))
+            });
             let is_gapfill = matches!(direction, Some(Direction::After | Direction::Latest));
             let is_after = matches!(direction, Some(Direction::After));
             // Capture the requested AFTER page size BEFORE complete_target clears
@@ -243,9 +248,10 @@ pub fn process_completed_batch(
             } else {
                 None
             };
-            let outcome =
-                crate::irc::events::ingest_chathistory_batch(state, conn_id, batch, is_gapfill);
             let is_before = matches!(direction, Some(Direction::Before));
+            let collect_display = (is_gapfill || server_owned) && !(server_owned && is_before && !clean_end);
+            let outcome =
+                crate::irc::events::ingest_chathistory_batch(state, conn_id, batch, collect_display);
             let mut continuation: Option<GapfillContinuation> = None;
             if let Some(target) = batch.params.first() {
                 if let Some(conn) = state.connections.get_mut(conn_id) {
@@ -321,10 +327,37 @@ pub fn process_completed_batch(
             if !outcome.display_rows.is_empty() {
                 let mut by_buffer: HashMap<String, Vec<Message>> = HashMap::new();
                 for (buf_id, msg) in outcome.display_rows {
+                    let redirected = request_started.and_then(|started| {
+                        match state.redirected_buffer_id(&buf_id, started) {
+                            crate::state::BufferRedirect::MovedTo(id) => Some(id.to_string()),
+                            _ => None,
+                        }
+                    });
+                    let buf_id = redirected.unwrap_or(buf_id);
                     by_buffer.entry(buf_id).or_default().push(msg);
                 }
                 for (buf_id, msgs) in by_buffer {
-                    state.surface_history_rows(&buf_id, msgs);
+                    if server_owned && direction.is_none() && !state.buffers.contains_key(&buf_id)
+                        && let Some((_, target)) = buf_id.split_once('/')
+                        && !state.connections.get(conn_id).is_some_and(|conn| conn.chathistory.was_closed(target))
+                    {
+                        let name = batch.params.first().filter(|name| name.eq_ignore_ascii_case(target))
+                            .map_or(target, String::as_str);
+                        let buffer_type = if crate::irc::formatting::is_channel(name) {
+                            crate::state::buffer::BufferType::Channel
+                        } else {
+                            crate::state::buffer::BufferType::Query
+                        };
+                        state.add_buffer_with_focus(crate::state::buffer::Buffer::empty(conn_id, buffer_type, name), false);
+                    }
+                    state.surface_history_page(&buf_id, msgs, server_owned && is_before);
+                    if server_owned && is_before
+                        && let Some(buf) = state.buffers.get(&buf_id)
+                        && !buf.pin_backlog
+                        && let Some(conn) = state.connections.get_mut(conn_id)
+                    {
+                        conn.chathistory.reset_pagination(&buf.name);
+                    }
                 }
             }
             continuation
@@ -1401,6 +1434,121 @@ mod tests {
             texts.push(row.text);
         }
         assert_eq!(texts, vec!["first", "second", "third"]);
+    }
+
+    #[test]
+    fn bouncer_before_history_survives_without_storage_and_reloads_after_trim() {
+        let (mut state, mut rx, buf_id) = setup_ingest_state("test");
+        state.scrollback_limit = 1;
+        state.buffers.get_mut(&buf_id).unwrap().pin_backlog = true;
+        state.connections.get_mut("test").unwrap().origin_config.bouncer_network_id = Some("42".into());
+        state.log_tx = None;
+        state.connections.get_mut("test").unwrap().chathistory
+            .mark_in_flight("#test", crate::irc::chathistory::Direction::Before, 200);
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".into(),
+            params: vec!["#test".into()],
+            started_at: Instant::now(),
+            opener_tags: None,
+            dropped_messages: 0,
+            messages: vec![
+                make_history_privmsg_at("a", "#test", "first", "m1", "2024-01-01T00:00:05.200Z"),
+                make_history_privmsg_at("a", "#test", "second", "m2", "2024-01-01T00:00:05.300Z"),
+            ],
+        };
+        process_completed_batch(&mut state, "test", &batch, true);
+        assert!(rx.try_recv().is_err());
+        let buf = &state.buffers[&buf_id];
+        assert!(buf.pin_backlog);
+        assert_eq!(buf.messages.iter().map(|msg| msg.text.as_str()).collect::<Vec<_>>(), ["first", "second"]);
+        assert!(state.connections["test"].chathistory.is_before_exhausted("#test"));
+        process_completed_batch(&mut state, "test", &batch, true);
+        assert_eq!(state.buffers[&buf_id].messages.len(), 2);
+        state.scrollback_limit = 2;
+        state.collapse_buffer_backlog(&buf_id);
+        assert_eq!(state.buffers[&buf_id].messages.len(), 2);
+        assert!(!state.connections["test"].chathistory.is_before_exhausted("#test"));
+        assert!(state.connections["test"].chathistory.oldest_fetched("#test").is_none());
+        state.scrollback_limit = 1;
+        let mut live = crate::state::events::tests::make_test_message(&mut state, "live");
+        live.timestamp = chrono::DateTime::from_timestamp_millis(1_800_000_000_000).unwrap();
+        state.add_message(&buf_id, live);
+        assert_eq!(state.buffers[&buf_id].messages.len(), 1);
+        assert!(!state.connections["test"].chathistory.is_before_exhausted("#test"));
+        assert!(state.connections["test"].chathistory.oldest_fetched("#test").is_none());
+    }
+
+    #[test]
+    fn requested_bouncer_history_does_not_reopen_a_closed_buffer() {
+        for direction in [crate::irc::chathistory::Direction::Before,
+            crate::irc::chathistory::Direction::Latest,
+            crate::irc::chathistory::Direction::After] {
+            let (mut state, _, buf_id) = setup_ingest_state("test");
+            let conn = state.connections.get_mut("test").unwrap();
+            conn.origin_config.bouncer_network_id = Some("42".into());
+            conn.chathistory.mark_in_flight("#test", direction, 200);
+            state.remove_buffer(&buf_id);
+            state.connections.get_mut("test").unwrap().chathistory
+                .clear_stale(std::time::Duration::ZERO);
+            let batch = BatchInfo {
+                batch_type: "CHATHISTORY".into(),
+                params: vec!["#test".into()],
+                started_at: Instant::now(),
+                opener_tags: None,
+                dropped_messages: 0,
+                messages: vec![make_history_privmsg_at("a", "#test", "old", "m1", "2024-01-01T00:00:05.200Z")],
+            };
+            process_completed_batch(&mut state, "test", &batch, true);
+            assert!(!state.buffers.contains_key(&buf_id));
+        }
+    }
+
+    #[test]
+    fn before_page_precedes_retained_rows_with_identical_timestamps() {
+        let (mut state, _, buf_id) = setup_ingest_state("test");
+        state.connections.get_mut("test").unwrap().origin_config.bouncer_network_id = Some("42".into());
+        let mut retained = crate::state::events::tests::make_test_message(&mut state, "newer");
+        retained.timestamp = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:05.200Z").unwrap().into();
+        state.add_message(&buf_id, retained);
+        state.connections.get_mut("test").unwrap().chathistory.mark_in_flight("#test", crate::irc::chathistory::Direction::Before, 200);
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".into(), params: vec!["#test".into()],
+            started_at: Instant::now(), opener_tags: None, dropped_messages: 0,
+            messages: vec![
+                make_history_privmsg_at("a", "#test", "first", "m1", "2024-01-01T00:00:05.200Z"),
+                make_history_privmsg_at("a", "#test", "second", "m2", "2024-01-01T00:00:05.200Z"),
+            ],
+        };
+        process_completed_batch(&mut state, "test", &batch, true);
+        assert_eq!(state.buffers[&buf_id].messages.iter().map(|message| message.text.as_str()).collect::<Vec<_>>(), ["first", "second", "newer"]);
+    }
+
+    #[test]
+    fn unsolicited_bouncer_history_creates_a_background_query() {
+        let (mut state, mut log_rx, active) = setup_ingest_state("test");
+        state.connections.get_mut("test").unwrap().origin_config.bouncer_network_id = Some("42".into());
+        state.set_active_buffer(&active);
+        state.pending_web_events.clear();
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".into(),
+            params: vec!["Peer".into()],
+            started_at: Instant::now(),
+            opener_tags: None,
+            dropped_messages: 0,
+            messages: vec![make_history_privmsg_at("Peer", "me", "replayed", "m1", "2024-01-01T00:00:05.200Z")],
+        };
+        process_completed_batch(&mut state, "test", &batch, true);
+        let query = &state.buffers["test/peer"];
+        assert_eq!(query.buffer_type, crate::state::buffer::BufferType::Query);
+        assert_eq!(query.name, "Peer");
+        assert_eq!(query.messages[0].text, "replayed");
+        assert_eq!(query.unread_count, 0);
+        assert_eq!(state.active_buffer_id.as_deref(), Some(active.as_str()));
+        assert!(log_rx.try_recv().is_err());
+        assert!(state.pending_web_events.iter().any(|event| matches!(event,
+            crate::web::protocol::WebEvent::BufferCreated { buffer, activate: false } if buffer.id == "test/peer")));
+        assert!(!state.pending_web_events.iter().any(|event| matches!(event,
+            crate::web::protocol::WebEvent::MentionAlert { .. })));
     }
 
     #[test]

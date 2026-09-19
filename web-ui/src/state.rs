@@ -305,6 +305,9 @@ impl AppState {
     /// no longer displaying) and re-arm `has_more` so a later scroll-up fetches
     /// again. Mirrors the TUI's collapse-on-return-to-bottom.
     pub fn collapse_backlog(&self, buffer_id: &str) {
+        crate::ws::send_command(&WebCommand::CollapseBacklog {
+            buffer_id: buffer_id.to_string(),
+        });
         let mut trimmed = false;
         self.messages.update(|msgs| {
             if let Some(entry) = msgs.get_mut(buffer_id)
@@ -437,7 +440,7 @@ impl AppState {
                     });
                 }
             }
-            WebEvent::InsertMessage { buffer_id, message } => {
+            WebEvent::InsertMessage { buffer_id, message, before } => {
                 // A reconnect gap-fill row. It belongs between the pre-disconnect
                 // tail and post-reconnect live messages, so insert it by
                 // (timestamp, id) instead of appending. No unread bump — it's
@@ -450,7 +453,7 @@ impl AppState {
                 } else {
                     MAX_BUFFER_MESSAGES
                 };
-                let mut trimmed = false;
+                let mut inserted = false;
                 self.messages.update(|msgs| {
                     let entry = msgs.entry(buffer_id.clone()).or_default();
                     if !message_already_present(entry, &message) {
@@ -461,18 +464,14 @@ impl AppState {
                         let key = insert_order_key(&message);
                         let pos = entry
                             .iter()
-                            .position(|m| insert_order_key(m) > key)
+                            .position(|m| if before { insert_order_key(m).0 >= key.0 } else { insert_order_key(m) > key })
                             .unwrap_or(entry.len());
                         entry.insert(pos, message);
-                        trimmed = cap_messages(entry, cap);
+                        cap_messages(entry, cap);
+                        inserted = true;
                     }
                 });
-                // A trim dropped the oldest loaded rows, so older history exists
-                // below the in-memory head again — re-arm scroll-up even if a
-                // previous fetch had reached the start and set has_more=false
-                // (mirrors the NewMessage path). Without this, a gap-fill insert at
-                // a full buffer could permanently suppress further scroll-back.
-                if trimmed {
+                if inserted {
                     self.backlog_has_more.update(|m| {
                         m.insert(buffer_id.clone(), true);
                     });
@@ -1265,6 +1264,20 @@ mod tests {
     /// off-wasm — build the storage-free half instead.
     fn headless_state() -> AppState {
         AppState::with_persisted("nightfall".to_string(), None, None, HashSet::new())
+    }
+
+    #[test]
+    fn before_insert_preserves_page_order_at_equal_timestamps() {
+        let state = headless_state();
+        let mut newer = live_msg(1, JUN9_12);
+        newer.text = "newer".into();
+        state.messages.update(|messages| { messages.insert("chat".into(), vec![newer]); });
+        for (id, text) in [(2, "second"), (3, "first")] {
+            let mut message = live_msg(id, JUN9_12);
+            message.text = text.into();
+            state.handle_event(WebEvent::InsertMessage { buffer_id: "chat".into(), message, before: true });
+        }
+        assert_eq!(state.messages.get_untracked()["chat"].iter().map(|message| message.text.as_str()).collect::<Vec<_>>(), ["first", "second", "newer"]);
     }
 
     #[test]
