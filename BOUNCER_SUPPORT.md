@@ -138,3 +138,14 @@ large to review, retaining the acceptance rows and dependencies.
 - A clean review or passing unit suite alone does not establish 100% coverage.
   Inspect actual server transcripts, UI behavior and persistence for the feature
   being claimed. Finish only when no required row is pending or unverified.
+
+
+## Implementation progress
+
+- Explicit SASL-authenticated network binding: `bouncer_network_id` configuration,
+  `/server add -bouncer-network=ID`, `/set`, reconnect-preserved configuration,
+  suppressed configured autojoin, and verified BOUNCER_NETID before connection
+  success. Socket regressions cover authentication failure, missing/NAK capability,
+  invalid binding, mismatched/missing network confirmation, disconnect, and direct
+  IRC autojoin. This is part of stages 1–2; discovery/control lifecycle, PASS-specific
+  binding, history ownership and the remaining matrix rows are still pending.

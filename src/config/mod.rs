@@ -402,6 +402,8 @@ pub struct ServerConfig {
     /// against `~/.repartee/certs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sasl_key_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bouncer_network_id: Option<String>,
 }
 
 #[expect(
@@ -1355,6 +1357,7 @@ channels = ["#general"]
                 sasl_mechanism: None,
                 client_cert_path: None,
                 sasl_key_path: None,
+                bouncer_network_id: None,
             },
         );
 
