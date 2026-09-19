@@ -440,7 +440,7 @@ impl AppState {
                     });
                 }
             }
-            WebEvent::InsertMessage { buffer_id, message } => {
+            WebEvent::InsertMessage { buffer_id, message, before } => {
                 // A reconnect gap-fill row. It belongs between the pre-disconnect
                 // tail and post-reconnect live messages, so insert it by
                 // (timestamp, id) instead of appending. No unread bump — it's
@@ -464,7 +464,7 @@ impl AppState {
                         let key = insert_order_key(&message);
                         let pos = entry
                             .iter()
-                            .position(|m| insert_order_key(m) > key)
+                            .position(|m| if before { insert_order_key(m).0 >= key.0 } else { insert_order_key(m) > key })
                             .unwrap_or(entry.len());
                         entry.insert(pos, message);
                         cap_messages(entry, cap);
@@ -1264,6 +1264,20 @@ mod tests {
     /// off-wasm — build the storage-free half instead.
     fn headless_state() -> AppState {
         AppState::with_persisted("nightfall".to_string(), None, None, HashSet::new())
+    }
+
+    #[test]
+    fn before_insert_preserves_page_order_at_equal_timestamps() {
+        let state = headless_state();
+        let mut newer = live_msg(1, JUN9_12);
+        newer.text = "newer".into();
+        state.messages.update(|messages| { messages.insert("chat".into(), vec![newer]); });
+        for (id, text) in [(2, "second"), (3, "first")] {
+            let mut message = live_msg(id, JUN9_12);
+            message.text = text.into();
+            state.handle_event(WebEvent::InsertMessage { buffer_id: "chat".into(), message, before: true });
+        }
+        assert_eq!(state.messages.get_untracked()["chat"].iter().map(|message| message.text.as_str()).collect::<Vec<_>>(), ["first", "second", "newer"]);
     }
 
     #[test]

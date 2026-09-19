@@ -230,6 +230,9 @@ pub fn process_completed_batch(
             });
             let server_owned = state.connections.get(conn_id)
                 .is_some_and(crate::state::connection::Connection::server_owns_history);
+            let request_started = batch.params.first().and_then(|target| {
+                state.connections.get(conn_id).and_then(|conn| conn.chathistory.request_started_at(target))
+            });
             let is_gapfill = matches!(direction, Some(Direction::After | Direction::Latest));
             let is_after = matches!(direction, Some(Direction::After));
             // Capture the requested AFTER page size BEFORE complete_target clears
@@ -324,6 +327,13 @@ pub fn process_completed_batch(
             if !outcome.display_rows.is_empty() {
                 let mut by_buffer: HashMap<String, Vec<Message>> = HashMap::new();
                 for (buf_id, msg) in outcome.display_rows {
+                    let redirected = request_started.and_then(|started| {
+                        match state.redirected_buffer_id(&buf_id, started) {
+                            crate::state::BufferRedirect::MovedTo(id) => Some(id.to_string()),
+                            _ => None,
+                        }
+                    });
+                    let buf_id = redirected.unwrap_or(buf_id);
                     by_buffer.entry(buf_id).or_default().push(msg);
                 }
                 for (buf_id, msgs) in by_buffer {
@@ -340,7 +350,7 @@ pub fn process_completed_batch(
                         };
                         state.add_buffer_with_focus(crate::state::buffer::Buffer::empty(conn_id, buffer_type, name), false);
                     }
-                    state.surface_history_rows(&buf_id, msgs);
+                    state.surface_history_page(&buf_id, msgs, server_owned && is_before);
                     if server_owned && is_before
                         && let Some(buf) = state.buffers.get(&buf_id)
                         && !buf.pin_backlog
@@ -1491,6 +1501,26 @@ mod tests {
             process_completed_batch(&mut state, "test", &batch, true);
             assert!(!state.buffers.contains_key(&buf_id));
         }
+    }
+
+    #[test]
+    fn before_page_precedes_retained_rows_with_identical_timestamps() {
+        let (mut state, _, buf_id) = setup_ingest_state("test");
+        state.connections.get_mut("test").unwrap().origin_config.bouncer_network_id = Some("42".into());
+        let mut retained = crate::state::events::tests::make_test_message(&mut state, "newer");
+        retained.timestamp = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:05.200Z").unwrap().into();
+        state.add_message(&buf_id, retained);
+        state.connections.get_mut("test").unwrap().chathistory.mark_in_flight("#test", crate::irc::chathistory::Direction::Before, 200);
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".into(), params: vec!["#test".into()],
+            started_at: Instant::now(), opener_tags: None, dropped_messages: 0,
+            messages: vec![
+                make_history_privmsg_at("a", "#test", "first", "m1", "2024-01-01T00:00:05.200Z"),
+                make_history_privmsg_at("a", "#test", "second", "m2", "2024-01-01T00:00:05.200Z"),
+            ],
+        };
+        process_completed_batch(&mut state, "test", &batch, true);
+        assert_eq!(state.buffers[&buf_id].messages.iter().map(|message| message.text.as_str()).collect::<Vec<_>>(), ["first", "second", "newer"]);
     }
 
     #[test]

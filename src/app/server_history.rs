@@ -8,6 +8,7 @@ use super::App;
 
 pub struct PendingHistoryPage {
     buffer_id: String,
+    request_target: String,
     network_scope: Option<String>,
     server_history_available: bool,
     session_id: String,
@@ -124,6 +125,11 @@ impl App {
         let before = before.map(|timestamp| timestamp.saturating_mul(cursor_precision_ms));
         let request = PendingHistoryPage {
             buffer_id: buffer_id.to_string(),
+            request_target: self
+                .state
+                .buffers
+                .get(buffer_id)
+                .map_or_else(String::new, |buffer| buffer.name.clone()),
             server_history_available: buffer_id
                 .split_once('/')
                 .and_then(|(id, _)| self.state.connections.get(id))
@@ -214,7 +220,7 @@ impl App {
                     self.state
                         .connections
                         .get(&buffer.connection_id)
-                        .map(|conn| conn.chathistory.any_in_flight(&buffer.name))
+                        .map(|conn| conn.chathistory.any_in_flight(&page.request_target))
                 })
                 .unwrap_or(false);
             if pending && page.started.elapsed() < Duration::from_secs(35) {
@@ -453,10 +459,27 @@ mod tests {
         assert_eq!(app.pending_history_pages[0].buffer_id, "account/#renamed");
         let mut web = app.web_broadcaster.subscribe();
         app.flush_server_history_pages();
-        let WebEvent::Messages { buffer_id, .. } = web.try_recv().unwrap() else {
+        assert!(web.try_recv().is_err());
+        let batch = crate::irc::batch::BatchInfo {
+            batch_type: "CHATHISTORY".into(),
+            params: vec!["#test".into()],
+            started_at: Instant::now(),
+            opener_tags: None,
+            dropped_messages: 0,
+            messages: vec!["@time=2024-01-01T00:00:00.000Z;msgid=renamed :peer!u@h PRIVMSG #test :renamed history".parse().unwrap()],
+        };
+        crate::irc::batch::process_completed_batch(&mut app.state, "account", &batch, true);
+        app.flush_server_history_pages();
+        let WebEvent::Messages {
+            buffer_id,
+            messages,
+            ..
+        } = web.try_recv().unwrap()
+        else {
             panic!("expected history response");
         };
         assert_eq!(buffer_id, "account/#renamed");
+        assert_eq!(messages[0].text, "renamed history");
     }
 
     #[tokio::test]
