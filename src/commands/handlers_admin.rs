@@ -380,6 +380,10 @@ fn subcmd_is(subcmd: &str, choices: &[&str]) -> bool {
 }
 
 pub(crate) fn cmd_ignore(app: &mut App, args: &[String]) {
+    ignore_with_path(app, args, &crate::constants::config_path());
+}
+
+fn ignore_with_path(app: &mut App, args: &[String], path: &std::path::Path) {
     if args.is_empty() {
         // List ignore rules — collect lines first to avoid borrow issues
         let mut lines = vec![divider("Ignore List")];
@@ -423,17 +427,22 @@ pub(crate) fn cmd_ignore(app: &mut App, args: &[String]) {
     let mut i = 1;
     while i < args.len() {
         if args[i] == "-channels" || args[i] == "-channel" {
-            if i + 1 < args.len() {
-                i += 1;
-                channels = Some(
-                    args[i]
-                        .split(',')
-                        .map(|s| s.trim().to_lowercase())
-                        .collect(),
-                );
+            i += 1;
+            let Some(value) = args.get(i) else {
+                add_local_event(app, "Usage: /ignore <mask> [levels] [-channels #channel,...]");
+                return;
+            };
+            let selected: Vec<String> = value.split(',').map(|s| s.trim().to_lowercase()).collect();
+            if selected.iter().any(|channel| !crate::irc::formatting::is_channel(channel)) {
+                add_local_event(app, "Invalid ignore channel list; expected #channel names separated by commas");
+                return;
             }
+            channels = Some(selected);
         } else if let Some(level) = parse_ignore_level(&args[i]) {
             levels.push(level);
+        } else {
+            add_local_event(app, &format!("Unknown ignore level: {}", args[i]));
+            return;
         }
         i += 1;
     }
@@ -445,12 +454,15 @@ pub(crate) fn cmd_ignore(app: &mut App, args: &[String]) {
     });
 
     // Save config
-    app.cached_config_toml = None;
-    let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+    persist_ignores(app, path);
     add_local_event(app, &format!("{C_OK}Added ignore rule: {mask}{C_RST}"));
 }
 
 pub(crate) fn cmd_unignore(app: &mut App, args: &[String]) {
+    unignore_with_path(app, args, &crate::constants::config_path());
+}
+
+fn unignore_with_path(app: &mut App, args: &[String], path: &std::path::Path) {
     if args.is_empty() {
         add_local_event(app, "Usage: /unignore <number|mask>");
         return;
@@ -464,8 +476,7 @@ pub(crate) fn cmd_unignore(app: &mut App, args: &[String]) {
         && n <= app.config.ignores.len()
     {
         let removed = app.config.ignores.remove(n - 1);
-        app.cached_config_toml = None;
-        let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+        persist_ignores(app, path);
         add_local_event(
             app,
             &format!("{C_OK}Removed ignore rule: {}{C_RST}", removed.mask),
@@ -476,8 +487,7 @@ pub(crate) fn cmd_unignore(app: &mut App, args: &[String]) {
     // Try as mask
     if let Some(pos) = app.config.ignores.iter().position(|e| e.mask == *target) {
         let removed = app.config.ignores.remove(pos);
-        app.cached_config_toml = None;
-        let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+        persist_ignores(app, path);
         add_local_event(
             app,
             &format!("{C_OK}Removed ignore rule: {}{C_RST}", removed.mask),
@@ -488,6 +498,12 @@ pub(crate) fn cmd_unignore(app: &mut App, args: &[String]) {
             &format!("{C_ERR}No ignore rule matching: {target}{C_RST}"),
         );
     }
+}
+
+fn persist_ignores(app: &mut App, path: &std::path::Path) {
+    app.state.ignores.clone_from(&app.config.ignores);
+    app.cached_config_toml = None;
+    let _ = crate::config::save_config(path, &app.config);
 }
 
 const fn parse_ignore_level(s: &str) -> Option<crate::config::IgnoreLevel> {
@@ -2146,5 +2162,58 @@ mod translate_reload_tests {
                 rows(&app)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod ignore_runtime_tests {
+    use super::*;
+    use crate::app::input::submit_typing_tests::test_app;
+    use crate::config::IgnoreLevel;
+    use crate::irc::ignore::should_ignore;
+
+    #[test]
+    fn ignore_and_both_unignore_forms_take_effect_without_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut app = test_app();
+        for target in ["alice", "1"] {
+            ignore_with_path(&mut app, &["alice".into()], &path);
+            for level in [IgnoreLevel::Msgs, IgnoreLevel::Public, IgnoreLevel::Ctcps, IgnoreLevel::Notices, IgnoreLevel::Joins] {
+                assert!(should_ignore(&app.state.ignores, "alice", None, None, &level, None));
+            }
+            assert_eq!(app.config.ignores.len(), 1);
+            unignore_with_path(&mut app, &[target.into()], &path);
+            assert!(!should_ignore(&app.state.ignores, "alice", None, None, &IgnoreLevel::Msgs, None));
+            assert!(app.config.ignores.is_empty());
+        }
+    }
+
+    #[test]
+    fn invalid_arguments_do_not_install_an_all_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut app = test_app();
+        for tail in [vec!["notice"], vec!["-channels"], vec!["-channels", ""], vec!["-channels", "#rust,"], vec!["notices", "typo"], vec!["-channels", "notices"]] {
+            let mut args = vec!["alice".to_owned()];
+            args.extend(tail.into_iter().map(str::to_owned));
+            ignore_with_path(&mut app, &args, &path);
+            assert!(app.config.ignores.is_empty());
+            assert!(app.state.ignores.is_empty());
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn explicit_levels_and_channels_are_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut app = test_app();
+        ignore_with_path(&mut app, &["alice".into(), "notices".into(), "-channels".into(), "#rust".into()], &path);
+        assert!(should_ignore(&app.state.ignores, "alice", None, None, &IgnoreLevel::Notices, Some("#rust")));
+        assert!(!should_ignore(&app.state.ignores, "alice", None, None, &IgnoreLevel::Msgs, Some("#rust")));
+        assert!(!should_ignore(&app.state.ignores, "alice", None, None, &IgnoreLevel::Notices, Some("#other")));
+        unignore_with_path(&mut app, &["missing".into()], &path);
+        assert_eq!(app.state.ignores.len(), 1);
     }
 }
