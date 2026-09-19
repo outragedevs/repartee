@@ -450,6 +450,40 @@ mod tests {
         assert_eq!(app.irc_handles["account"].sender().captured().len(), 1);
     }
 
+    #[tokio::test]
+    async fn removing_preferred_capability_keeps_legacy_read_synchronization() {
+        let mut app = sending_app();
+        let caps = crate::irc::cap::ServerCaps::parse("draft/read-marker soju.im/read");
+        assert_eq!(
+            crate::irc::cap::bouncer_read_caps(&caps),
+            vec!["draft/read-marker", "soju.im/read"]
+        );
+        let requested = crate::irc::events::handle_cap_new(
+            &mut app.state,
+            "account",
+            Some("soju.im/read"),
+            None,
+        );
+        assert_eq!(requested, vec!["soju.im/read"]);
+        crate::irc::events::handle_cap_ack(&mut app.state, "account", Some("soju.im/read"), None);
+        crate::irc::events::handle_cap_del(
+            &mut app.state,
+            "account",
+            Some("draft/read-marker"),
+            None,
+        );
+        let seen = server_message(&mut app, 1123);
+        app.mark_visible_message_read("account/peer", seen);
+        let captured = app.irc_handles["account"].sender().captured();
+        assert_eq!(
+            captured.last().unwrap().command,
+            irc::proto::Command::Raw(
+                "READ".into(),
+                vec!["Peer".into(), "timestamp=1970-01-01T00:00:01.123Z".into()]
+            )
+        );
+    }
+
     #[test]
     fn markers_accept_unknown_and_millisecond_timestamps() {
         assert_eq!(parse_marker("*"), Some(Marker::Unknown));

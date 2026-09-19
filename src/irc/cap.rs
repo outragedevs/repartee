@@ -24,8 +24,8 @@ pub const DESIRED_CAPS: &[&str] = &[
     "sasl",
 ];
 
-pub fn bouncer_read_cap(server: &ServerCaps) -> Option<&'static str> {
-    ["draft/read-marker", "soju.im/read"].into_iter().find(|cap| server.has(cap))
+pub fn bouncer_read_caps(server: &ServerCaps) -> Vec<String> {
+    server.negotiate(&["draft/read-marker", "soju.im/read"])
 }
 
 /// Parsed representation of server-advertised capabilities from `CAP LS`.
