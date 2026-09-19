@@ -59,12 +59,11 @@ pub async fn run_connected_shim(pid: u32, stream: UnixStream) -> Result<()> {
     // Send initial terminal environment (includes dimensions + env vars).
     protocol::write_message(&mut write_half, &term_env).await?;
 
-    // Input channel: blocking reader + SIGWINCH → upstream messages.
+    // Input channel: blocking reader and dimension sampling → upstream messages.
     let (input_tx, mut input_rx) = mpsc::channel::<ShimMessage>(1024);
     let input_stop = Arc::new(AtomicBool::new(false));
 
-    spawn_input_reader(input_tx.clone(), Arc::clone(&input_stop));
-    spawn_sigwinch_handler(input_tx);
+    spawn_input_reader(input_tx, Arc::clone(&input_stop), (term_env.cols, term_env.rows));
 
     // Downstream channel: spawn a task that reads MainMessages from the socket
     // and forwards them through an mpsc channel. This avoids the cancellation-
@@ -252,26 +251,52 @@ pub async fn run_splash(sock_path: Option<&std::path::Path>) -> Result<()> {
 /// Intercepts `Ctrl+\` and `Ctrl+Z` at the shim level, converting them to
 /// `ShimMessage::Detach` instead of forwarding the raw key event. This keeps
 /// detach as a protocol-level concept — the daemon never sees the keystroke.
-fn spawn_input_reader(tx: mpsc::Sender<ShimMessage>, stop: Arc<AtomicBool>) {
+fn spawn_input_reader(tx: mpsc::Sender<ShimMessage>, stop: Arc<AtomicBool>, size: (u16, u16)) {
     std::thread::spawn(move || {
+        let mut last_size = size;
         while !stop.load(Ordering::Relaxed) {
-            if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
+            let event = if event::poll(Duration::from_millis(50)).unwrap_or(false) {
                 match event::read() {
-                    Ok(ev) => {
-                        let msg = if is_detach_key(&ev) {
-                            ShimMessage::Detach
-                        } else {
-                            ShimMessage::TermEvent(ev)
-                        };
-                        if tx.blocking_send(msg).is_err() {
-                            break;
-                        }
-                    }
+                    Ok(event) => Some(event),
                     Err(_) => break,
                 }
+            } else {
+                None
+            };
+            if !forward_terminal_sample(&tx, &mut last_size, event, crossterm::terminal::size().ok()) {
+                break;
             }
         }
     });
+}
+
+fn forward_terminal_sample(
+    tx: &mpsc::Sender<ShimMessage>,
+    last_size: &mut (u16, u16),
+    event: Option<crossterm::event::Event>,
+    size: Option<(u16, u16)>,
+) -> bool {
+    let mut size = size;
+    let resize_event = matches!(&event, Some(crossterm::event::Event::Resize(..)));
+    if let Some(event) = event {
+        if is_detach_key(&event) {
+            return tx.blocking_send(ShimMessage::Detach).is_ok();
+        }
+        if let crossterm::event::Event::Resize(cols, rows) = event {
+            size = size.or(Some((cols, rows)));
+        } else if tx.blocking_send(ShimMessage::TermEvent(event)).is_err() {
+            return false;
+        }
+    }
+    if let Some((cols, rows)) = size
+        && cols > 0 && rows > 0 && (resize_event || *last_size != (cols, rows))
+    {
+        if tx.blocking_send(ShimMessage::Resize { cols, rows }).is_err() {
+            return false;
+        }
+        *last_size = (cols, rows);
+    }
+    true
 }
 
 /// Check if a crossterm event is a detach chord (`Ctrl+\` or `Ctrl+Z`).
@@ -285,23 +310,6 @@ const fn is_detach_key(ev: &crossterm::event::Event) -> bool {
             ..
         }) if modifiers.contains(KeyModifiers::CONTROL)
     )
-}
-
-/// Spawn a task that forwards SIGWINCH as Resize messages.
-fn spawn_sigwinch_handler(tx: mpsc::Sender<ShimMessage>) {
-    tokio::spawn(async move {
-        let Ok(mut sigwinch) =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
-        else {
-            return;
-        };
-        while sigwinch.recv().await.is_some() {
-            let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-            if tx.send(ShimMessage::Resize { cols, rows }).await.is_err() {
-                break;
-            }
-        }
-    });
 }
 
 /// Relay loop: forward input upstream, forward output downstream.
@@ -341,5 +349,70 @@ where
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    use super::*;
+
+    #[test]
+    fn dimensions_recover_without_a_resize_event_and_ignore_invalid_samples() {
+        let (sender, mut receiver) = mpsc::channel(8);
+        let mut last_size = (80, 24);
+        for size in [Some((80, 24)), None, Some((0, 0))] {
+            assert!(forward_terminal_sample(&sender, &mut last_size, None, size));
+        }
+        assert!(receiver.try_recv().is_err());
+        assert!(forward_terminal_sample(&sender, &mut last_size, None, Some((120, 40))));
+        assert!(matches!(receiver.try_recv().unwrap(), ShimMessage::Resize { cols: 120, rows: 40 }));
+        assert!(forward_terminal_sample(&sender, &mut last_size, None, Some((120, 40))));
+        assert!(receiver.try_recv().is_err());
+        assert!(forward_terminal_sample(&sender, &mut last_size, None, Some((80, 24))));
+        assert!(matches!(receiver.try_recv().unwrap(), ShimMessage::Resize { cols: 80, rows: 24 }));
+    }
+
+    #[test]
+    fn late_kernel_dimensions_replace_stale_signal_dimensions() {
+        let (sender, mut receiver) = mpsc::channel(8);
+        let mut last_size = (80, 24);
+        assert!(forward_terminal_sample(&sender, &mut last_size, Some(Event::Resize(80, 24)), Some((80, 24))));
+        assert!(matches!(receiver.try_recv().unwrap(), ShimMessage::Resize { cols: 80, rows: 24 }));
+        assert!(forward_terminal_sample(&sender, &mut last_size, None, Some((132, 50))));
+        assert!(matches!(receiver.try_recv().unwrap(), ShimMessage::Resize { cols: 132, rows: 50 }));
+        assert!(forward_terminal_sample(&sender, &mut last_size, Some(Event::Resize(80, 24)), Some((132, 50))));
+        assert!(matches!(receiver.try_recv().unwrap(), ShimMessage::Resize { cols: 132, rows: 50 }));
+        assert_eq!(last_size, (132, 50));
+    }
+
+    #[test]
+    fn real_resize_events_preserve_same_grid_metric_refreshes() {
+        let (sender, mut receiver) = mpsc::channel(8);
+        let mut last_size = (80, 24);
+        for _ in 0..2 {
+            assert!(forward_terminal_sample(&sender, &mut last_size, Some(Event::Resize(80, 24)), Some((80, 24))));
+            assert!(matches!(receiver.try_recv().unwrap(), ShimMessage::Resize { cols: 80, rows: 24 }));
+        }
+        assert!(forward_terminal_sample(&sender, &mut last_size, None, Some((80, 24))));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn input_resize_and_detach_share_one_ordered_source() {
+        let (sender, mut receiver) = mpsc::channel(8);
+        let mut last_size = (80, 24);
+        let key = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(forward_terminal_sample(&sender, &mut last_size, Some(key.clone()), Some((100, 30))));
+        assert!(matches!(receiver.try_recv().unwrap(), ShimMessage::TermEvent(event) if event == key));
+        assert!(matches!(receiver.try_recv().unwrap(), ShimMessage::Resize { cols: 100, rows: 30 }));
+        assert!(forward_terminal_sample(&sender, &mut last_size, Some(Event::Resize(90, 25)), None));
+        assert!(matches!(receiver.try_recv().unwrap(), ShimMessage::Resize { cols: 90, rows: 25 }));
+        let detach = Event::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        assert!(forward_terminal_sample(&sender, &mut last_size, Some(detach), Some((160, 50))));
+        assert!(matches!(receiver.try_recv().unwrap(), ShimMessage::Detach));
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(last_size, (90, 25));
     }
 }
