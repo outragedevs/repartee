@@ -145,3 +145,9 @@ both pinned implementations. Permanent failures suppress the rejected update;
 newer displayed timestamps can proceed. INTERNAL_ERROR retries use increasing
 delays and stop after three rejections. Failures are visible in the connection's
 server buffer, and reconnect resets failed-attempt state.
+
+Pending marker requests retain wire order. An unscoped FAIL consumes only one
+request rather than rejecting all buffers; timestamp and target contexts select
+the first matching request. Rejected queries are tracked separately from rejected
+write timestamps, so a subsequent displayed message can still advance its marker.
+The pending request window is bounded to prevent unlimited queue growth.
