@@ -368,6 +368,9 @@ pub fn ChatView() -> impl IntoView {
         let _ = state.font_size_override.get();
         let _ = state.line_height_override.get();
         let _ = state.line_height.get();
+        let _ = state.wizard_open.get();
+        let _ = state.emote_picker_open.get();
+        let _ = state.emoji_picker_open.get();
         if !state.scroll_mode.get().is_following_tail() {
             return;
         }
