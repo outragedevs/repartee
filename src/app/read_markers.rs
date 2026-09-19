@@ -483,6 +483,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mouse_only_interaction_confirms_focus_but_hover_does_not() {
+        let mut app = sending_app();
+        app.terminal =
+            Some(crate::ui::setup_socket_terminal(Box::new(std::io::sink()), 120, 40).unwrap());
+        app.terminal_focused = false;
+        app.state.set_active_buffer("account/peer");
+        server_message(&mut app, 1123);
+        assert!(app.render_terminal_frame());
+        let mut mouse = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Moved,
+            column: 60,
+            row: 10,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        app.handle_event(crossterm::event::Event::Mouse(mouse));
+        assert!(!app.terminal_focused);
+        assert!(app.render_terminal_frame());
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 1);
+        mouse.kind = crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left);
+        app.handle_event(crossterm::event::Event::Mouse(mouse));
+        assert!(app.terminal_focused);
+        assert!(app.render_terminal_frame());
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 0);
+    }
+
+    #[tokio::test]
     async fn unknown_initial_focus_preserves_unread_until_keyboard_input() {
         let mut app = sending_app();
         app.terminal =

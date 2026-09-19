@@ -440,15 +440,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn marker_before_buffer_creation_suppresses_late_unread_and_close_discards_it() {
+    async fn marker_survives_buffer_closure_without_retaining_unread_rows() {
         let mut state = state();
         state.remove_buffer("account/peer");
         state.apply_server_read_marker("account/peer", 2000);
         state.add_buffer_with_focus(Buffer::empty("account", BufferType::Query, "Peer"), false);
         deliver(&mut state, 1000, ActivityLevel::Activity);
         assert_eq!(state.buffers["account/peer"].unread_count, 0);
+        deliver(&mut state, 3000, ActivityLevel::Activity);
         state.remove_buffer("account/peer");
-        assert!(!state.read_activity.contains_key("account/peer"));
+        assert_eq!(state.read_activity["account/peer"].through, Some(2000));
+        assert!(state.read_activity["account/peer"].unread.is_empty());
+        state.add_buffer_with_focus(Buffer::empty("account", BufferType::Query, "Peer"), false);
+        assert_eq!(
+            state.buffers["account/peer"].last_read.timestamp_millis(),
+            2000
+        );
+        let rows = [1000, 2000, 3000]
+            .into_iter()
+            .map(|time| history_row(&mut state, time))
+            .collect();
+        state.surface_history_page("account/peer", rows, false);
+        assert_eq!(state.buffers["account/peer"].unread_count, 1);
     }
 
     #[tokio::test]
