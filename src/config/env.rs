@@ -21,11 +21,10 @@ pub fn load_env(path: &Path) -> Result<HashMap<String, String>> {
         }
         if let Some((key, value)) = trimmed.split_once('=') {
             let key = key.trim().to_string();
-            let value = value
-                .trim()
-                .trim_matches('"')
-                .trim_matches('\'')
-                .to_string();
+            let value = value.trim();
+            let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"'))
+                .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+                .unwrap_or(value).to_string();
             vars.insert(key, value);
         }
     }
@@ -35,6 +34,9 @@ pub fn load_env(path: &Path) -> Result<HashMap<String, String>> {
 /// Set a key in the `.env` file. Creates the file if it doesn't exist.
 /// Updates existing keys in place, appends new ones at the end.
 pub fn set_env_value(path: &Path, key: &str, value: &str) -> Result<()> {
+    if value.contains(['\n', '\r', '\0']) {
+        color_eyre::eyre::bail!("Environment values must be a single line without NUL characters");
+    }
     let mut lines: Vec<String> = if path.exists() {
         std::fs::read_to_string(path)?
             .lines()
@@ -45,7 +47,12 @@ pub fn set_env_value(path: &Path, key: &str, value: &str) -> Result<()> {
     };
 
     let prefix = format!("{key}=");
-    let new_line = format!("{key}={value}");
+    let encoded = if value.trim() != value || value.starts_with(['"', '\'']) || value.ends_with(['"', '\'']) {
+        format!("\"{value}\"")
+    } else {
+        value.to_string()
+    };
+    let new_line = format!("{key}={encoded}");
     let mut found = false;
 
     for line in &mut lines {
@@ -160,13 +167,13 @@ pub fn apply_credentials(
             env.get(&key).cloned()
         };
         if let Some(val) = get("_SASL_USER") {
-            server.sasl_user = Some(val);
+            server.sasl_user = (!val.is_empty()).then_some(val);
         }
         if let Some(val) = get("_SASL_PASS") {
-            server.sasl_pass = Some(val);
+            server.sasl_pass = (!val.is_empty()).then_some(val);
         }
         if let Some(val) = get("_PASSWORD") {
-            server.password = Some(val);
+            server.password = (!val.is_empty()).then_some(val);
         }
     }
 }
@@ -327,4 +334,22 @@ mod tests {
         assert!(content.contains("EXISTING=value"));
         assert!(content.contains("NEW_KEY=new_value"));
     }
+    #[test]
+    fn credential_values_round_trip_without_stripping_quotes_or_spaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "KEEP=unchanged\n").unwrap();
+        for value in ["", " secret ", "\"quoted\"", "'both\"", "\"", "'", r"C:\new\test", " # = 雪 "] {
+            for key in ["WEB_PASSWORD", "LIBERA_PASSWORD", "LIBERA_SASL_PASS"] {
+                set_env_value(&path, key, value).unwrap();
+                let loaded = load_env(&path).unwrap();
+                assert_eq!(loaded[key], value);
+                assert_eq!(loaded["KEEP"], "unchanged");
+            }
+        }
+        let before = std::fs::read(&path).unwrap();
+        assert!(set_env_value(&path, "WEB_PASSWORD", "one\nINJECT=two").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
 }
