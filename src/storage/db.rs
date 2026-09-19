@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS messages (
     type      TEXT NOT NULL,
     nick      TEXT,
     text      TEXT NOT NULL,
+    translation_suffix_at INTEGER,
     highlight INTEGER DEFAULT 0,
     iv        BLOB,
     ref_id    TEXT,
@@ -262,7 +263,13 @@ fn migrate_schema(db: &Connection) {
     // left NULL on existing rows: read paths `COALESCE(ts_ms, timestamp * 1000)`,
     // so un-migrated rows keep exactly their old second-resolution ordering — no
     // backfill UPDATE is run, keeping the migration cheap on large logs.
-    for col in ["ref_id TEXT", "tags TEXT", "event_key TEXT", "ts_ms INTEGER"] {
+    for col in [
+        "ref_id TEXT",
+        "tags TEXT",
+        "event_key TEXT",
+        "ts_ms INTEGER",
+        "translation_suffix_at INTEGER",
+    ] {
         let sql = format!("ALTER TABLE messages ADD COLUMN {col}");
         if let Err(e) = db.execute_batch(&sql) {
             if !e.to_string().contains("duplicate column name") {
@@ -409,58 +416,66 @@ fn encode_sqlite_uri_path(path: &str) -> String {
 
 pub fn purge_old_messages(db: &Connection, retention_days: u32, has_fts: bool) -> usize {
     let cutoff = chrono::Utc::now().timestamp() - i64::from(retention_days) * 86400;
-
-    if has_fts
-        && let Err(e) = db.execute(
-            "INSERT INTO messages_fts(messages_fts, rowid, nick, text)
-             SELECT 'delete', id, nick, text
-             FROM messages WHERE timestamp < ?1",
-            params![cutoff],
-        )
-    {
-        tracing::warn!("Failed to delete FTS entries during purge: {e}");
-    }
-
-    match db.execute("DELETE FROM messages WHERE timestamp < ?1", params![cutoff]) {
-        Ok(count) => count,
-        Err(e) => {
-            tracing::warn!("Failed to purge old messages: {e}");
-            0
-        }
-    }
+    purge_with_fts_recovery(
+        db,
+        "DELETE FROM messages WHERE timestamp < ?1",
+        cutoff,
+        has_fts,
+        "old messages",
+    )
 }
 
 /// Delete event-type messages (join/part/quit/nick/kick/mode) older than `hours`.
 ///
 /// Uses the partial index `idx_messages_event_timestamp` for fast scans.
-/// FTS entries are cleaned both manually (for large batch efficiency) and
-/// via the AFTER DELETE trigger as a safety net.
 pub fn purge_old_events(db: &Connection, hours: u32, has_fts: bool) -> usize {
     let cutoff = chrono::Utc::now().timestamp() - i64::from(hours) * 3600;
-
-    // For FTS-enabled databases, manually remove FTS entries first (triggers handle it,
-    // but explicit delete-before is safer for large batch deletes).
-    if has_fts
-        && let Err(e) = db.execute(
-            "INSERT INTO messages_fts(messages_fts, rowid, nick, text)
-             SELECT 'delete', id, nick, text
-             FROM messages WHERE type = 'event' AND timestamp < ?1",
-            params![cutoff],
-        )
-    {
-        tracing::warn!("Failed to delete FTS entries during event purge: {e}");
-    }
-
-    match db.execute(
+    purge_with_fts_recovery(
+        db,
         "DELETE FROM messages WHERE type = 'event' AND timestamp < ?1",
-        params![cutoff],
-    ) {
+        cutoff,
+        has_fts,
+        "old events",
+    )
+}
+
+fn purge_with_fts_recovery(
+    db: &Connection,
+    sql: &str,
+    cutoff: i64,
+    has_fts: bool,
+    description: &str,
+) -> usize {
+    match db.execute(sql, params![cutoff]) {
         Ok(count) => count,
-        Err(e) => {
-            tracing::warn!("Failed to purge old events: {e}");
+        Err(error) if has_fts && is_database_corrupt(&error) => {
+            tracing::warn!(
+                "Failed to purge {description}: {error}; rebuilding the FTS index"
+            );
+            if let Err(rebuild_error) = db.execute(
+                "INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')",
+                [],
+            ) {
+                tracing::warn!("Failed to rebuild the FTS index: {rebuild_error}");
+                return 0;
+            }
+            match db.execute(sql, params![cutoff]) {
+                Ok(count) => count,
+                Err(retry_error) => {
+                    tracing::warn!("Failed to purge {description} after FTS rebuild: {retry_error}");
+                    0
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!("Failed to purge {description}: {error}");
             0
         }
     }
+}
+
+fn is_database_corrupt(error: &rusqlite::Error) -> bool {
+    error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseCorrupt)
 }
 
 #[cfg(test)]
@@ -872,6 +887,31 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn purge_rebuilds_a_desynchronized_fts_index() {
+        let db = open_database(false).unwrap();
+        let old = chrono::Utc::now().timestamp() - 100 * 3600;
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text)
+             VALUES ('stale-fts', 'net', '#chan', ?1, 'event', 'alice', 'joined')",
+            params![old],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO messages_fts(messages_fts, rowid, nick, text)
+             SELECT 'delete', id, nick, text FROM messages WHERE msg_id = 'stale-fts'",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(purge_old_events(&db, 72, true), 1);
+        db.execute(
+            "INSERT INTO messages_fts(messages_fts) VALUES ('integrity-check')",
+            [],
+        )
+        .unwrap();
     }
 
     #[test]

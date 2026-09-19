@@ -1,6 +1,6 @@
 ---
 category: Connection
-description: Quit all connections and close kIRC
+description: Quit all connections and close repartee
 ---
 
 # /quit
@@ -12,7 +12,8 @@ description: Quit all connections and close kIRC
 ## Description
 
 Disconnect from all servers and close the application. An optional quit
-message is sent to each server. Default message is "kIRC".
+message is sent to each server. The default includes the Repartee name,
+version, and project URL.
 
 ## Examples
 

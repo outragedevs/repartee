@@ -573,6 +573,28 @@ mod tests {
     }
 
     #[test]
+    fn dollars_in_a_message_body_are_left_exactly_as_they_arrived() {
+        // This parser sees raw IRC message bodies, not just rows the client
+        // composed, so it must not claim any `$` sequence means something.
+        // A `$$` arm was added here once to mirror an escape the TUI applied
+        // to its event rows; it rendered `echo $$` — an ordinary line in any
+        // channel where people talk about shells — as `echo $`.
+        //
+        // The TUI does not substitute variables in message bodies either
+        // (they are inserted as params, after that pass), so leaving `$`
+        // alone is what keeps the two front ends showing the same text.
+        let rendered = |t: &str| -> String {
+            parse_format(t).iter().map(|s| s.text.as_str()).collect()
+        };
+        assert_eq!(rendered("echo $$"), "echo $$");
+        assert_eq!(rendered("costs $5"), "costs $5");
+        assert_eq!(rendered("a $ b $x $0 $*"), "a $ b $x $0 $*");
+        // `%%` is a different matter: both renderers read it as one literal
+        // `%`, and both interpret `%i` in a body, so they still agree.
+        assert_eq!(rendered("printf(\"%%i\")"), "printf(\"%i\")");
+    }
+
+    #[test]
     fn linkify_no_url_returns_unchanged() {
         let spans = vec![plain("just a normal message")];
         let out = linkify_spans(spans.clone());

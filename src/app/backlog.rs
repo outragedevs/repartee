@@ -832,6 +832,7 @@ fn make_separator(
 ) -> Message {
     let event_param = text.clone();
     Message {
+        log_key: None,
         id,
         timestamp,
         message_type: MessageType::Event,
@@ -844,6 +845,8 @@ fn make_separator(
         log_msg_id: None,
         log_ref_id: None,
         tags: None,
+        wire_origin: None,
+        translation_suffix_at: None,
     }
 }
 
@@ -869,6 +872,7 @@ mod tests {
 
     fn msg(ts: i64, log_id: Option<&str>, event_key: Option<&str>) -> Message {
         Message {
+            log_key: None,
             id: 1,
             timestamp: chrono::DateTime::from_timestamp(ts, 0).unwrap(),
             message_type: event_key.map_or(MessageType::Message, |_| MessageType::Event),
@@ -881,6 +885,8 @@ mod tests {
             log_msg_id: log_id.map(str::to_owned),
             log_ref_id: None,
             tags: None,
+            wire_origin: None,
+            translation_suffix_at: None,
         }
     }
 

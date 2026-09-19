@@ -154,6 +154,31 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 is_credential: false,
             })
         }
+        "translate" => {
+            // `buffers` is not exposed here: it is a per-buffer map, managed
+            // by `/translate addin|delin|addout|delout`, and a dotted-path
+            // setter has no sane spelling for it.
+            let val = match parts.as_slice() {
+                ["translate", "enabled"] => config.translate.enabled.to_string(),
+                ["translate", "backend"] => config.translate.backend.clone(),
+                ["translate", "my_lang"] => config.translate.my_lang.clone(),
+                ["translate", "show_original_in"] => config.translate.show_original_in.to_string(),
+                ["translate", "show_original_out"] => {
+                    config.translate.show_original_out.to_string()
+                }
+                ["translate", "timeout_ms"] => config.translate.timeout_ms.to_string(),
+                ["translate", "max_in_flight"] => config.translate.max_in_flight.to_string(),
+                ["translate", "max_queue"] => config.translate.max_queue.to_string(),
+                ["translate", "ai", "preferred_attempt_ms"] => {
+                    config.translate.ai.preferred_attempt_ms.to_string()
+                }
+                _ => return None,
+            };
+            Some(Resolved {
+                value: val,
+                is_credential: false,
+            })
+        }
         "spellcheck" => {
             let val = match parts[1] {
                 "enabled" => config.spellcheck.enabled.to_string(),
@@ -237,6 +262,7 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "autosendcmd" => server.autosendcmd.clone().unwrap_or_default(),
                 "sasl_mechanism" => server.sasl_mechanism.clone().unwrap_or_default(),
                 "client_cert_path" => server.client_cert_path.clone().unwrap_or_default(),
+                "sasl_key_path" => server.sasl_key_path.clone().unwrap_or_default(),
                 _ => return None,
             };
             Some(Resolved {
@@ -433,6 +459,69 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
             }
             _ => return Err(format!("Unknown field: {path}")),
         },
+        "translate" => match parts.as_slice() {
+            ["translate", "enabled"] => config.translate.enabled = parse_bool(raw)?,
+            ["translate", "backend"] => {
+                // Rejected rather than stored-and-ignored: an unknown name
+                // installs nothing, and a config that asks for translation
+                // and silently does none is the failure this whole setting
+                // exists to make visible.
+                let want = raw.trim().to_ascii_lowercase();
+                if !crate::translate::backend::BACKEND_NAMES.contains(&want.as_str()) {
+                    return Err(format!(
+                        "translate.backend must be one of: {}",
+                        crate::translate::backend::BACKEND_NAMES.join(", ")
+                    ));
+                }
+                config.translate.backend = want;
+            }
+            ["translate", "my_lang"] => {
+                if raw.trim().is_empty() {
+                    return Err("translate.my_lang must not be empty".to_string());
+                }
+                config.translate.my_lang = raw.trim().to_lowercase();
+            }
+            ["translate", "show_original_in"] => {
+                config.translate.show_original_in = parse_bool(raw)?;
+            }
+            ["translate", "show_original_out"] => {
+                config.translate.show_original_out = parse_bool(raw)?;
+            }
+            ["translate", "timeout_ms"] => {
+                let v: u64 = raw.parse().map_err(|_| "Expected a number".to_string())?;
+                // Floor 500: below that a healthy provider would be cut off
+                // mid-flight and every line would render untranslated, which
+                // looks like a broken feature rather than a tight budget.
+                if v < 500 {
+                    return Err("translate.timeout_ms must be at least 500".to_string());
+                }
+                config.translate.timeout_ms = v;
+            }
+            ["translate", "max_in_flight"] => {
+                let v: u32 = raw.parse().map_err(|_| "Expected a number".to_string())?;
+                if v < 1 {
+                    return Err("translate.max_in_flight must be at least 1".to_string());
+                }
+                config.translate.max_in_flight = v;
+            }
+            ["translate", "max_queue"] => {
+                let v: u32 = raw.parse().map_err(|_| "Expected a number".to_string())?;
+                if v < 1 {
+                    return Err("translate.max_queue must be at least 1".to_string());
+                }
+                config.translate.max_queue = v;
+            }
+            ["translate", "ai", "preferred_attempt_ms"] => {
+                let v: u64 = raw.parse().map_err(|_| "Expected a number".to_string())?;
+                if v < 500 {
+                    return Err(
+                        "translate.ai.preferred_attempt_ms must be at least 500".to_string()
+                    );
+                }
+                config.translate.ai.preferred_attempt_ms = v;
+            }
+            _ => return Err(format!("Unknown field: {path}")),
+        },
         "shrink" => match parts[1] {
             "enabled" => config.shrink.enabled = parse_bool(raw)?,
             "api_url" => config.shrink.api_url = raw.to_string(),
@@ -585,8 +674,9 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                     );
                 }
                 "autosendcmd" => server.autosendcmd = Some(raw.to_string()),
-                "sasl_mechanism" => server.sasl_mechanism = Some(raw.to_string()),
+                "sasl_mechanism" => server.sasl_mechanism = Some(parse_sasl_mechanism(raw)?),
                 "client_cert_path" => server.client_cert_path = Some(raw.to_string()),
+                "sasl_key_path" => server.sasl_key_path = Some(raw.to_string()),
                 _ => return Err(format!("Unknown field: {path}")),
             }
         }
@@ -633,12 +723,44 @@ fn parse_u16(raw: &str) -> Result<u16, String> {
     raw.parse().map_err(|_| "Expected a number".to_string())
 }
 
+/// Validate a `sasl_mechanism` value, normalising it to its canonical spelling.
+///
+/// Unvalidated, a typo here fails silently at connect time: the mechanism does
+/// not resolve, SASL is skipped, and the user is left staring at an
+/// unauthenticated connection with no hint that `SCRAM-SHA256` is not a name.
+pub fn parse_sasl_mechanism(raw: &str) -> Result<String, String> {
+    crate::irc::SaslMechanism::from_name(raw)
+        .map(|m| m.name().to_string())
+        .ok_or_else(|| {
+            let names: Vec<&str> = crate::irc::SASL_MECHANISMS
+                .iter()
+                .map(|m| m.name())
+                .collect();
+            format!("Expected one of: {}", names.join(", "))
+        })
+}
+
 fn split_list(raw: &str) -> Vec<String> {
     raw.split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+fn server_password_env_key(path: &str) -> Option<String> {
+    let mut parts = path.split('.');
+    let (Some("servers"), Some(server_id), Some(field), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    let suffix = match field {
+        "password" => "PASSWORD",
+        "sasl_pass" => "SASL_PASS",
+        _ => return None,
+    };
+    Some(format!("{}_{suffix}", server_id.to_uppercase()))
 }
 
 // === Available setting paths for tab completion ===
@@ -734,6 +856,18 @@ const BASE_PATHS: &[&str] = &[
     "typing.show",
     "typing.send_channels",
     "typing.send_queries",
+    // Per-buffer translation settings are deliberately absent: they live in
+    // a map keyed by buffer id and are managed by `/translate add*|del*`,
+    // which a dotted `/set` path has no sane spelling for.
+    "translate.enabled",
+    "translate.backend",
+    "translate.my_lang",
+    "translate.show_original_in",
+    "translate.show_original_out",
+    "translate.timeout_ms",
+    "translate.max_in_flight",
+    "translate.max_queue",
+    "translate.ai.preferred_attempt_ms",
 ];
 
 const SERVER_FIELDS: &[&str] = &[
@@ -758,6 +892,7 @@ const SERVER_FIELDS: &[&str] = &[
     "autosendcmd",
     "sasl_mechanism",
     "client_cert_path",
+    "sasl_key_path",
 ];
 
 /// Get all valid setting paths for tab completion.
@@ -842,6 +977,14 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                     ev(app, &format!("{C_DIM}Password saved to .env{C_RST}"));
                 }
             }
+            if let Some(key) = server_password_env_key(path) {
+                let env_path = crate::constants::env_path();
+                if let Err(e) = crate::config::set_env_value(&env_path, &key, raw) {
+                    ev(app, &format!("{C_ERR}Failed to save to .env: {e}{C_RST}"));
+                } else {
+                    ev(app, &format!("{C_DIM}Credential saved to .env{C_RST}"));
+                }
+            }
 
             // Hot restart web server when lifecycle settings change.
             if matches!(
@@ -896,6 +1039,27 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                     app.create_mentions_buffer();
                 } else {
                     app.state.remove_buffer("_mentions");
+                }
+            }
+
+            // Mirror the translate config into state so the
+            // `add_message_with_activity` decision and the request payloads
+            // match the freshly-set config without a restart. The backend and
+            // worker queues are bound at startup, so flipping
+            // `translate.enabled` from off to on at runtime cannot
+            // materialise a backend — say so rather than silently doing
+            // nothing.
+            if path.starts_with("translate.") {
+                app.sync_translate_from_config();
+                if let Some(backend) = &app.translate_backend {
+                    backend.refresh_config(&app.config.translate);
+                }
+                // `backend` has the same restart caveat as `enabled` and for
+                // the same reason — naming a translator cannot conjure the
+                // workers that were bound at startup. Warning on only one of
+                // the two switches is how the quieter one comes to lie.
+                if path == "translate.enabled" || path == "translate.backend" {
+                    crate::commands::helpers::warn_if_translate_cannot_run(app);
                 }
             }
 
@@ -1137,6 +1301,20 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
         ),
         ("emotes", &["enabled", "render", "lang"]),
         ("typing", &["show", "send_channels", "send_queries"]),
+        (
+            "translate",
+            &[
+                "enabled",
+                "backend",
+                "my_lang",
+                "show_original_in",
+                "show_original_out",
+                "timeout_ms",
+                "max_in_flight",
+                "max_queue",
+                "ai.preferred_attempt_ms",
+            ],
+        ),
     ];
 
     for &(section, fields) in sections {
@@ -1404,11 +1582,130 @@ mod tests {
                 autosendcmd: None,
                 sasl_mechanism: None,
                 client_cert_path: None,
+                sasl_key_path: None,
             },
         );
         let paths = get_setting_paths(&config);
         assert!(paths.contains(&"servers.test.port".to_string()));
         assert!(paths.contains(&"servers.test.tls".to_string()));
+        assert!(paths.contains(&"servers.test.sasl_key_path".to_string()));
+    }
+
+    /// A server entry that `/set` can be pointed at.
+    fn config_with_server() -> AppConfig {
+        let mut config = default_config();
+        config.servers.insert(
+            "net".to_string(),
+            crate::config::ServerConfig {
+                label: "Net".to_string(),
+                address: "irc.test.net".to_string(),
+                port: 6697,
+                tls: true,
+                tls_verify: true,
+                autoconnect: false,
+                channels: vec![],
+                nick: None,
+                username: None,
+                realname: None,
+                password: None,
+                sasl_user: None,
+                sasl_pass: None,
+                bind_ip: None,
+                encoding: None,
+                auto_reconnect: None,
+                reconnect_delay: None,
+                reconnect_max_retries: None,
+                autosendcmd: None,
+                sasl_mechanism: None,
+                client_cert_path: None,
+                sasl_key_path: None,
+            },
+        );
+        config
+    }
+
+    #[test]
+    fn every_sasl_mechanism_can_be_set_and_read_back() {
+        let mut config = config_with_server();
+        for mech in crate::irc::SASL_MECHANISMS {
+            set_config_value(&mut config, "servers.net.sasl_mechanism", mech.name())
+                .unwrap_or_else(|e| panic!("{} should be settable: {e}", mech.name()));
+            assert_eq!(
+                get_config_value(&config, "servers.net.sasl_mechanism")
+                    .unwrap()
+                    .value,
+                mech.name()
+            );
+        }
+
+        // Lowercase input is normalised to the canonical spelling, so the
+        // stored value always matches what the protocol code compares against.
+        set_config_value(&mut config, "servers.net.sasl_mechanism", "scram-sha-512").unwrap();
+        assert_eq!(
+            get_config_value(&config, "servers.net.sasl_mechanism")
+                .unwrap()
+                .value,
+            "SCRAM-SHA-512"
+        );
+    }
+
+    #[test]
+    fn server_passwords_map_to_their_env_keys() {
+        for (path, expected) in [
+            ("servers.libera.password", Some("LIBERA_PASSWORD")),
+            ("servers.libera.sasl_user", None),
+            ("servers.libera.sasl_pass", Some("LIBERA_SASL_PASS")),
+            ("servers.libera.nick", None),
+        ] {
+            assert_eq!(server_password_env_key(path).as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn a_misspelled_sasl_mechanism_is_rejected_with_the_valid_names() {
+        let mut config = config_with_server();
+        // Unvalidated, this would be accepted and then silently skip SASL at
+        // connect time — the failure mode this check exists to prevent.
+        let err = set_config_value(&mut config, "servers.net.sasl_mechanism", "SCRAM-SHA256")
+            .unwrap_err();
+        assert!(err.contains("SCRAM-SHA-256"), "{err}");
+        assert!(err.contains("PLAIN"), "{err}");
+        assert!(err.contains("ECDSA-NIST256P-CHALLENGE"), "{err}");
+        assert!(config.servers["net"].sasl_mechanism.is_none());
+
+        // We do not implement channel binding, so -PLUS must not be storable.
+        assert!(
+            set_config_value(&mut config, "servers.net.sasl_mechanism", "SCRAM-SHA-256-PLUS")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn the_ecdsa_key_path_is_settable_and_survives_a_config_round_trip() {
+        let mut config = config_with_server();
+        set_config_value(&mut config, "servers.net.sasl_key_path", "libera.pem").unwrap();
+        assert_eq!(
+            get_config_value(&config, "servers.net.sasl_key_path")
+                .unwrap()
+                .value,
+            "libera.pem"
+        );
+        // A path, not a credential — so unlike sasl_pass it belongs in
+        // config.toml and must survive being written and read back.
+        assert!(
+            !get_config_value(&config, "servers.net.sasl_key_path")
+                .unwrap()
+                .is_credential
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        crate::config::save_config(&path, &config).unwrap();
+        let reloaded = crate::config::load_config(&path).unwrap();
+        assert_eq!(
+            reloaded.servers["net"].sasl_key_path.as_deref(),
+            Some("libera.pem")
+        );
     }
 
     #[test]
@@ -1440,8 +1737,52 @@ mod tests {
         // Invalid render value is rejected.
         assert!(set_config_value(&mut config, "emotes.render", "bogus").is_err());
         // emotes.* paths are advertised as settable.
+        assert!(BASE_PATHS.contains(&"translate.enabled"));
+        assert!(BASE_PATHS.contains(&"translate.my_lang"));
         assert!(BASE_PATHS.contains(&"emotes.enabled"));
         assert!(BASE_PATHS.contains(&"emotes.render"));
+    }
+
+    #[test]
+    fn get_set_translate_backend() {
+        // The name of the translator is a setting in its own right, not
+        // something `enabled` implies. A value this build has no
+        // implementation for is REJECTED rather than stored: accepted-and-
+        // ignored would leave the user with a config that reads like
+        // translation is on and a client that translates nothing.
+        let mut config = default_config();
+        assert_eq!(
+            get_config_value(&config, "translate.backend").unwrap().value,
+            "none",
+            "no translator is the default — the only implementation that \
+             exists on this branch is a test stub"
+        );
+        set_config_value(&mut config, "translate.backend", "stub").unwrap();
+        assert_eq!(config.translate.backend, "stub");
+        // Hand-typed, so spelling is normalised the way the reader is.
+        set_config_value(&mut config, "translate.backend", "  NONE ").unwrap();
+        assert_eq!(config.translate.backend, "none");
+        let err = set_config_value(&mut config, "translate.backend", "gogle")
+            .expect_err("an unknown translator must not be accepted");
+        assert!(
+            err.contains("none") && err.contains("stub"),
+            "the error has to say what the valid names are: {err}"
+        );
+        assert_eq!(config.translate.backend, "none", "and nothing was stored");
+        assert!(BASE_PATHS.contains(&"translate.backend"));
+    }
+
+    #[test]
+    fn get_set_translate_preferred_attempt_budget() {
+        let mut config = default_config();
+        let path = "translate.ai.preferred_attempt_ms";
+
+        assert_eq!(get_config_value(&config, path).unwrap().value, "3000");
+        set_config_value(&mut config, path, "4500").unwrap();
+        assert_eq!(config.translate.ai.preferred_attempt_ms, 4_500);
+        assert_eq!(get_config_value(&config, path).unwrap().value, "4500");
+        assert!(set_config_value(&mut config, path, "499").is_err());
+        assert!(BASE_PATHS.contains(&path));
     }
 
     #[test]

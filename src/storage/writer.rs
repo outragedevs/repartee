@@ -128,6 +128,9 @@ fn flush(
     for row in &queue {
         let msg_type_str = format!("{:?}", row.msg_type).to_lowercase();
         let highlight_int = i32::from(row.highlight);
+        let translation_suffix_at = row
+            .translation_suffix_at
+            .and_then(|offset| i64::try_from(offset).ok());
 
         let (stored_text, iv): (String, Option<Vec<u8>>) = match crypto_key {
             Some(key) => match crypto::encrypt(&row.text, key) {
@@ -145,8 +148,8 @@ fn flush(
         // its CHATHISTORY replay share the server @msgid) is silently skipped by
         // the unique index instead of raising an error we'd log as a failure.
         if let Err(e) = conn.execute(
-            "INSERT OR IGNORE INTO messages (msg_id, network, buffer, timestamp, ts_ms, type, nick, text, highlight, iv, ref_id, tags, event_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT OR IGNORE INTO messages (msg_id, network, buffer, timestamp, ts_ms, type, nick, text, translation_suffix_at, highlight, iv, ref_id, tags, event_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 row.msg_id,
                 row.network,
@@ -156,6 +159,7 @@ fn flush(
                 msg_type_str,
                 row.nick,
                 stored_text,
+                translation_suffix_at,
                 highlight_int,
                 iv,
                 row.ref_id,
@@ -201,6 +205,7 @@ mod tests {
             msg_type: MessageType::Message,
             nick: Some("alice".into()),
             text: text.into(),
+            translation_suffix_at: None,
             highlight: false,
             ref_id: None,
             tags: None,
@@ -328,6 +333,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fts_count, 1);
+    }
+
+    #[tokio::test]
+    async fn writer_preserves_translation_suffix_boundary() {
+        let db = Arc::new(Mutex::new(open_database(false).unwrap()));
+        let (handle, tx) = LogWriterHandle::spawn(Arc::clone(&db), None);
+        let mut row = make_row("dzień dobry [guten tag]");
+        row.translation_suffix_at = Some("dzień dobry".len());
+        tx.send(row).await.unwrap();
+        handle.shutdown().await;
+
+        let rows = crate::storage::query::get_messages(
+            &db.lock().unwrap(),
+            "testnet",
+            "#test",
+            None,
+            1,
+            false,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(rows[0].translation_suffix_at, Some("dzień dobry".len()));
     }
 
     #[tokio::test]

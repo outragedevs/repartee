@@ -133,8 +133,16 @@ impl App {
             });
 
         let t = tx.clone();
+        let snap = Arc::clone(&snapshot);
         let switch_buffer: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |buffer_id| {
-            let _ = t.try_send(ScriptAction::SwitchBuffer { buffer_id });
+            let Ok(mut state) = snap.write() else {
+                return;
+            };
+            if t.try_send(ScriptAction::SwitchBuffer {
+                buffer_id: buffer_id.clone(),
+            }).is_ok() {
+                state.active_buffer_id = Some(buffer_id);
+            }
         });
 
         let t = tx.clone();
@@ -377,6 +385,19 @@ impl App {
     /// Process a single `ScriptAction` from the scripting channel.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn handle_script_action(&mut self, action: crate::scripting::ScriptAction) {
+        // Nobody typed this. Marking the origin keeps a refused script send
+        // from injecting its payload into the user's composer, where they
+        // could send it by accident.
+        let prior_origin = std::mem::replace(
+            &mut self.submit_origin,
+            crate::app::translate::SubmitOrigin::Script,
+        );
+        self.handle_script_action_inner(action);
+        self.submit_origin = prior_origin;
+    }
+
+    #[allow(clippy::too_many_lines, reason = "one arm per ScriptAction variant")]
+    fn handle_script_action_inner(&mut self, action: crate::scripting::ScriptAction) {
         use crate::scripting::ScriptAction;
         match action {
             ScriptAction::Say {
@@ -540,6 +561,9 @@ impl App {
                 if self.state.buffers.contains_key(&buffer_id) {
                     self.state.set_active_buffer(&buffer_id);
                     self.scroll_offset = 0;
+                }
+                if let Ok(mut snapshot) = self.script_state.write() {
+                    snapshot.active_buffer_id.clone_from(&self.state.active_buffer_id);
                 }
             }
             ScriptAction::ExecuteCommand { line } => {
@@ -887,4 +911,100 @@ pub fn typing_script_params(
         ("target".to_string(), target.to_string()),
         ("state".to_string(), typing_state.as_str().to_string()),
     ]))
+}
+
+#[cfg(test)]
+mod buffer_switch_tests {
+    use super::*;
+    use crate::scripting::ScriptAction;
+    use crate::scripting::engine::{BufferInfo, ConnectionInfo, ScriptEngine, ScriptStateSnapshot};
+    use crate::scripting::event_bus::Event;
+    use crate::scripting::lua::LuaEngine;
+    use std::sync::RwLock;
+    use std::sync::atomic::AtomicU64;
+
+    fn snapshot() -> Arc<RwLock<ScriptStateSnapshot>> {
+        Arc::new(RwLock::new(ScriptStateSnapshot {
+            active_buffer_id: Some("a".into()),
+            buffers: ["a", "b", "c"].into_iter().map(|id| BufferInfo {
+                id: id.into(), connection_id: id.into(), name: id.into(),
+                buffer_type: "channel".into(), topic: None, unread_count: 0,
+            }).collect(),
+            connections: ["a", "b", "c"].into_iter().map(|id| ConnectionInfo {
+                id: id.into(), label: id.into(), nick: format!("nick-{id}"),
+                connected: true, user_modes: String::new(),
+            }).collect(),
+            ..ScriptStateSnapshot::default()
+        }))
+    }
+
+    #[test]
+    fn lua_callback_observes_multiple_switches_and_their_connection() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let snap = snapshot();
+        let api = App::build_script_api(tx, snap.clone(), Arc::new(AtomicU64::new(0)));
+        let script = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(script.path(), r#"
+            meta = { name = "switch_read_test" }
+            function setup(api)
+                api.on("probe", function()
+                    assert(api.store.active_buffer() == "a")
+                    for _, id in ipairs({"b", "c", "a", "c"}) do
+                        api.ui.switch_buffer(id)
+                        assert(api.store.active_buffer() == id)
+                        assert(api.store.our_nick() == "nick-" .. id)
+                    end
+                    api.ui.print("verified")
+                end)
+            end
+        "#).unwrap();
+        let mut engine = LuaEngine::new().unwrap();
+        engine.load_script(script.path(), &api).unwrap();
+        engine.emit(&Event { name: "probe".into(), params: HashMap::new() });
+        let mut switches = Vec::new();
+        let mut verified = false;
+        while let Ok(action) = rx.try_recv() {
+            match action {
+                ScriptAction::SwitchBuffer { buffer_id } => switches.push(buffer_id),
+                ScriptAction::LocalEvent { text } => verified = text == "verified",
+                _ => {}
+            }
+        }
+        assert!(verified, "the Lua callback must reach its final assertion");
+        assert_eq!(switches, ["b", "c", "a", "c"]);
+        assert_eq!(snap.read().unwrap().active_buffer_id.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn targets_missing_from_the_snapshot_are_validated_when_applied() {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let (tx, mut rx) = mpsc::channel(4);
+        let api = App::build_script_api(tx, app.script_state.clone(), Arc::new(AtomicU64::new(0)));
+        (api.switch_buffer)("net/new".into());
+        assert_eq!((api.active_buffer_id)(()).as_deref(), Some("net/new"));
+        app.state.add_buffer(crate::state::buffer::Buffer::for_test(
+            "net", crate::state::buffer::BufferType::Query, "new",
+        ));
+        app.handle_script_action(rx.try_recv().unwrap());
+        assert_eq!(app.state.active_buffer_id.as_deref(), Some("net/new"));
+        (api.switch_buffer)("missing".into());
+        assert_eq!((api.active_buffer_id)(()).as_deref(), Some("missing"));
+        app.handle_script_action(rx.try_recv().unwrap());
+        assert_eq!(app.state.active_buffer_id.as_deref(), Some("net/new"));
+        assert_eq!((api.active_buffer_id)(()).as_deref(), Some("net/new"));
+    }
+
+    #[test]
+    fn rejected_switches_do_not_change_the_read_snapshot() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let snap = snapshot();
+        let api = App::build_script_api(tx, snap, Arc::new(AtomicU64::new(0)));
+        (api.switch_buffer)("b".into());
+        (api.switch_buffer)("c".into());
+        assert_eq!((api.active_buffer_id)(()).as_deref(), Some("b"));
+        assert!(matches!(rx.try_recv().unwrap(), ScriptAction::SwitchBuffer { buffer_id } if buffer_id == "b"));
+        drop(rx);
+        (api.switch_buffer)("a".into());
+        assert_eq!((api.active_buffer_id)(()).as_deref(), Some("b"));
+    }
 }

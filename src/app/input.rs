@@ -113,17 +113,7 @@ impl App {
             }
         } else {
             // 1..9 map to real buffers (excluding _default)
-            let real_ids: Vec<_> = self
-                .state
-                .sorted_buffer_ids()
-                .into_iter()
-                .filter(|id| {
-                    self.state
-                        .buffers
-                        .get(id.as_str())
-                        .is_none_or(|b| b.connection_id != Self::DEFAULT_CONN_ID)
-                })
-                .collect();
+            let real_ids = self.state.numbered_buffer_ids();
             let idx = n - 1; // 1 = index 0
             if idx < real_ids.len() {
                 self.state.set_active_buffer(&real_ids[idx]);
@@ -666,24 +656,14 @@ impl App {
         );
         self.buffer_list_scroll = clamped_scroll;
         let logical_row = y_offset + clamped_scroll;
-        let sorted_ids = self.state.sorted_buffer_ids();
-        // Every non-default buffer occupies one row — matches the renderer.
-        let mut row = 0usize;
-        for id in &sorted_ids {
-            let Some(buf) = self.state.buffers.get(id.as_str()) else {
-                continue;
-            };
-            if buf.connection_id == Self::DEFAULT_CONN_ID {
-                continue;
-            }
-            if row == logical_row {
-                self.state.set_active_buffer(id);
-                self.scroll_offset = 0;
-                self.nick_list_scroll = 0;
-                self.update_shell_input_state();
-                return;
-            }
-            row += 1;
+        // Every numbered buffer occupies exactly one row — matches the renderer.
+        let numbered = self.state.numbered_buffer_ids();
+        if let Some(id) = numbered.get(logical_row) {
+            let id = id.clone();
+            self.state.set_active_buffer(&id);
+            self.scroll_offset = 0;
+            self.nick_list_scroll = 0;
+            self.update_shell_input_state();
         }
     }
 
@@ -1388,6 +1368,7 @@ impl App {
                     self.state.add_message(
                         &active_id,
                         Message {
+                            log_key: None,
                             id: msg_id,
                             timestamp: chrono::Utc::now(),
                             message_type: MessageType::Message,
@@ -1400,6 +1381,8 @@ impl App {
                             log_msg_id: None,
                             log_ref_id: None,
                             tags: None,
+                            wire_origin: None,
+                            translation_suffix_at: None,
                         },
                     );
                 }
@@ -1451,6 +1434,53 @@ impl App {
         // cannot be ruled out and fall through to the synchronous path, where
         // the original URL is encrypted on the wire like the rest of the message.
         let e2e_possible = self.state.e2e_possible_for_target(&conn_id, &buffer_name);
+
+        // Outgoing translation runs BEFORE shrink and, like it, is skipped
+        // entirely whenever E2E cannot be ruled out — for exactly the same
+        // reason, and on the same fail-closed predicate: the translation
+        // worker sends the cleartext to a third-party provider before the
+        // E2E gate ever runs.
+        //
+        // Nothing reaches the wire here. The worker posts the outcome back
+        // and `send_outgoing_translated` runs the rest of the pipeline
+        // seconds later, or refuses and hands the text back to the user.
+        // The whole outgoing policy lives in one place; see
+        // `outgoing_translate_policy`. Once translation is REQUIRED, every
+        // way of not completing it refuses — falling through would put text
+        // on a channel in a language the user did not choose.
+        //
+        // This is the opposite policy to shrink below, which falls through by
+        // design: an unshortened URL is still the message the user wrote.
+        match self.outgoing_translate_policy(&active_id, text, e2e_possible) {
+            crate::app::translate::OutgoingTranslatePolicy::NotApplicable => {}
+            crate::app::translate::OutgoingTranslatePolicy::Refuse(reason) => {
+                return self.refuse_untranslatable_send(text, reason);
+            }
+            crate::app::translate::OutgoingTranslatePolicy::Translate => {
+                // ONE dispatch path, shared with the by-target senders. This
+                // arm used to hand-copy `dispatch_by_target_translation` —
+                // reserve, note, try_send, and the release-and-refuse
+                // failure arms — and the reservation-leak class this branch
+                // has fixed repeatedly is exactly what two hand-synchronised
+                // copies of a release protocol breed. The retry form is the
+                // bare text: typed into the buffer, it retries as itself.
+                return self.dispatch_by_target_translation(
+                    &crate::app::translate::OutgoingRequest {
+                        conn_id: &conn_id,
+                        buffer_id: &active_id,
+                        buffer_name: &buffer_name,
+                        buffer_type: &buf_type,
+                        nick: &nick,
+                        text,
+                        is_action: false,
+                        // Typed into the buffer: the existing echo rule.
+                        echo: crate::app::translate::OutgoingEchoPlan::BufferInput,
+                    },
+                    text,
+                );
+            }
+        }
+
         if !e2e_possible
             && self.config.shrink.enabled
             && self.config.shrink.outgoing_enabled
@@ -1464,7 +1494,6 @@ impl App {
                 .connections
                 .get(&conn_id)
                 .map_or_else(|| nick.clone(), |c| c.nick.clone());
-            let captured_own_mode = self.state.nick_prefix(&active_id, &captured_nick);
             // Resolve the FULL E2E peer handle now, while the buffer still
             // exists: its live peer_handle OR the network-scoped cached handle
             // `/e2e on` keyed its config under. Capturing only `b.peer_handle`
@@ -1494,7 +1523,6 @@ impl App {
                 original_text: text.to_string(),
                 urls: pre_extracted_urls,
                 nick: captured_nick,
-                own_mode: captured_own_mode,
                 peer_handle: captured_peer_handle,
             };
             // `try_send` rather than blocking — the queue is sized
@@ -1633,6 +1661,7 @@ impl App {
                     self.state.add_message(
                         &active_id,
                         Message {
+                            log_key: None,
                             id,
                             timestamp: chrono::Utc::now(),
                             message_type: MessageType::Message,
@@ -1645,6 +1674,8 @@ impl App {
                             log_msg_id: None,
                             log_ref_id: None,
                             tags: None,
+                            wire_origin: None,
+                            translation_suffix_at: None,
                         },
                     );
                 }
@@ -1687,6 +1718,7 @@ impl App {
                         self.state.add_message(
                             &active_id,
                             Message {
+                                log_key: None,
                                 id,
                                 timestamp: chrono::Utc::now(),
                                 message_type: MessageType::Message,
@@ -1699,6 +1731,8 @@ impl App {
                                 log_msg_id: None,
                                 log_ref_id: None,
                                 tags: None,
+                                wire_origin: None,
+                                translation_suffix_at: None,
                             },
                         );
                     }
@@ -1740,6 +1774,7 @@ impl App {
                 self.state.add_message(
                     &active_id,
                     Message {
+                        log_key: None,
                         id,
                         timestamp: chrono::Utc::now(),
                         message_type: MessageType::Message,
@@ -1752,6 +1787,8 @@ impl App {
                         log_msg_id: None,
                         log_ref_id: None,
                         tags: None,
+                        wire_origin: None,
+                        translation_suffix_at: None,
                     },
                 );
             } else {
@@ -1767,6 +1804,7 @@ impl App {
                     self.state.add_message(
                         &active_id,
                         Message {
+                            log_key: None,
                             id,
                             timestamp: chrono::Utc::now(),
                             message_type: MessageType::Message,
@@ -1779,6 +1817,8 @@ impl App {
                             log_msg_id: None,
                             log_ref_id: None,
                             tags: None,
+                            wire_origin: None,
+                            translation_suffix_at: None,
                         },
                     );
                 }
@@ -2290,7 +2330,7 @@ mod tests {
 /// the fixture builds the struct directly — the same reason `send_typing_frame`
 /// exists as a free function over borrowed state.
 #[cfg(test)]
-mod submit_typing_tests {
+pub mod submit_typing_tests {
     #![allow(clippy::unwrap_used, reason = "test code")]
 
     use super::{App, BufferType};
@@ -2755,7 +2795,9 @@ mod submit_typing_tests {
         }
     }
 
-    fn make_connection() -> Connection {
+    /// Also used by the translate tests, which need a connection whose
+    /// `enabled_caps` they can set.
+    pub fn make_connection() -> Connection {
         Connection {
             id: "net".to_string(),
             label: "NetServer".to_string(),
@@ -2795,6 +2837,7 @@ mod submit_typing_tests {
                 autosendcmd: None,
                 sasl_mechanism: None,
                 client_cert_path: None,
+                sasl_key_path: None,
             },
             local_ip: None,
             enabled_caps: std::collections::HashSet::from(["message-tags".to_string()]),
@@ -2814,7 +2857,7 @@ mod submit_typing_tests {
         clippy::too_many_lines,
         reason = "one line per App field — a struct literal cannot be shortened"
     )]
-    fn test_app() -> App {
+    pub fn test_app() -> App {
         let mut state = crate::state::AppState::new();
         let db = crate::storage::db::open_database(false).unwrap();
         let keyring = crate::e2e::keyring::Keyring::new(Arc::new(Mutex::new(db)));
@@ -2837,6 +2880,11 @@ mod submit_typing_tests {
         // entirely, so nothing here is ever read.
         let (shrink_outgoing_tx, _shrink_outgoing_rx) = mpsc::channel(16);
         let (shrink_deliver_tx, shrink_deliver_rx) = mpsc::channel(16);
+        // Same reasoning as shrink above: hand-rolled so no tokio reactor is
+        // needed. `state.translate_active` stays false, so the submit path
+        // never dispatches and these are never read.
+        let (translate_outgoing_tx, _translate_outgoing_rx) = mpsc::channel(16);
+        let (translate_deliver_tx, translate_deliver_rx) = mpsc::channel(16);
 
         App {
             state,
@@ -2929,6 +2977,7 @@ mod submit_typing_tests {
             web_rate_limiter: None,
             web_state_snapshot: None,
             web_active_buffers: HashMap::new(),
+            web_buffer_unconfirmed: std::collections::HashSet::new(),
             web_restart_pending: false,
             last_day: chrono::Local::now().date_naive(),
             shrink_client: None,
@@ -2936,6 +2985,21 @@ mod submit_typing_tests {
             shrink_outgoing_tx,
             shrink_deliver_tx,
             shrink_deliver_rx,
+            translate_outgoing_tx,
+            translate_deliver_rx,
+            translate_deliver_tx,
+            translate_backend: None,
+            translate_follows: Vec::new(),
+            translate_in_flight: None,
+            submit_origin: crate::app::translate::SubmitOrigin::Tui,
+            conn_generations: std::collections::HashMap::new(),
+            translate_timeout_ms: None,
+            // NEVER the real config path: a handler that saves would clobber
+            // the developer's own configuration during `cargo test`.
+            config_path: std::env::temp_dir().join(format!(
+                "{}-test-config-do-not-use.toml",
+                crate::constants::APP_NAME
+            )),
             cli_bind_override: None,
             typing: crate::app::typing::TypingSender::default(),
         }

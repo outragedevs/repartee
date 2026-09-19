@@ -1,5 +1,5 @@
 ---
-category: Scripts
+category: Configuration
 description: Manage user scripts
 ---
 

@@ -192,10 +192,7 @@ pub struct GapfillContinuation {
 /// Returns [`GapfillContinuation`] when a reconnect `AFTER` gap-fill page came
 /// back full (the gap is larger than one page); the App caller then issues the
 /// next `AFTER`. `None` for every other case.
-#[expect(
-    clippy::too_many_lines,
-    reason = "batch-type dispatch; the CHATHISTORY arm is large but cohesive"
-)]
+#[allow(clippy::too_many_lines)]
 pub fn process_completed_batch(
     state: &mut AppState,
     conn_id: &str,
@@ -621,6 +618,7 @@ fn process_netsplit_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo
         state.add_message(
             buf_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: ts,
                 message_type: MessageType::Event,
@@ -633,6 +631,8 @@ fn process_netsplit_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
+                wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -699,6 +699,7 @@ fn process_netjoin_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo)
         state.add_message(
             buf_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: ts,
                 message_type: MessageType::Event,
@@ -711,6 +712,8 @@ fn process_netjoin_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo)
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
+                wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -816,6 +819,7 @@ mod tests {
             autosendcmd: None,
             sasl_mechanism: None,
             client_cert_path: None,
+            sasl_key_path: None,
         }
     }
 
@@ -1611,6 +1615,7 @@ mod tests {
             .unwrap()
             .messages
             .push_back(Message {
+                log_key: None,
                 id: 1,
                 timestamp: live_ts,
                 message_type: MessageType::Message,
@@ -1623,6 +1628,8 @@ mod tests {
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: Some(live_tags),
+                wire_origin: None,
+                translation_suffix_at: None,
             });
 
         // A reconnect AFTER gap-fill is in flight for this target.

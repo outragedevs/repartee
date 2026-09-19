@@ -25,7 +25,7 @@ Terminal, mobile web, and desktop web — all in real-time sync:
 
 - **Full IRC protocol** — channels, queries, CTCP, TLS, channel modes, ban/except/invex lists
 - **IRCv3** — server-time, echo-message, away-notify, account-notify, chghost, multi-prefix, BATCH netsplit grouping, message-tags, and more
-- **SASL** — PLAIN, EXTERNAL (client certificate), and SCRAM-SHA-256
+- **SASL** — PLAIN, EXTERNAL (client certificate), SCRAM-SHA-1/256/512, and ECDSA-NIST256P-CHALLENGE, auto-detected strongest-first
 - **irssi-style navigation** — Esc+1–9 window switching, aliases, familiar `/commands`
 - **Mouse support** — click buffers and nicks, scroll chat history
 - **Lua 5.4 scripting** — event bus, custom commands, full IRC and state access, sandboxed per-script environments
@@ -60,7 +60,7 @@ Download from [GitHub Releases](https://github.com/outragedevs/repartee/releases
 ### From crates.io
 
 ```bash
-cargo install repartee
+cargo install --locked repartee
 ```
 
 ### From source
@@ -74,7 +74,7 @@ make release
 
 ### Requirements
 
-- **Build**: Rust 1.85+ (2024 edition) — install via [rustup](https://rustup.rs)
+- **Build**: Rust 1.91+ — install via [rustup](https://rustup.rs). The 2024 edition needs 1.85 and the dependency graph 1.90; repartee itself uses 1.91 APIs.
 - A terminal with 256-color or truecolor support (iTerm2, Alacritty, kitty, WezTerm, Ghostty, Subterm, etc.)
 - A modern web browser for the web frontend (optional)
 
@@ -86,6 +86,7 @@ Launch repartee:
 
 ```bash
 repartee
+repartee --help   # every launch flag, subcommand, and path repartee uses
 ```
 
 Add a server and connect:
@@ -259,6 +260,17 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 ---
 
 ## Changelog
+
+### v2.0.0
+
+- **Live AI translation for IRC conversations.** Translation can be enabled independently for incoming and outgoing traffic on each channel or query, with separate conversation and personal languages. Translated lines can retain a dimmed original, and the display boundary is persisted in SQLite so history looks the same after restart. `/translate` manages mappings at runtime, while `/set translate.*` exposes timeouts, concurrency, queue limits, language defaults, and backend selection.
+- **Resilient multi-provider routing.** The new AI backend supports OpenAI-compatible providers including OpenRouter, Ollama-compatible endpoints, Gemini, StepFun, and Groq. Policies route German and general text separately, enforce per-model attempt budgets, and reserve Groq as the terminal fallback when preferred providers do not answer in time. Authentication rotation, provider rate limits, `Retry-After`, bounded response bodies, model fallbacks, and live configuration reloads are handled without restarting the daemon.
+- **Translation safety and privacy gates.** URLs, channels, nicknames, technical identifiers, and IRC formatting are masked before provider calls and validated on return. Unsupported languages are rejected before disclosure; wrong-language, partial, refusal, meta-text, malformed placeholder, and line-breaking responses fall through instead of being sent under the user's nick. Outgoing translation fails closed and restores the original composer text when no trustworthy result is available; RPE2E traffic is never disclosed to a translation provider.
+- **Ordered asynchronous delivery.** Per-conversation queues keep translated messages in submission order without blocking unrelated buffers. The runtime handles reconnects, nick changes and reuse, closed queries, echo-message reflection, multiline messages, actions, queue pressure, timeouts, and partial send failures while preserving the only recoverable copy of outgoing text.
+- **Modern SASL authentication.** In addition to PLAIN and EXTERNAL, repartee now supports SCRAM-SHA-1, SCRAM-SHA-256, SCRAM-SHA-512, and ECDSA-NIST256P-CHALLENGE, including chunked AUTHENTICATE reassembly and automatic selection of the strongest mechanism offered by the server. The command line, `/set`, terminal wizard, web wizard, and documentation expose the same mechanism set.
+- **Self-contained and complete help.** `repartee --help` now documents startup modes and flags before runtime initialization. Runtime `/help` is generated from command documentation embedded in the binary, supports structured subcommand help and completion, and is guarded by tests requiring every registered command to have matching documentation, category, and syntax.
+- **IRC and interface improvements.** `/close` and `/wc` can close numbered windows or ranges with safeguards for Mentions and server buffers. WHOIS numerics have complete themed rendering, the TUI and web buffer lists show typing and E2E state icons, and E2E locks refresh immediately after peer resolution or keyring import.
+- **Upgrade and release hardening.** Existing configuration and SQLite data migrate automatically; translation remains disabled until explicitly configured. Configuration writes remain atomic, generated documentation is checked for source parity, Linux ARM64 release binaries support 4, 16, and 64 KiB page-size kernels, and the documented MSRV is Rust 1.91.
 
 ### v1.7.0
 

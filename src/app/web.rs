@@ -34,6 +34,7 @@ impl App {
         self.state.add_message(
             &buffer_id,
             crate::state::buffer::Message {
+                log_key: None,
                 id,
                 timestamp: chrono::Utc::now(),
                 message_type: crate::state::buffer::MessageType::Event,
@@ -46,6 +47,8 @@ impl App {
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
+                wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -69,6 +72,7 @@ impl App {
         self.web_rate_limiter = None;
         self.web_state_snapshot = None;
         self.web_active_buffers.clear();
+        self.web_buffer_unconfirmed.clear();
         // Detach the preview extractor from AppState too — otherwise
         // message_to_wire keeps populating `previews` for messages that
         // no client can render.
@@ -234,6 +238,14 @@ impl App {
                     // so a followed session would render an unusable ShellView
                     // and have its shell I/O rejected. Don't propagate a switch
                     // into a shell (e.g. the TUI opening its own /shell).
+                    //
+                    // Decided BEFORE the confirmation bookkeeping below: an
+                    // event no browser is ever sent cannot have moved a tab, so
+                    // doubting every session afterwards invents doubt out of
+                    // nothing — and the doubt is not free. A session marked
+                    // unconfirmed has a failed send WITHHELD from its composer
+                    // by `deferred_retry_text`, which is the one path where
+                    // getting the text back is the point.
                     if self
                         .state
                         .buffers
@@ -242,9 +254,26 @@ impl App {
                     {
                         continue;
                     }
+                    // A tab that follows this changes buffer without telling
+                    // us, and the opt-out lives in the browser, so afterwards
+                    // the recorded buffer is a guess — except for a session
+                    // already recorded AT the new buffer, which ends up there
+                    // whether it followed or not. That exemption is what keeps
+                    // a session's own `SwitchBuffer` from immediately marking
+                    // itself unconfirmed: the switch that raised this event is
+                    // the same one that recorded it. See
+                    // `App::web_buffer_unconfirmed`.
+                    for (session, recorded) in &self.web_active_buffers {
+                        if recorded == buffer_id {
+                            self.web_buffer_unconfirmed.remove(session);
+                        } else {
+                            self.web_buffer_unconfirmed.insert(session.clone());
+                        }
+                    }
                 }
                 crate::web::protocol::WebEvent::ConnectionStatus { .. }
                 | crate::web::protocol::WebEvent::SettingsChanged { .. }
+                | crate::web::protocol::WebEvent::BufferE2eChanged { .. }
                 // Structural so the shared snapshot — the source of a
                 // *connecting* session's SyncInit — picks up the new item list
                 // immediately, not up to a tick later.
@@ -421,6 +450,25 @@ impl App {
         );
     }
 
+    /// Take a client's word for where it is.
+    ///
+    /// A tab is marked unconfirmed when a TUI-driven `ActiveBufferChanged`
+    /// goes out, because whether it follows is a `localStorage` flag only the
+    /// browser can see. Every command that names a `buffer_id` settles that
+    /// question outright — the tab is telling us which composer the text came
+    /// from — so the guess is replaced by the fact and the doubt cleared.
+    ///
+    /// Not cosmetic. `deferred_retry_text` withholds a refused message
+    /// entirely from a session whose buffer it does not know, since it cannot
+    /// tell which CONNECTION the retry would resolve against. Leaving a tab
+    /// unconfirmed after it has just spoken means its author does not get
+    /// their own text back, on the one path where getting it back matters.
+    fn confirm_web_buffer(&mut self, session_id: &str, buffer_id: &str) {
+        self.web_active_buffers
+            .insert(session_id.to_string(), buffer_id.to_string());
+        self.web_buffer_unconfirmed.remove(session_id);
+    }
+
     /// Dispatch a command received from a web client.
     #[expect(
         clippy::too_many_lines,
@@ -439,6 +487,7 @@ impl App {
                 if let Some(buffer_id) = initial_buffer_id {
                     self.web_active_buffers
                         .insert(session_id.to_string(), buffer_id);
+                    self.web_buffer_unconfirmed.remove(session_id);
                 }
             }
             WebCommand::Typing { buffer_id, typing } => {
@@ -448,10 +497,20 @@ impl App {
                 self.on_web_typing(session_id, &buffer_id, typing);
             }
             WebCommand::SendMessage { buffer_id, text } => {
+                // The tab just named the buffer its text came from, which is
+                // the answer to the question `web_buffer_unconfirmed` records
+                // not knowing.
+                self.confirm_web_buffer(session_id, &buffer_id);
+                // Mark who is submitting for the duration of the command, so
+                // a refusal (translation, E2E) returns the text to THIS
+                // browser rather than the terminal's input line.
+                self.submit_origin =
+                    crate::app::translate::SubmitOrigin::Web(session_id.to_string());
                 // Run the submit FIRST and report what it actually put on the
                 // wire — a message the E2E gate refuses (or a dead connection
                 // swallows) must leave the `done` we owe the peers outstanding.
                 let sent_message = self.web_send_message(&buffer_id, &text);
+                self.submit_origin = crate::app::translate::SubmitOrigin::Tui;
                 self.on_typing_submit(
                     &crate::app::typing::TypingSource::Web(session_id.to_string()),
                     &buffer_id,
@@ -479,6 +538,8 @@ impl App {
                 // routing (a web shell is keyed by the session's active buffer).
                 self.web_active_buffers
                     .insert(session_id.to_string(), buffer_id.clone());
+                // The session just told us where it is.
+                self.web_buffer_unconfirmed.remove(session_id);
                 let web_id = format!("web-{session_id}");
                 if self.shell_mgr.has_web_session(&web_id) {
                     self.force_broadcast_web_shell_screen(&web_id);
@@ -519,7 +580,17 @@ impl App {
                 self.web_fetch_mentions(session_id);
             }
             WebCommand::RunCommand { buffer_id, text } => {
+                // The same origin scope as `SendMessage`, for the same
+                // reason. The web composer dispatches every `/`-prefixed line
+                // as `RunCommand`, and `/msg`, `/query <peer> <text>` and
+                // `/me` all reach the outgoing translation gate — so a
+                // refusal must return the text to THIS browser, not to the
+                // terminal's input line where its author cannot see it.
+                self.confirm_web_buffer(session_id, &buffer_id);
+                self.submit_origin =
+                    crate::app::translate::SubmitOrigin::Web(session_id.to_string());
                 let sent_message = self.web_run_command(&buffer_id, &text);
+                self.submit_origin = crate::app::translate::SubmitOrigin::Tui;
                 self.on_typing_submit(
                     &crate::app::typing::TypingSource::Web(session_id.to_string()),
                     &buffer_id,
@@ -549,6 +620,7 @@ impl App {
             }
             WebCommand::WebDisconnect => {
                 self.web_active_buffers.remove(session_id);
+                self.web_buffer_unconfirmed.remove(session_id);
                 self.on_web_session_gone(session_id);
                 self.shell_mgr.close_web_by_session(session_id);
             }
@@ -598,6 +670,7 @@ impl App {
                     sasl_mechanism: cmd.sasl_mechanism,
                     autosendcmd: cmd.autosendcmd,
                     client_cert_path: cmd.client_cert_path,
+                    sasl_key_path: cmd.sasl_key_path,
                     auto_reconnect: cmd.auto_reconnect,
                     reconnect_delay: cmd.reconnect_delay,
                     reconnect_max_retries: cmd.reconnect_max_retries,

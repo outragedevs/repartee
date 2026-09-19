@@ -1061,7 +1061,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
 
     if is_action {
         let nick_text = msg.nick.unwrap_or_default();
-        let styled = render_styled_text(&msg.text, emotes_on);
+        let styled = render_body(&msg.text, msg.orig_offset, emotes_on);
         let nick_color_style = {
             let nick = nick_text.clone();
             move || nick_color_or_empty(state, &nick, !is_own)
@@ -1123,7 +1123,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
     } else {
         let nick_text = msg.nick.unwrap_or_default();
         let mode = msg.nick_mode.unwrap_or_default();
-        let styled = render_styled_text(&msg.text, emotes_on);
+        let styled = render_body(&msg.text, msg.orig_offset, emotes_on);
         let highlight = msg.highlight;
 
         let nick_truncated = {
@@ -1347,6 +1347,50 @@ fn render_styled_text(text: &str, emotes_on: bool) -> Vec<leptos::prelude::AnyVi
     crate::components::styled::render_message_text(text, emotes_on)
 }
 
+/// Render a chat body, dimming an appended ` [original]` suffix when the
+/// server said where it starts.
+///
+/// The offset is carried on the wire rather than re-derived here for the
+/// same reason the TUI refuses to derive it: an ordinary message may
+/// legitimately end in brackets, and scanning for a trailing `[...]` would
+/// dim someone else's text.
+///
+/// Out-of-range or mid-character offsets fall back to rendering the body
+/// undimmed — strictly better than slicing a message apart on a bad index.
+fn render_body(
+    text: &str,
+    orig_offset: Option<usize>,
+    emotes_on: bool,
+) -> Vec<leptos::prelude::AnyView> {
+    let Some((body, suffix)) = split_original_suffix(text, orig_offset) else {
+        return render_styled_text(text, emotes_on);
+    };
+    let mut nodes = render_styled_text(body, emotes_on);
+    // Its own element, so the suffix keeps whatever colours the original
+    // carried and is merely de-emphasised — and so the styling cannot be
+    // undone by format codes inside the body.
+    let suffix = render_styled_text(suffix, emotes_on);
+    nodes.push(view! { <span class="translated-original">{suffix}</span> }.into_any());
+    nodes
+}
+
+/// Split a body into `(translation, " [original]")` at a server-supplied
+/// offset, or `None` when there is nothing to split.
+///
+/// Rejects an offset that is out of range or mid-character: each would
+/// either panic on the slice or dim nothing, and the undimmed line is a
+/// perfectly good fallback. Zero is VALID and dims the whole body — an
+/// empty original marked untranslated carries offset 0, and the TUI dims it
+/// from the start; rejecting it here made the same row render differently
+/// in the two frontends, the divergence this offset exists to prevent.
+fn split_original_suffix(text: &str, orig_offset: Option<usize>) -> Option<(&str, &str)> {
+    let at = orig_offset?;
+    if at >= text.len() || !text.is_char_boundary(at) {
+        return None;
+    }
+    Some((&text[..at], &text[at..]))
+}
+
 /// Rebuild a `.chat-line` as space-joined plain text for the copy
 /// handler — concatenates each direct child span's `textContent` with
 /// a single space. Mirrors what users actually see (ts, nick, text),
@@ -1442,7 +1486,7 @@ fn truncate_nick(nick: &str, max_len: usize, mode: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{restored_scroll_top, viewport_needs_backlog};
+    use super::{restored_scroll_top, split_original_suffix, viewport_needs_backlog};
 
     #[test]
     fn viewport_fill_is_disabled_without_a_rendered_viewport() {
@@ -1472,5 +1516,61 @@ mod tests {
     #[test]
     fn changed_scroll_top_is_returned_for_restore() {
         assert_eq!(restored_scroll_top(120, 15.0), Some(135));
+    }
+
+    #[test]
+    fn a_translated_line_splits_at_the_servers_offset() {
+        assert_eq!(
+            split_original_suffix("mein satz [moje zdanie]", Some(9)),
+            Some(("mein satz", " [moje zdanie]")),
+            "the dimmed half is exactly the appended original"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_line_that_ends_in_brackets_is_not_split() {
+        // The offset is the ONLY signal. Guessing from a trailing `[...]`
+        // would dim text the sender wrote themselves.
+        assert_eq!(
+            split_original_suffix("ordinary [not an original]", None),
+            None
+        );
+    }
+
+    #[test]
+    fn a_multibyte_boundary_splits_cleanly() {
+        let text = "zażółć gęślą [jaźń]";
+        let at = "zażółć gęślą".len();
+        assert_eq!(
+            split_original_suffix(text, Some(at)),
+            Some(("zażółć gęślą", " [jaźń]"))
+        );
+    }
+
+    #[test]
+    fn an_unusable_offset_leaves_the_line_whole() {
+        // Each of these would panic on the slice or dim nothing.
+        // Rendering the line undimmed is the right failure.
+        let text = "zażółć";
+        assert_eq!(split_original_suffix(text, Some(3)), None, "mid-character");
+        assert_eq!(split_original_suffix(text, Some(999)), None, "past the end");
+        assert_eq!(
+            split_original_suffix(text, Some(text.len())),
+            None,
+            "at the end: nothing to dim"
+        );
+    }
+
+    #[test]
+    fn offset_zero_dims_the_whole_body_as_the_tui_does() {
+        // An empty original marked untranslated carries suffix offset 0 —
+        // `mark_untranslated("")` yields " [untranslated: …]" dimmed from
+        // the very first byte. The TUI dims it whole; rejecting 0 here had
+        // the browser render the same row at full brightness.
+        assert_eq!(
+            split_original_suffix(" [untranslated: timeout]", Some(0)),
+            Some(("", " [untranslated: timeout]")),
+            "zero is a real boundary, not an unusable offset"
+        );
     }
 }

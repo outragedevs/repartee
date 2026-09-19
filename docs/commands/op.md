@@ -1,5 +1,5 @@
 ---
-category: Moderation
+category: Channel
 description: Give operator status
 ---
 

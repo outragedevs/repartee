@@ -66,20 +66,51 @@ arguments from the IRC event. For example, WHOIS replies can be themed with:
 ```toml
 [formats.events]
 whois = "%Zc0caf5$0%Z565f89 ($1@$2)%N %Za9b1d6$3%N"
-whois_server = "%Z565f89  server: %Za9b1d6$1%N%Z565f89$3%N"
-whois_channels = "%Z565f89  channels: %Za9b1d6$1%N"
+whois_server = "{whois server: {whois_value $1}%Z565f89$3}"
+whois_channels = "{whois channels: {whois_value $1}}"
 end_of_whois = "%Z7aa2f7─────────────────────────────────────────────%N"
 ```
 
 WHOIS event keys are `whois_header`, `whois`, `whois_server`, `whois_oper`,
 `whois_idle`, `whois_idle_signon`, `whois_channels`, `whois_away`,
-`whois_account`, `whois_secure`, `whois_certfp`, `whois_keyvalue`, and
-`end_of_whois`.
+`whois_account`, `whois_secure`, `whois_certfp`, `whois_keyvalue`,
+`whois_special`, `whois_registered`, `whois_help`, `whois_bot`,
+`whois_actually`, `whois_host`, `whois_modes`, and `end_of_whois`.
 
-WHOIS parameters follow IRC reply structure. Common examples: `whois` receives
-nick, user, host, realname; `whois_server` receives nick, server, server info,
-formatted server info; `whois_idle_signon` receives nick, idle duration, signon
-time; `whois_secure` receives nick, display value, server text.
+For every `whois_*` key, `$0` is the nick and `$1` is the line's primary value;
+further parameters carry detail. `whois` receives nick, user, host, realname;
+`whois_server` receives nick, server, server info, formatted server info;
+`whois_idle_signon` receives nick, idle duration, signon time; `whois_secure`
+receives nick, display value (`TLS`), and the server's own wording.
+
+Numerics with no dedicated key render through `whois_special`. That includes
+IRCnet's 320, which carries both the cloak line and the TLS line with text
+configured by the server admin — indistinguishable by numeric, so repartee
+shows them verbatim rather than guessing which is which.
+
+### Restyling the whole block
+
+The block's indent and base colour come from the `whois` and `whois_value`
+abstracts, so changing how every WHOIS line looks means editing those two
+entries rather than all twenty formats:
+
+```toml
+[abstracts]
+whois = "%Z565f89  $*%N"
+whois_value = "%Za9b1d6$*%N"
+```
+
+`whois_header`, `whois`, `whois_oper` and `end_of_whois` stay literal — the
+first two and the last are the block's frame rather than indented body lines.
+
+### WHOIS errors
+
+A WHOIS can also be answered with an error. Those keys are deliberately not
+whois-prefixed, because the same numerics answer other commands too:
+`no_such_nick` (401, also a failed `/msg` or `/invite`), `no_such_server` (402,
+returned by `/whois nick nick` against an unknown server), and `try_again`
+(263, rate limiting). Each receives the subject in `$0` and the server's reason
+text in `$1`, and is styled through the `error` abstract rather than `whois`.
 
 ## Default theme
 

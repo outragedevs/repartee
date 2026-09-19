@@ -51,7 +51,8 @@ src/
     cap.rs             # IRCv3 CAP framework
     isupport.rs        # ISUPPORT parameter parsing
     batch.rs           # IRCv3 BATCH (netsplit/netjoin)
-    sasl_scram.rs      # SASL SCRAM-SHA-256 implementation
+    sasl_scram.rs      # SASL SCRAM-SHA-1/256/512 implementation
+    sasl_ecdsa.rs      # SASL ECDSA-NIST256P-CHALLENGE (P-256 key signing)
     extban.rs          # Extended ban types ($a:account, etc.)
     flood.rs           # Flood protection
     netsplit.rs        # Netsplit detection

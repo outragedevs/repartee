@@ -101,6 +101,7 @@ impl App {
         self.state.add_message(
             &server_buf_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: Utc::now(),
                 message_type: MessageType::Event,
@@ -113,6 +114,8 @@ impl App {
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
+                wire_origin: None,
+                translation_suffix_at: None,
             },
         );
 
@@ -174,6 +177,7 @@ impl App {
         self.state.add_local_message(
             buffer_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: Utc::now(),
                 message_type: MessageType::Event,
@@ -186,6 +190,8 @@ impl App {
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
+                wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -332,6 +338,15 @@ impl App {
                 if let Some(conn) = self.state.connections.get_mut(&handle.conn_id) {
                     conn.local_ip = handle.local_ip;
                 }
+                // A new session for this `conn_id`. Bumping here — rather
+                // than on disconnect — is what makes a captured generation
+                // mean "the session I was written for": a reconnect moves it,
+                // and a connection that never comes back is caught by the
+                // handle being absent.
+                *self
+                    .conn_generations
+                    .entry(handle.conn_id.clone())
+                    .or_default() += 1;
                 self.irc_handles.insert(handle.conn_id.clone(), *handle);
             }
             IrcEvent::NegotiationInfo(conn_id, diag) => {
@@ -498,6 +513,12 @@ impl App {
                 // limits/ref types and could be rejected for non-membership.
             }
             IrcEvent::Disconnected(conn_id, error) => {
+                // Release anything still waiting on a translation for this
+                // connection FIRST. The lines already arrived; holding them
+                // for the full timeout after the server is gone means a
+                // stuck provider blanks the channel for seconds with no
+                // prospect of the answer ever being useful.
+                self.flush_translate_queues_for_connection(&conn_id);
                 // DCC connections are peer-to-peer and independent of the IRC
                 // server.  Do NOT close DCC records on IRC disconnect.
                 crate::irc::events::handle_disconnected(
@@ -798,6 +819,18 @@ impl App {
                     let script_suppressed = self.emit_irc_to_scripts(&conn_id, &msg);
                     if script_suppressed && !state_mutating {
                         // Display suppressed — still keep auxiliary tracking in sync.
+                        //
+                        // A translated send holds a place in its buffer's
+                        // reorder queue for the reflection it is expecting.
+                        // Eating the PRIVMSG here means that reflection never
+                        // reaches the handler that would fill it, so the place
+                        // has to be given up — the message is gone, but the
+                        // rest of the conversation must not wait for it.
+                        crate::irc::events::release_suppressed_own_echo(
+                            &mut self.state,
+                            &conn_id,
+                            &msg,
+                        );
                         if let Some(channel) = endofnames_channel {
                             self.queue_channel_query(&conn_id, channel);
                         }
@@ -920,6 +953,14 @@ impl App {
                         self.state.suppress_event_display = false;
                     }
 
+                    // Migrate config keyed by a buffer id that just moved —
+                    // a query re-keyed because the peer changed nick. The
+                    // state-side maps moved with it already; this is the half
+                    // the App owns, and without it the next
+                    // `sync_translate_from_config` re-derives the mirror from
+                    // the stale key and translation stops for that
+                    // conversation.
+                    self.drain_pending_buffer_rekeys();
                     // Drain pending web events and broadcast + auto-record mentions.
                     self.drain_pending_web_events();
                     // Drain queued RPE2E NOTICE sends (handshake replies,

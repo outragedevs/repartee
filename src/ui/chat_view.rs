@@ -63,10 +63,7 @@ const fn scroll_pinned_at_top(
     walked_all && scroll >= total.saturating_sub(visible_height)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "single linear render pass — wrap walk, scroll resolution, emote placement"
-)]
+#[allow(clippy::too_many_lines)]
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     // Clear any emote placements up-front so early returns (shell buffer, zero
     // area) don't leave stale rects that would ghost-render over another view

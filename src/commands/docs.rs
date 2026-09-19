@@ -37,6 +37,15 @@ pub fn help(name: &str) -> Option<&'static CommandHelp> {
     HELP_CACHE.get(name)
 }
 
+pub fn subcommand(command: &str, name: &str) -> Option<&'static SubcommandHelp> {
+    help(command)?.subcommands.iter().find(|sub| {
+        sub.name
+            .split_whitespace()
+            .next()
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+    })
+}
+
 /// Get subcommand names for a command (for tab completion).
 /// Returns empty slice if the command has no subcommands.
 pub fn get_subcommand_names(cmd: &str) -> Vec<&'static str> {
@@ -73,7 +82,8 @@ fn parse_doc(raw: &str) -> CommandHelp {
     let description = meta.get("description").cloned().unwrap_or_default();
     let syntax = sections
         .get("syntax")
-        .map(|s| extract_indented(s))
+        .or_else(|| sections.get("usage"))
+        .map(|s| extract_code_lines(s).join("\n"))
         .unwrap_or_default();
     let body_text = sections.get("description").cloned().unwrap_or_default();
 
@@ -84,7 +94,7 @@ fn parse_doc(raw: &str) -> CommandHelp {
 
     let examples = sections
         .get("examples")
-        .map(|s| extract_indented_lines(s))
+        .map(|s| extract_code_lines(s))
         .unwrap_or_default();
 
     let see_also = sections
@@ -164,18 +174,20 @@ fn trim_newlines(s: &str) -> String {
     s.trim_matches('\n').to_string()
 }
 
-fn extract_indented(text: &str) -> String {
+fn extract_code_lines(text: &str) -> Vec<String> {
+    let mut in_fence = false;
     text.lines()
-        .filter(|l| l.starts_with("    ") || l.starts_with('\t'))
-        .map(str::trim)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn extract_indented_lines(text: &str) -> Vec<String> {
-    text.lines()
-        .filter(|l| l.starts_with("    ") || l.starts_with('\t'))
-        .map(|l| l.trim().to_string())
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with("```") {
+                in_fence = !in_fence;
+                None
+            } else if in_fence || line.starts_with("    ") || line.starts_with('\t') {
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            } else {
+                None
+            }
+        })
         .collect()
 }
 
@@ -196,7 +208,7 @@ fn parse_subcommands(text: &str) -> Vec<SubcommandHelp> {
         let (name, body) = trimmed.find('\n').map_or((trimmed, ""), |idx| {
             (trimmed[..idx].trim(), trimmed[idx + 1..].trim())
         });
-        let syntax = extract_indented(body);
+        let syntax = extract_code_lines(body).join("\n");
         // First non-indented paragraph is description
         let description = body
             .lines()
@@ -295,12 +307,65 @@ Add a new server.
     }
 
     #[test]
+    fn parse_fenced_usage_and_examples() {
+        let doc = r"---
+description: Example
+---
+
+# /example
+
+## Usage
+
+```
+/example [value]
+```
+
+## Description
+
+Example command.
+
+## Examples
+
+```
+/example value
+```";
+
+        let help = parse_doc(doc);
+
+        assert_eq!(help.syntax, "/example [value]");
+        assert_eq!(help.examples, ["/example value"]);
+    }
+
+    #[test]
     fn load_all_docs_finds_embedded_docs() {
         let docs = load_all_docs();
         // Should find at least a few docs from the embedded HelpAssets.
         assert!(!docs.is_empty(), "No command docs found");
         assert!(docs.contains_key("join"), "Missing join doc");
         assert!(docs.contains_key("quit"), "Missing quit doc");
+    }
+
+    #[test]
+    fn every_registered_command_has_help_with_syntax() {
+        for &(name, _) in crate::commands::registry::get_commands() {
+            let command = help(name).unwrap_or_else(|| panic!("/{name} is missing command help"));
+            assert!(!command.syntax.is_empty(), "/{name} is missing help syntax");
+        }
+    }
+
+    #[test]
+    fn command_help_categories_match_the_registry() {
+        for &(name, ref definition) in crate::commands::registry::get_commands() {
+            let file = HelpAssets::get(&format!("{name}.md"))
+                .unwrap_or_else(|| panic!("/{name} is missing command help"));
+            let raw = std::str::from_utf8(&file.data).expect("command help must be UTF-8");
+            let (metadata, _) = parse_frontmatter(raw);
+            assert_eq!(
+                metadata.get("category").map(String::as_str),
+                Some(definition.category.label()),
+                "/{name} has inconsistent help categories"
+            );
+        }
     }
 
     #[test]
@@ -328,6 +393,12 @@ Add a new server.
     fn get_subcommand_names_empty_for_no_subcommands() {
         let names = get_subcommand_names("join");
         assert!(names.is_empty(), "join should have no subcommands");
+    }
+
+    #[test]
+    fn subcommand_matches_the_command_word() {
+        let get = subcommand("spellcheck", "GET").expect("spellcheck get help");
+        assert_eq!(get.name, "get");
     }
 
     #[test]

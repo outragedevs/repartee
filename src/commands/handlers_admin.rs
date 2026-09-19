@@ -7,7 +7,7 @@ use crate::storage;
 
 // === Configuration ===
 
-const SERVER_ADD_USAGE: &str = "Usage: /server add <id> <address>[:<port>] [port] [-tls] [-notls] [-tlsverify] [-notlsverify] [-auto] [-noauto] [-label=<name>] [-nick=<nick>] [-username=<user>] [-realname=<name>] [-password=<pass>] [-sasl=<user>:<pass>] [-sasl-user=<user>] [-sasl-pass=<pass>] [-sasl-mechanism=<mechanism>] [-channels=<ch1,ch2>] [-bind=<ip>] [-encoding=<codec>] [-autoreconnect=<bool>] [-reconnect-delay=<secs>] [-reconnect-max-retries=<n>] [-autosendcmd=<cmds>] [-client-cert=<path>]";
+const SERVER_ADD_USAGE: &str = "Usage: /server add <id> <address>[:<port>] [port] [-tls] [-notls] [-tlsverify] [-notlsverify] [-auto] [-noauto] [-label=<name>] [-nick=<nick>] [-username=<user>] [-realname=<name>] [-password=<pass>] [-sasl=<user>:<pass>] [-sasl-user=<user>] [-sasl-pass=<pass>] [-sasl-mechanism=<mechanism>] [-channels=<ch1,ch2>] [-bind=<ip>] [-encoding=<codec>] [-autoreconnect=<bool>] [-reconnect-delay=<secs>] [-reconnect-max-retries=<n>] [-autosendcmd=<cmds>] [-client-cert=<path>] [-sasl-key=<path>]";
 
 /// How a credential should be persisted to `.env`.
 #[derive(Debug, Clone)]
@@ -106,6 +106,13 @@ fn manual_cred(value: Option<String>) -> CredUpdate {
 /// `commands::settings` has to have a counterpart here, or the two routes to the
 /// same state disagree.
 pub(crate) fn apply_reloaded_config(app: &mut App, new_config: crate::config::AppConfig) {
+    if app
+        .translate_backend
+        .as_ref()
+        .is_some_and(|backend| !backend.configuration_matches(&new_config.translate))
+    {
+        app.translate_backend = None;
+    }
     app.config = new_config;
     app.cached_config_toml = None;
     // A reload swaps out config.servers wholesale; an open edit-wizard
@@ -124,6 +131,21 @@ pub(crate) fn apply_reloaded_config(app: &mut App, new_config: crate::config::Ap
     // The same post-config-change sync `/set typing.*` runs — a hand-edited
     // `send_channels = false` has to reach the machine by this route too.
     app.sync_typing_from_config();
+    if let Some(backend) = &app.translate_backend {
+        backend.refresh_config(&app.config.translate);
+    }
+    // Same for `[translate]`, and this one is privacy-sensitive rather than
+    // cosmetic: without it a hand-edited `enabled = false` leaves
+    // `translate_active` true and lines keep going to the provider after the
+    // user believes they turned it off. The per-buffer flags and languages
+    // would go stale the same way.
+    app.sync_translate_from_config();
+    // …and when the file now asks for translation this process cannot give,
+    // say so. `sync_translate_from_config` leaves `translate_active` false
+    // because the backend is bound at startup, so without this the reload
+    // reports only "Config reloaded" while translation stays off — exactly
+    // the silent no-op `/set translate.enabled` already warns about.
+    super::helpers::warn_if_translate_cannot_run(app);
     // A hand-edited `[statusbar]` section must reach open tabs too.
     super::handlers_ui::push_statusbar_web_event(app);
 }
@@ -143,29 +165,30 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
     // expects. Like startup, it writes nothing — the user's comments and unknown
     // keys survive a `/reload`, and the migrated version persists on the next
     // save they actually ask for (see `config::load_and_migrate`).
-    match crate::config::load_and_migrate(&crate::constants::config_path()) {
-        Ok(new_config) => {
-            apply_reloaded_config(app, new_config);
-            add_local_event(app, &format!("{C_OK}Config reloaded{C_RST}"));
-        }
+    let mut new_config = match crate::config::load_and_migrate(&crate::constants::config_path()) {
+        Ok(config) => config,
         Err(e) => {
             add_local_event(app, &format!("{C_ERR}Failed to reload config: {e}{C_RST}"));
             return;
         }
-    }
+    };
 
     // Re-read .env and re-apply every credential layer (server
-    // passwords / SASL, web session secret, SHRINK_API_KEY). Without
+    // passwords / SASL, web session secret, shrink and translation API keys). Without
     // this step, keys added or rotated in ~/.repartee/.env after
     // startup stay invisible until the user quits and restarts.
     // Existing connections keep their already-negotiated credentials;
     // new /connect attempts (and any code path that re-reads
     // app.config) pick up the new values.
-    match crate::config::load_env(&crate::constants::env_path()) {
-        Ok(env_vars) => {
-            crate::config::apply_credentials(&mut app.config.servers, &env_vars);
-            crate::config::apply_web_credentials(&mut app.config.web, &env_vars);
-            crate::config::apply_shrink_credentials(&mut app.config.shrink, &env_vars);
+    let env_result = crate::config::load_env(&crate::constants::env_path());
+    if let Ok(env_vars) = &env_result {
+        apply_env_credentials(&mut new_config, env_vars);
+    }
+    apply_reloaded_config(app, new_config);
+    add_local_event(app, &format!("{C_OK}Config reloaded{C_RST}"));
+
+    match env_result {
+        Ok(_) => {
             add_local_event(app, &format!("{C_OK}.env reloaded{C_RST}"));
 
             // Surface the shrink restart-required edge case: the API
@@ -203,6 +226,16 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
 
     // Recompute cached wrap-indent (depends on config + theme).
     app.recompute_wrap_indent();
+}
+
+fn apply_env_credentials(
+    config: &mut crate::config::AppConfig,
+    env: &std::collections::HashMap<String, String>,
+) {
+    crate::config::apply_credentials(&mut config.servers, env);
+    crate::config::apply_web_credentials(&mut config.web, env);
+    crate::config::apply_shrink_credentials(&mut config.shrink, env);
+    crate::config::apply_translate_credentials(&mut config.translate, env);
 }
 
 pub(crate) fn cmd_flood(app: &mut App, args: &[String]) {
@@ -347,6 +380,10 @@ fn subcmd_is(subcmd: &str, choices: &[&str]) -> bool {
 }
 
 pub(crate) fn cmd_ignore(app: &mut App, args: &[String]) {
+    ignore_with_path(app, args, &crate::constants::config_path());
+}
+
+fn ignore_with_path(app: &mut App, args: &[String], path: &std::path::Path) {
     if args.is_empty() {
         // List ignore rules — collect lines first to avoid borrow issues
         let mut lines = vec![divider("Ignore List")];
@@ -390,17 +427,22 @@ pub(crate) fn cmd_ignore(app: &mut App, args: &[String]) {
     let mut i = 1;
     while i < args.len() {
         if args[i] == "-channels" || args[i] == "-channel" {
-            if i + 1 < args.len() {
-                i += 1;
-                channels = Some(
-                    args[i]
-                        .split(',')
-                        .map(|s| s.trim().to_lowercase())
-                        .collect(),
-                );
+            i += 1;
+            let Some(value) = args.get(i) else {
+                add_local_event(app, "Usage: /ignore <mask> [levels] [-channels #channel,...]");
+                return;
+            };
+            let selected: Vec<String> = value.split(',').map(|s| s.trim().to_lowercase()).collect();
+            if selected.iter().any(|channel| !crate::irc::formatting::is_channel(channel)) {
+                add_local_event(app, "Invalid ignore channel list; expected #channel names separated by commas");
+                return;
             }
+            channels = Some(selected);
         } else if let Some(level) = parse_ignore_level(&args[i]) {
             levels.push(level);
+        } else {
+            add_local_event(app, &format!("Unknown ignore level: {}", args[i]));
+            return;
         }
         i += 1;
     }
@@ -412,12 +454,15 @@ pub(crate) fn cmd_ignore(app: &mut App, args: &[String]) {
     });
 
     // Save config
-    app.cached_config_toml = None;
-    let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+    persist_ignores(app, path);
     add_local_event(app, &format!("{C_OK}Added ignore rule: {mask}{C_RST}"));
 }
 
 pub(crate) fn cmd_unignore(app: &mut App, args: &[String]) {
+    unignore_with_path(app, args, &crate::constants::config_path());
+}
+
+fn unignore_with_path(app: &mut App, args: &[String], path: &std::path::Path) {
     if args.is_empty() {
         add_local_event(app, "Usage: /unignore <number|mask>");
         return;
@@ -431,8 +476,7 @@ pub(crate) fn cmd_unignore(app: &mut App, args: &[String]) {
         && n <= app.config.ignores.len()
     {
         let removed = app.config.ignores.remove(n - 1);
-        app.cached_config_toml = None;
-        let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+        persist_ignores(app, path);
         add_local_event(
             app,
             &format!("{C_OK}Removed ignore rule: {}{C_RST}", removed.mask),
@@ -443,8 +487,7 @@ pub(crate) fn cmd_unignore(app: &mut App, args: &[String]) {
     // Try as mask
     if let Some(pos) = app.config.ignores.iter().position(|e| e.mask == *target) {
         let removed = app.config.ignores.remove(pos);
-        app.cached_config_toml = None;
-        let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+        persist_ignores(app, path);
         add_local_event(
             app,
             &format!("{C_OK}Removed ignore rule: {}{C_RST}", removed.mask),
@@ -455,6 +498,12 @@ pub(crate) fn cmd_unignore(app: &mut App, args: &[String]) {
             &format!("{C_ERR}No ignore rule matching: {target}{C_RST}"),
         );
     }
+}
+
+fn persist_ignores(app: &mut App, path: &std::path::Path) {
+    app.state.ignores.clone_from(&app.config.ignores);
+    app.cached_config_toml = None;
+    let _ = crate::config::save_config(path, &app.config);
 }
 
 const fn parse_ignore_level(s: &str) -> Option<crate::config::IgnoreLevel> {
@@ -613,6 +662,10 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "flat flag dispatcher — one arm per /server add flag"
+)]
 fn parse_server_add_config(args: &[String]) -> Result<crate::config::ServerConfig, String> {
     let raw_address = args
         .first()
@@ -641,6 +694,7 @@ fn parse_server_add_config(args: &[String]) -> Result<crate::config::ServerConfi
         autosendcmd: None,
         sasl_mechanism: None,
         client_cert_path: None,
+        sasl_key_path: None,
     };
 
     for arg in args.iter().skip(1) {
@@ -683,7 +737,13 @@ fn parse_server_add_config(args: &[String]) -> Result<crate::config::ServerConfi
         } else if let Some(value) = arg.strip_prefix("-sasl-pass=") {
             config.sasl_pass = Some(value.to_string());
         } else if let Some(value) = arg.strip_prefix("-sasl-mechanism=") {
-            config.sasl_mechanism = Some(value.to_string());
+            // Validated here rather than at connect time: an unrecognised name
+            // resolves to no mechanism, which would silently mean "no SASL"
+            // on a server the user believes they are authenticating to.
+            config.sasl_mechanism =
+                Some(super::settings::parse_sasl_mechanism(value).map_err(|e| {
+                    format!("-sasl-mechanism: {e}")
+                })?);
         } else if let Some(value) = arg.strip_prefix("-channels=") {
             config.channels = parse_csv(value);
         } else if let Some(value) = arg.strip_prefix("-bind=") {
@@ -700,6 +760,8 @@ fn parse_server_add_config(args: &[String]) -> Result<crate::config::ServerConfi
             config.autosendcmd = Some(value.to_string());
         } else if let Some(value) = arg.strip_prefix("-client-cert=") {
             config.client_cert_path = Some(value.to_string());
+        } else if let Some(value) = arg.strip_prefix("-sasl-key=") {
+            config.sasl_key_path = Some(value.to_string());
         } else if arg.starts_with('-') {
             return Err(format!("Unknown /server add flag: {arg}"));
         } else {
@@ -1577,6 +1639,7 @@ mod server_add_tests {
             "-reconnect-max-retries=3",
             "-autosendcmd=/msg NickServ identify",
             "-client-cert=/tmp/client.pem",
+            "-sasl-key=libera.pem",
         ]))
         .unwrap();
 
@@ -1604,6 +1667,42 @@ mod server_add_tests {
         );
         assert_eq!(config.sasl_mechanism.as_deref(), Some("SCRAM-SHA-256"));
         assert_eq!(config.client_cert_path.as_deref(), Some("/tmp/client.pem"));
+        assert_eq!(config.sasl_key_path.as_deref(), Some("libera.pem"));
+    }
+
+    #[test]
+    fn every_sasl_mechanism_is_accepted_by_server_add() {
+        for mech in crate::irc::SASL_MECHANISMS {
+            let config = parse_server_add_config(&args(&[
+                "irc.example.net",
+                &format!("-sasl-mechanism={}", mech.name()),
+            ]))
+            .unwrap_or_else(|e| panic!("{} should be accepted: {e}", mech.name()));
+            assert_eq!(config.sasl_mechanism.as_deref(), Some(mech.name()));
+        }
+
+        // Normalised to the canonical spelling the protocol code compares on.
+        let lower = parse_server_add_config(&args(&[
+            "irc.example.net",
+            "-sasl-mechanism=ecdsa-nist256p-challenge",
+        ]))
+        .unwrap();
+        assert_eq!(
+            lower.sasl_mechanism.as_deref(),
+            Some("ECDSA-NIST256P-CHALLENGE")
+        );
+    }
+
+    #[test]
+    fn a_misspelled_sasl_mechanism_is_rejected_by_server_add() {
+        // Unvalidated this parses fine and then silently means "no SASL".
+        let err = parse_server_add_config(&args(&[
+            "irc.example.net",
+            "-sasl-mechanism=SCRAM-SHA512",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("SCRAM-SHA-512"), "{err}");
+        assert!(err.contains("PLAIN"), "{err}");
     }
 
     #[test]
@@ -1643,6 +1742,7 @@ mod server_add_tests {
             autosendcmd: None,
             sasl_mechanism: None,
             client_cert_path: None,
+            sasl_key_path: None,
         }
     }
 
@@ -1752,5 +1852,368 @@ mod server_add_tests {
         let s = config.servers.get("libera").unwrap();
         assert_eq!(s.address, "irc.libera.new");
         assert_eq!(s.password.as_deref(), Some("secret"));
+    }
+}
+
+#[cfg(test)]
+mod translate_reload_tests {
+    use crate::app::input::submit_typing_tests::test_app;
+    use crate::config::{TranslateAiConfig, TranslateAiModelConfig, TranslateBufferConfig};
+
+    fn ai_config(base_url: &str, api_key: &str) -> TranslateAiConfig {
+        let model = TranslateAiModelConfig {
+            name: "reload-test".to_string(),
+            base_url: base_url.to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "RELOAD_TEST_API".to_string(),
+            api_key: api_key.to_string(),
+            ..TranslateAiModelConfig::default()
+        };
+        TranslateAiConfig {
+            easy: vec![model.name.clone()],
+            strong: vec![model.name.clone()],
+            terminal: Some(Vec::new()),
+            preferred_attempt_ms: 3_000,
+            prompt_path: String::new(),
+            models: vec![model],
+        }
+    }
+
+    #[test]
+    fn reload_turning_translation_off_stops_it_immediately() {
+        // Privacy, not cosmetics: a stale `translate_active` keeps shipping
+        // lines to the provider after the user believes they turned it off
+        // in config.toml.
+        let mut app = test_app();
+        app.translate_backend = Some(std::sync::Arc::new(
+            crate::translate::backend::StubBackend::new(0, 0),
+        ));
+        app.config.translate.enabled = true;
+        app.config.translate.backend = "stub".to_string();
+        app.sync_translate_from_config();
+        assert!(app.state.translate_active, "precondition: it is on");
+
+        let mut reloaded = crate::config::AppConfig::default();
+        reloaded.translate.enabled = false;
+        super::apply_reloaded_config(&mut app, reloaded);
+
+        assert!(
+            !app.state.translate_active,
+            "reloading with enabled=false must stop translation at once"
+        );
+    }
+
+    #[test]
+    fn reload_taking_the_backend_away_stops_it_immediately_too() {
+        // The same privacy property as `enabled = false`, reached by the
+        // other switch. A user who takes the translator OUT of config.toml
+        // has said just as plainly that their lines should stop leaving for
+        // it, and "restart for that to count" is not an answer mid-
+        // conversation. (Putting one BACK still needs the restart the
+        // workers were bound in — that direction warns.)
+        let mut app = test_app();
+        app.translate_backend = Some(std::sync::Arc::new(
+            crate::translate::backend::StubBackend::new(0, 0),
+        ));
+        app.config.translate.enabled = true;
+        app.config.translate.backend = "stub".to_string();
+        app.sync_translate_from_config();
+        assert!(app.state.translate_active, "precondition: it is on");
+
+        let mut reloaded = crate::config::AppConfig::default();
+        reloaded.translate.enabled = true;
+        reloaded.translate.backend = "none".to_string();
+        super::apply_reloaded_config(&mut app, reloaded);
+
+        assert!(
+            !app.state.translate_active,
+            "naming no translator must stop translation at once"
+        );
+    }
+
+    #[test]
+    fn reload_picks_up_hand_edited_buffers_and_languages() {
+        let mut app = test_app();
+        app.translate_backend = Some(std::sync::Arc::new(
+            crate::translate::backend::StubBackend::new(0, 0),
+        ));
+
+        let mut reloaded = crate::config::AppConfig::default();
+        reloaded.translate.enabled = true;
+        reloaded.translate.backend = "stub".to_string();
+        reloaded.translate.my_lang = "pl".to_string();
+        reloaded.translate.show_original_in = false;
+        reloaded.translate.buffers.insert(
+            "net/#german".to_string(),
+            TranslateBufferConfig {
+                incoming: true,
+                outgoing: false,
+                lang: Some("de".to_string()),
+                my_lang: None,
+            },
+        );
+        super::apply_reloaded_config(&mut app, reloaded);
+
+        assert!(app.state.translate_active);
+        assert_eq!(app.state.translate_my_lang, "pl");
+        assert!(!app.state.translate_show_original_in);
+        assert!(app.state.translate_buffers.contains_key("net/#german"));
+    }
+
+    #[test]
+    fn reload_disables_ai_when_the_provider_configuration_changes() {
+        let mut app = test_app();
+        app.state
+            .add_buffer(crate::state::buffer::Buffer::for_test(
+                "net",
+                crate::state::buffer::BufferType::Channel,
+                "#german",
+            ));
+        app.state.set_active_buffer("net/#german");
+        let ai = ai_config("https://old.example/v1", "secret");
+        app.translate_backend = Some(std::sync::Arc::new(
+            crate::translate::ai::AiBackend::new(&ai).expect("valid AI backend"),
+        ));
+        app.config.translate.enabled = true;
+        app.config.translate.backend = "ai".to_string();
+        app.config.translate.ai = ai;
+        app.sync_translate_from_config();
+        let mut reloaded = app.config.clone();
+        reloaded.translate.ai.models[0].base_url = "https://new.example/v1".to_string();
+
+        super::apply_reloaded_config(&mut app, reloaded);
+
+        assert!(
+            app.translate_backend.is_none()
+                && !app.state.translate_active
+                && rows(&app)
+                    .iter()
+                    .any(|text| text.contains("restart to activate"))
+        );
+    }
+
+    #[test]
+    fn reload_keeps_ai_active_when_only_the_api_key_changes() {
+        let mut app = test_app();
+        let ai = ai_config("https://provider.example/v1", "old-secret");
+        app.translate_backend = Some(std::sync::Arc::new(
+            crate::translate::ai::AiBackend::new(&ai).expect("valid AI backend"),
+        ));
+        app.config.translate.enabled = true;
+        app.config.translate.backend = "ai".to_string();
+        app.config.translate.ai = ai;
+        app.sync_translate_from_config();
+        let mut reloaded = app.config.clone();
+        reloaded.translate.ai.models[0].api_key = "new-secret".to_string();
+
+        super::apply_reloaded_config(&mut app, reloaded);
+
+        assert!(app.translate_backend.is_some() && app.state.translate_active);
+    }
+
+    #[test]
+    fn reload_keeps_ai_active_when_the_attempt_budget_changes() {
+        let mut app = test_app();
+        let ai = ai_config("https://provider.example/v1", "secret");
+        app.translate_backend = Some(std::sync::Arc::new(
+            crate::translate::ai::AiBackend::new(&ai).expect("valid AI backend"),
+        ));
+        app.config.translate.enabled = true;
+        app.config.translate.backend = "ai".to_string();
+        app.config.translate.ai = ai;
+        app.sync_translate_from_config();
+        let mut reloaded = app.config.clone();
+        reloaded.translate.ai.preferred_attempt_ms = 4_500;
+
+        super::apply_reloaded_config(&mut app, reloaded);
+
+        assert!(app.translate_backend.is_some() && app.state.translate_active);
+    }
+
+    /// Every row the reload wrote into the active buffer.
+    fn rows(app: &crate::app::App) -> Vec<String> {
+        let id = app.state.active_buffer_id.clone().expect("an active buffer");
+        app.state.buffers[&id]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn reload_says_so_when_it_cannot_actually_turn_translation_on() {
+        // The process started with translation off, so no backend was built
+        // and none can be built now. Reporting only "Config reloaded" leaves
+        // the user believing their hand-edited `enabled = true` took effect
+        // and their channel is being translated when it is not.
+        let mut app = test_app();
+        app.state
+            .add_buffer(crate::state::buffer::Buffer::for_test(
+                "net",
+                crate::state::buffer::BufferType::Channel,
+                "#german",
+            ));
+        app.state.set_active_buffer("net/#german");
+        assert!(app.translate_backend.is_none(), "precondition: no backend");
+
+        let mut reloaded = crate::config::AppConfig::default();
+        reloaded.translate.enabled = true;
+        reloaded.translate.backend = "stub".to_string();
+        super::apply_reloaded_config(&mut app, reloaded);
+
+        assert!(!app.state.translate_active, "and it stayed off");
+        assert!(
+            rows(&app).iter().any(|t| t.contains("restart to activate")),
+            "the reload must not report success on a no-op: {:?}",
+            rows(&app)
+        );
+    }
+
+    #[test]
+    fn reload_applies_ai_credentials_before_reporting_restart_required() {
+        let mut app = test_app();
+        app.state
+            .add_buffer(crate::state::buffer::Buffer::for_test(
+                "net",
+                crate::state::buffer::BufferType::Channel,
+                "#german",
+            ));
+        app.state.set_active_buffer("net/#german");
+        let mut reloaded = crate::config::AppConfig::default();
+        reloaded.translate.enabled = true;
+        reloaded.translate.backend = "ai".to_string();
+        let env = std::collections::HashMap::from([(
+            "OPENROUTER_API".to_string(),
+            "new-secret".to_string(),
+        )]);
+
+        super::apply_env_credentials(&mut reloaded, &env);
+        super::apply_reloaded_config(&mut app, reloaded);
+
+        let said = rows(&app);
+        assert!(
+            said.iter().any(|text| text.contains("restart to activate"))
+                && !said.iter().any(|text| text.contains("no AI model")),
+            "credential-aware diagnostic expected: {said:?}"
+        );
+    }
+
+    #[test]
+    fn reload_does_not_send_the_user_to_restart_into_the_same_silence() {
+        // "Restart to activate" is only ever true when a translator is NAMED.
+        // A config that enables translation while naming none translates
+        // nothing no matter how many times it is restarted, and telling the
+        // user otherwise contradicts what they wrote — most sharply right
+        // after they wrote `backend = "none"` themselves.
+        for backend in ["none", "gogle"] {
+            let mut app = test_app();
+            app.state
+                .add_buffer(crate::state::buffer::Buffer::for_test(
+                    "net",
+                    crate::state::buffer::BufferType::Channel,
+                    "#german",
+                ));
+            app.state.set_active_buffer("net/#german");
+
+            let mut reloaded = crate::config::AppConfig::default();
+            reloaded.translate.enabled = true;
+            reloaded.translate.backend = backend.to_string();
+            super::apply_reloaded_config(&mut app, reloaded);
+
+            let said = rows(&app);
+            assert!(
+                !said.iter().any(|t| t.contains("restart")),
+                "backend={backend} must not advise a restart: {said:?}"
+            );
+            assert!(
+                said.iter().any(|t| t.contains("no translator is installed")),
+                "…but must still say translation is not happening: {said:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reload_stays_quiet_when_translation_is_off_or_actually_running() {
+        // The warning is about a contradiction between config and reality.
+        // Firing it on an ordinary reload would train the user to ignore it.
+        for (enabled, backend) in [(false, false), (true, true)] {
+            let mut app = test_app();
+            app.state
+                .add_buffer(crate::state::buffer::Buffer::for_test(
+                    "net",
+                    crate::state::buffer::BufferType::Channel,
+                    "#german",
+                ));
+            app.state.set_active_buffer("net/#german");
+            if backend {
+                app.translate_backend = Some(std::sync::Arc::new(
+                    crate::translate::backend::StubBackend::new(0, 0),
+                ));
+            }
+            let mut reloaded = crate::config::AppConfig::default();
+            reloaded.translate.enabled = enabled;
+            if backend {
+                reloaded.translate.backend = "stub".to_string();
+            }
+            super::apply_reloaded_config(&mut app, reloaded);
+            assert!(
+                !rows(&app).iter().any(|t| t.contains("restart to activate")),
+                "enabled={enabled} backend={backend} must not warn: {:?}",
+                rows(&app)
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod ignore_runtime_tests {
+    use super::*;
+    use crate::app::input::submit_typing_tests::test_app;
+    use crate::config::IgnoreLevel;
+    use crate::irc::ignore::should_ignore;
+
+    #[test]
+    fn ignore_and_both_unignore_forms_take_effect_without_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut app = test_app();
+        for target in ["alice", "1"] {
+            ignore_with_path(&mut app, &["alice".into()], &path);
+            for level in [IgnoreLevel::Msgs, IgnoreLevel::Public, IgnoreLevel::Ctcps, IgnoreLevel::Notices, IgnoreLevel::Joins] {
+                assert!(should_ignore(&app.state.ignores, "alice", None, None, &level, None));
+            }
+            assert_eq!(app.config.ignores.len(), 1);
+            unignore_with_path(&mut app, &[target.into()], &path);
+            assert!(!should_ignore(&app.state.ignores, "alice", None, None, &IgnoreLevel::Msgs, None));
+            assert!(app.config.ignores.is_empty());
+        }
+    }
+
+    #[test]
+    fn invalid_arguments_do_not_install_an_all_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut app = test_app();
+        for tail in [vec!["notice"], vec!["-channels"], vec!["-channels", ""], vec!["-channels", "#rust,"], vec!["notices", "typo"], vec!["-channels", "notices"]] {
+            let mut args = vec!["alice".to_owned()];
+            args.extend(tail.into_iter().map(str::to_owned));
+            ignore_with_path(&mut app, &args, &path);
+            assert!(app.config.ignores.is_empty());
+            assert!(app.state.ignores.is_empty());
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn explicit_levels_and_channels_are_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut app = test_app();
+        ignore_with_path(&mut app, &["alice".into(), "notices".into(), "-channels".into(), "#rust".into()], &path);
+        assert!(should_ignore(&app.state.ignores, "alice", None, None, &IgnoreLevel::Notices, Some("#rust")));
+        assert!(!should_ignore(&app.state.ignores, "alice", None, None, &IgnoreLevel::Msgs, Some("#rust")));
+        assert!(!should_ignore(&app.state.ignores, "alice", None, None, &IgnoreLevel::Notices, Some("#other")));
+        unignore_with_path(&mut app, &["missing".into()], &path);
+        assert_eq!(app.state.ignores.len(), 1);
     }
 }

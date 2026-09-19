@@ -15,6 +15,7 @@ use super::handlers_irc::{
     cmd_uninvex, cmd_unreop, cmd_version, cmd_voice, cmd_who, cmd_whois, cmd_whowas, cmd_wii,
 };
 use super::handlers_shrink::cmd_shrink;
+use super::handlers_translate::cmd_translate;
 use super::handlers_ui::{
     cmd_alias, cmd_clear, cmd_close, cmd_detach, cmd_emote, cmd_help, cmd_items, cmd_quit,
     cmd_shell, cmd_unalias, cmd_wizard,
@@ -628,7 +629,7 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
             "close",
             CommandDef {
                 handler: cmd_close,
-                description: "Close active buffer",
+                description: "Close a window, a range of windows, or the active one",
                 aliases: &["wc"],
                 category: CommandCategory::Other,
             },
@@ -680,6 +681,15 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
                 category: CommandCategory::Other,
             },
         ),
+        (
+            "translate",
+            CommandDef {
+                handler: cmd_translate,
+                description: "Translate a channel or query in near-real time",
+                aliases: &["tr"],
+                category: CommandCategory::Other,
+            },
+        ),
     ]
 });
 
@@ -707,8 +717,13 @@ pub fn get_command_names() -> &'static [&'static str] {
     &NAMES
 }
 
-/// Resolve an alias to its canonical command name.
-#[allow(dead_code)]
+/// Resolve a built-in alias to its canonical command name.
+///
+/// `None` for anything the registry does not know — a user-defined
+/// `/alias`, a script command, or a typo. Built-ins are checked here in the
+/// same order `execute_command_with_depth` dispatches them (registry first,
+/// user aliases only as a fallback), so a user alias can never shadow a
+/// built-in name here either.
 pub fn resolve_alias(name: &str) -> Option<&'static str> {
     let commands = get_commands();
     for &(cmd_name, ref def) in commands {

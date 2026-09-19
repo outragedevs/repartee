@@ -1,6 +1,9 @@
 pub const APP_NAME: &str = "repartee";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const APP_URL: &str = "https://repart.ee/";
+/// One-line summary of the binary, taken from `Cargo.toml` so `--help` and the
+/// crate metadata can never disagree.
+pub const APP_DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");
 
 /// Base URL for the dictionary repository (raw GitHub content).
 pub const DICTS_REPO_URL: &str =

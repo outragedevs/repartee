@@ -103,6 +103,24 @@ fn rekey_notice_target(
     })
 }
 
+/// The prose inside an outgoing wire payload, or `None` when there is none
+/// to translate.
+///
+/// A plain message is entirely prose. A `\x01ACTION …\x01` is prose wrapped
+/// in CTCP framing, so the inner text is returned — handing the framing to a
+/// translator gets back anything but a valid CTCP. Every other CTCP
+/// (`VERSION`, `PING`, DCC negotiation) is protocol and must pass through
+/// untouched.
+pub fn translatable_outgoing_body(wire_text: &str) -> Option<&str> {
+    let Some(ctcp) = wire_text
+        .strip_prefix('\x01')
+        .and_then(|t| t.strip_suffix('\x01'))
+    else {
+        return Some(wire_text);
+    };
+    ctcp.strip_prefix("ACTION ")
+}
+
 impl AppState {
     /// Resolve a Query buffer's E2E peer handle: the live server-stamped
     /// `peer_handle` if the peer has spoken this session, otherwise the
@@ -648,6 +666,7 @@ impl AppState {
         self.add_local_message(
             buffer_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: chrono::Utc::now(),
                 message_type: MessageType::Event,
@@ -660,6 +679,8 @@ impl AppState {
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
+                wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -696,6 +717,10 @@ impl super::App {
     /// Returns `false` when nothing reached the wire: the gate refused
     /// (fail-closed — the `[E2E]` reason has already been surfaced) or the
     /// connection was down/failed. Callers must NOT retry with plaintext.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one outbound gate preserves ordering across encryption and translation"
+    )]
     pub(crate) fn send_gated_message(
         &mut self,
         conn_id: &str,
@@ -704,7 +729,6 @@ impl super::App {
         echo: Option<GatedEcho<'_>>,
     ) -> bool {
         use crate::state::buffer::{Message, MessageType};
-
         // Precheck the connection BEFORE running the gate: planning may call
         // encrypt_outgoing, which creates/rotates the outgoing session and
         // queues REKEY NOTICEs — and drain_pending_e2e_sends DROPS queued
@@ -720,6 +744,25 @@ impl super::App {
                 "Failed to send message: connection unavailable",
             );
             return false;
+        }
+
+        // Outgoing translation, for every sender that addresses a target by
+        // NAME. See `gate_by_target_translation`.
+        // The caller's echo intent travels with the request. Deriving it at
+        // delivery from server capabilities alone lost `even_without_encryption`
+        // and gave script sends an echo they explicitly do not want.
+        let echo_plan = echo.as_ref().map_or(
+            crate::app::translate::OutgoingEchoPlan::None,
+            |e| crate::app::translate::OutgoingEchoPlan::Gated {
+                buffer_id: e.buffer_id.to_string(),
+                message_type: e.message_type.clone(),
+                even_without_encryption: e.even_without_encryption,
+            },
+        );
+        if let Some(handled) =
+            self.gate_by_target_translation(conn_id, target, wire_text, echo_plan)
+        {
+            return handled;
         }
 
         let plan = match self.state.e2e_send_plan_for_target(conn_id, target, wire_text) {
@@ -784,20 +827,17 @@ impl super::App {
                     .map(|c| c.nick.clone())
                     .unwrap_or_default();
                 let own_mode = self.state.nick_prefix(echo.buffer_id, &nick);
-                // Encrypted sends and ACTIONs echo as ONE logical message
-                // (matching what the peer renders); plain multi-chunk text
+                // Matching what the peer renders; plain multi-chunk text
                 // echoes per wire chunk, matching the legacy handlers.
+                let one_row = encrypted || echo.message_type == MessageType::Action;
                 let echo_chunks: Vec<String> =
-                    if encrypted || echo.message_type == MessageType::Action {
-                        vec![echo.text.to_string()]
-                    } else {
-                        wires
-                    };
+                    if one_row { vec![echo.text.to_string()] } else { wires };
                 for chunk in echo_chunks {
                     let id = self.state.next_message_id();
                     self.state.add_message(
                         echo.buffer_id,
                         Message {
+                            log_key: None, // live row, never read back from the log
                             id,
                             timestamp: chrono::Utc::now(),
                             message_type: echo.message_type.clone(),
@@ -810,6 +850,8 @@ impl super::App {
                             log_msg_id: None,
                             log_ref_id: None,
                             tags: None,
+                            wire_origin: None,
+                            translation_suffix_at: None,
                         },
                     );
                 }
@@ -839,6 +881,7 @@ impl super::App {
         self.state.add_local_message(
             &active_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: chrono::Utc::now(),
                 message_type: MessageType::Event,
@@ -851,7 +894,86 @@ impl super::App {
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
+                wire_origin: None,
+                translation_suffix_at: None,
             },
+        );
+    }
+}
+
+#[cfg(test)]
+mod gate_wiring_tests {
+    /// `send_gated_message` is the single chokepoint every by-target sender
+    /// uses, and its connection precheck runs first, so the translation gate
+    /// cannot be reached in a unit test without a live `IrcHandle`.
+    ///
+    /// This reads the source instead — the same technique `main.rs` uses to
+    /// prove every dispatched CLI literal has a help row. Deleting the gate
+    /// call would otherwise silently restore the bypass where `/msg` and
+    /// `/me` sent untranslated text to a buffer configured for translation,
+    /// and no test would notice.
+    #[test]
+    fn send_gated_message_consults_the_translation_gate() {
+        let src = include_str!("e2e_gate.rs");
+        let start = src
+            .find("pub(crate) fn send_gated_message(")
+            .expect("send_gated_message exists");
+        let body = &src[start..];
+        let end = body
+            .find("\n    /// ")
+            .unwrap_or(body.len());
+        assert!(
+            // The CALL, not the name: a bare-name check was satisfied by the
+            // doc comment above the call even with the call itself deleted,
+            // which a mutation run caught.
+            body[..end].contains("self.gate_by_target_translation("),
+            "send_gated_message must route by-target sends through the \
+             translation gate; without it /msg and /me bypass it entirely"
+        );
+    }
+}
+
+#[cfg(test)]
+mod translatable_body_tests {
+    use super::translatable_outgoing_body;
+
+    #[test]
+    fn a_plain_message_is_all_prose() {
+        assert_eq!(translatable_outgoing_body("hello there"), Some("hello there"));
+    }
+
+    #[test]
+    fn an_action_yields_its_inner_text_only() {
+        // Handing the `\x01ACTION …\x01` framing to a translator gets back
+        // anything but a valid CTCP.
+        assert_eq!(
+            translatable_outgoing_body("\x01ACTION waves hello\x01"),
+            Some("waves hello")
+        );
+    }
+
+    #[test]
+    fn other_ctcps_are_protocol_and_never_translated() {
+        for wire in [
+            "\x01VERSION\x01",
+            "\x01PING 12345\x01",
+            "\x01DCC CHAT chat 1 2\x01",
+        ] {
+            assert_eq!(
+                translatable_outgoing_body(wire),
+                None,
+                "{wire} is protocol, not prose"
+            );
+        }
+    }
+
+    #[test]
+    fn a_message_merely_starting_with_the_ctcp_byte_is_not_a_ctcp() {
+        // Unterminated framing is not a CTCP, so it stays ordinary prose
+        // rather than being silently skipped.
+        assert_eq!(
+            translatable_outgoing_body("\x01not terminated"),
+            Some("\x01not terminated")
         );
     }
 }
@@ -964,6 +1086,7 @@ mod tests {
                 autosendcmd: None,
                 sasl_mechanism: None,
                 client_cert_path: None,
+                sasl_key_path: None,
             },
             local_ip: None,
             enabled_caps: std::collections::HashSet::new(),

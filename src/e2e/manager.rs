@@ -93,6 +93,14 @@ const PENDING_INBOUND_TTL_SECS: i64 = 21_600;
 /// like any other AEAD failure.
 const REKEY_PREV_KEY_GRACE_SECS: i64 = 300;
 
+/// Cap on `E2eManager::unresolved_trust_changes`. Every entry corresponds
+/// to a peer already in the keyring, and repeats are deduplicated by
+/// (kind, handle) — but one peer cycling idents still mints a fresh
+/// `HandleChanged` per ident, so the list is bounded and drops its oldest
+/// entry when full. Losing one is self-healing: the peer's next handshake
+/// attempt records it again.
+const MAX_UNRESOLVED_TRUST_CHANGES: usize = 64;
+
 /// An outbound REKEY CTCP ready to ship, paired with the target IRC handle
 /// it must go to. Drained by `take_pending_rekey_sends` right after
 /// `encrypt_outgoing` triggers a lazy rotation, so the caller can enqueue
@@ -147,6 +155,14 @@ pub struct E2eManager {
     /// dispatcher via `take_pending_trust_changes` and surfaced to the
     /// user as themed event messages.
     pending_trust_change: Mutex<Vec<PendingTrustNotice>>,
+    /// The same TOFU warnings, kept until the user resolves them.
+    ///
+    /// `pending_trust_change` is a *render* queue: the dispatcher drains it
+    /// the instant the warning is printed. `/e2e reverify` runs seconds or
+    /// minutes later, so it cannot read consent state out of a queue that
+    /// is already empty — it reads it from here instead, and both are
+    /// cleared once the user has decided.
+    unresolved_trust_changes: Mutex<Vec<PendingTrustNotice>>,
     /// Outbound REKEY CTCPs produced by a lazy rotation inside
     /// `encrypt_outgoing`. The input layer drains these right after each
     /// encrypt call and appends them to `AppState::pending_e2e_sends`,
@@ -217,6 +233,137 @@ pub struct PendingTrustNotice {
     pub new_pubkey: Option<[u8; 32]>,
 }
 
+/// Does `notice` name `target`?
+///
+/// Every notice is filed under the handle the offending handshake arrived
+/// from, but a `HandleChanged` warning *prints both* the old and the new
+/// `ident@host` — so the user may reasonably type either when accepting
+/// it, and both must resolve to the same peer.
+/// Are these the same warning about the same peer?
+///
+/// The channel is deliberately excluded: a peer's identity is not
+/// per-channel, so one key change seen on `#a` and `#b` is one decision
+/// even though it is rendered in both buffers.
+fn same_warning(a: &PendingTrustNotice, b: &PendingTrustNotice) -> bool {
+    a.handle == b.handle && a.change == b.change
+}
+
+/// What accepting a warning would actually do.
+///
+/// A `Revoked` warning has no automatic action — `/e2e unrevoke` is its
+/// documented answer — and a `FingerprintChanged` that arrived without the
+/// offered pubkey cannot be installed without a second handshake. Both
+/// yield `None` and fall through to the destructive purge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Consent {
+    /// Same key, new `ident@host`: re-bind the existing trusted row.
+    Rebind {
+        old_handle: String,
+        new_handle: String,
+        fingerprint: Fingerprint,
+    },
+    /// New key at a known handle: install it in place of the old one.
+    Install {
+        handle: String,
+        old_fp: Fingerprint,
+        new_fp: Fingerprint,
+        pubkey: [u8; 32],
+    },
+}
+
+impl Consent {
+    /// The fingerprint that will be trusted once this is applied — the
+    /// key the user compares out of band, and therefore the only thing
+    /// that tells two changes at one handle apart.
+    const fn accepted_fingerprint(&self) -> Fingerprint {
+        match self {
+            Self::Rebind { fingerprint, .. } => *fingerprint,
+            Self::Install { new_fp, .. } => *new_fp,
+        }
+    }
+
+    /// What applying this would commit to: a key trusted at a handle.
+    ///
+    /// Deliberately excludes where the key is arriving *from*. That is
+    /// only ever informational — cleanup reads the peer's live binding
+    /// instead — so two warnings differing solely in their historical
+    /// source describe one decision, and must not read as a conflict.
+    fn commitment(&self) -> (Fingerprint, &str) {
+        match self {
+            Self::Rebind {
+                new_handle,
+                fingerprint,
+                ..
+            } => (*fingerprint, new_handle),
+            Self::Install { handle, new_fp, .. } => (*new_fp, handle),
+        }
+    }
+}
+
+/// The changes among `notices` that `/e2e reverify` can actually apply,
+/// for the user-facing candidate list.
+fn actionable_changes(notices: &[PendingTrustNotice]) -> Vec<TrustChange> {
+    notices
+        .iter()
+        .filter(|n| consent_for(n).is_some())
+        .map(|n| n.change.clone())
+        .collect()
+}
+
+/// Does `notice` accept the key the user named?
+///
+/// `selector` is matched as a case-insensitive prefix of the accepted
+/// fingerprint's hex, so the value printed in the disambiguation list can
+/// be pasted back verbatim — or shortened, as long as it stays unique.
+fn selects(notice: &PendingTrustNotice, selector: &str) -> bool {
+    consent_for(notice).is_some_and(|consent| {
+        hex::encode(consent.accepted_fingerprint()).starts_with(selector)
+    })
+}
+
+fn consent_for(notice: &PendingTrustNotice) -> Option<Consent> {
+    match (&notice.change, notice.new_pubkey) {
+        (
+            TrustChange::HandleChanged {
+                old_handle,
+                new_handle,
+                fingerprint,
+            },
+            _,
+        ) => Some(Consent::Rebind {
+            old_handle: old_handle.clone(),
+            new_handle: new_handle.clone(),
+            fingerprint: *fingerprint,
+        }),
+        (
+            TrustChange::FingerprintChanged {
+                handle,
+                old_fp,
+                new_fp,
+            },
+            Some(pubkey),
+        ) => Some(Consent::Install {
+            handle: handle.clone(),
+            old_fp: *old_fp,
+            new_fp: *new_fp,
+            pubkey,
+        }),
+        _ => None,
+    }
+}
+
+fn notice_names(notice: &PendingTrustNotice, target: &str) -> bool {
+    notice.handle == target
+        || matches!(
+            &notice.change,
+            TrustChange::HandleChanged {
+                old_handle,
+                new_handle,
+                ..
+            } if old_handle == target || new_handle == target
+        )
+}
+
 /// Outcome of `E2eManager::reverify_peer`. The UI layer renders each
 /// variant with a different message so the user knows whether their
 /// `/e2e reverify <nick>` actually consumed a pending trust-change or
@@ -235,6 +382,30 @@ pub enum ReverifyOutcome {
     /// outgoing recipients) has been deleted. `deleted` counts the rows
     /// removed so the UI can surface a short summary.
     Cleared { deleted: usize },
+    /// A `HandleChanged` notice was waiting: the same, already-trusted
+    /// key had re-appeared under a different `ident@host`. The peer row
+    /// was re-bound to `new_handle` and the stale per-handle rows were
+    /// dropped. Nothing was purged — the identity is unchanged.
+    Rebound {
+        fingerprint: Fingerprint,
+        old_handle: String,
+        new_handle: String,
+    },
+    /// More than one distinct identity change is waiting on this target
+    /// and nothing distinguishes which one the user verified. Nothing was
+    /// touched and no warning was consumed — re-run naming the accepted
+    /// key's fingerprint, which is the only thing that tells two changes
+    /// at one handle apart.
+    Ambiguous { candidates: Vec<TrustChange> },
+    /// A fingerprint was named but matches none of the warnings waiting
+    /// on this target. Nothing was touched: a mistyped selector must not
+    /// fall through to the destructive purge.
+    NoSuchCandidate { candidates: Vec<TrustChange> },
+    /// The warning named a key that has since been forgotten, so it could
+    /// never be applied. It was discarded and nothing else was touched —
+    /// notably not the handle the user named, which by then may belong to
+    /// an entirely different peer.
+    Stale { fingerprint: Fingerprint },
     /// Nothing to reverify — no pending notice AND no existing state
     /// for this handle.
     NotFound,
@@ -295,6 +466,15 @@ impl E2eManager {
         }
     }
 
+    /// Drop the in-flight handshake state tied to `handle`.
+    ///
+    /// Deliberately does **not** touch trust warnings. Clearing sessions
+    /// for a handle is housekeeping; resolving a warning is the user's
+    /// decision, and the two get conflated at the cost of silently
+    /// discarding a decision they never made. A warning is only ever
+    /// retired by the `/e2e reverify` that answers it, or by
+    /// [`Self::clear_trust_notices_for_handle`] when the peer is
+    /// forgotten outright.
     fn clear_pending_state_for_handle(&self, handle: &str) -> usize {
         let mut deleted = 0usize;
 
@@ -321,15 +501,6 @@ impl E2eManager {
         pending_accept.retain(|req| req.handle != handle);
         deleted += accept_before.saturating_sub(pending_accept.len());
         drop(pending_accept);
-
-        let mut notices = self
-            .pending_trust_change
-            .lock()
-            .expect("e2e pending trust change mutex poisoned");
-        let notices_before = notices.len();
-        notices.retain(|notice| notice.handle != handle);
-        deleted += notices_before.saturating_sub(notices.len());
-        drop(notices);
 
         let mut outbound = self
             .pending_outbound_keyreqs
@@ -400,6 +571,7 @@ impl E2eManager {
             ts_tolerance_secs,
             pending: Mutex::new(HashMap::new()),
             pending_trust_change: Mutex::new(Vec::new()),
+            unresolved_trust_changes: Mutex::new(Vec::new()),
             pending_rekey_sends: Mutex::new(Vec::new()),
             pending_outbound_keyreqs: Mutex::new(Vec::new()),
             pending_inbound: Mutex::new(HashMap::new()),
@@ -445,12 +617,65 @@ impl E2eManager {
         Ok(TrustChange::New)
     }
 
-    /// Push a TOFU warning for later surfacing by the IRC dispatcher.
+    /// Push a TOFU warning for the IRC dispatcher to surface, and remember
+    /// it as unresolved so `/e2e reverify` can still act on it after the
+    /// dispatcher has drained the render queue.
     fn record_trust_change(&self, notice: PendingTrustNotice) {
+        let mut unresolved = self
+            .unresolved_trust_changes
+            .lock()
+            .expect("e2e unresolved trust change mutex poisoned");
+        // A peer that keeps retrying re-records the *same* warning every
+        // time, so an identical one collapses and a retry loop cannot grow
+        // this list. Deduplicating any more loosely than that would be a
+        // security bug: two different keys offered at one handle are two
+        // separate decisions, and dropping the older one would let the
+        // user compare one fingerprint out of band and consent to another.
+        unresolved.retain(|n| !same_warning(n, &notice));
+        if unresolved.len() >= MAX_UNRESOLVED_TRUST_CHANGES {
+            unresolved.remove(0);
+        }
+        unresolved.push(notice.clone());
+        drop(unresolved);
+
         self.pending_trust_change
             .lock()
             .expect("e2e pending trust change mutex poisoned")
             .push(notice);
+    }
+
+    /// Every unresolved warning that names `target`, left in place.
+    ///
+    /// Reading is separate from consuming because an ambiguous set must be
+    /// reported *and preserved* — consuming warnings we refuse to act on
+    /// would leave the user with no way to resolve them at all.
+    fn trust_notices_for(&self, target: &str) -> Vec<PendingTrustNotice> {
+        self.unresolved_trust_changes
+            .lock()
+            .expect("e2e unresolved trust change mutex poisoned")
+            .iter()
+            .filter(|n| notice_names(n, target))
+            .cloned()
+            .collect()
+    }
+
+    /// Drop `resolved` from the unresolved set and the render queue alike,
+    /// so a warning the user has already answered cannot fire afterwards.
+    /// Warnings outside `resolved` are untouched: deciding one is not
+    /// deciding the rest.
+    fn drop_trust_notices(&self, resolved: &[PendingTrustNotice]) {
+        if resolved.is_empty() {
+            return;
+        }
+        let is_resolved = |n: &PendingTrustNotice| resolved.iter().any(|r| same_warning(n, r));
+        self.pending_trust_change
+            .lock()
+            .expect("e2e pending trust change mutex poisoned")
+            .retain(|n| !is_resolved(n));
+        self.unresolved_trust_changes
+            .lock()
+            .expect("e2e unresolved trust change mutex poisoned")
+            .retain(|n| !is_resolved(n));
     }
 
     /// Drain and return all pending TOFU warnings. The IRC event dispatcher
@@ -464,103 +689,332 @@ impl E2eManager {
         std::mem::take(&mut *guard)
     }
 
-    /// Reverify a peer after a fingerprint change.
+    /// Accept the identity change a peer is waiting on.
     ///
-    /// Looks for a `PendingTrustNotice` in the queue whose handle
-    /// matches `nick_or_handle`. If one is found AND it carries the
-    /// new pubkey (i.e. it was a `FingerprintChanged` notice threaded
-    /// through the handshake path), this:
-    ///   1. Deletes the old peer row by fingerprint.
-    ///   2. Deletes every incoming-session row for the handle across
-    ///      all channels — the old key is stale in every context.
-    ///   3. Deletes every outgoing-recipient row for the handle so we
-    ///      stop pushing our key at the evicted identity.
-    ///   4. Upserts a brand-new peer row carrying the fingerprint and
-    ///      pubkey extracted from the notice. The status is set to
-    ///      `Trusted` because `/e2e reverify` IS the user's explicit
-    ///      consent to the new key.
-    ///   5. Clears the notice from the pending queue (and any other
-    ///      queued notices for the same handle so the user is not
-    ///      warned twice for a single reverification).
+    /// Selects the one warning `nick_or_handle` names and applies it:
     ///
-    /// If no pending notice is found — or a notice was found but it
-    /// did not carry a new pubkey (a `HandleChanged` or `Revoked`
-    /// warning, neither of which the reverify path knows how to apply
-    /// automatically) — the handle is still purged from the keyring so
-    /// a subsequent handshake starts cold. This is the destructive
-    /// reverify path documented in the `/e2e reverify` help text.
+    ///   * `HandleChanged` → [`ReverifyOutcome::Rebound`]. The key is
+    ///     unchanged and already trusted, so the existing peer row is
+    ///     re-bound to the new `ident@host` and the stale per-handle
+    ///     session/recipient rows are dropped. Purging here would throw
+    ///     away a fingerprint the user has already verified.
+    ///   * `FingerprintChanged` carrying the offered pubkey →
+    ///     [`ReverifyOutcome::Applied`]. The old row is deleted and the
+    ///     new key installed as `Trusted`, because reverify IS the user's
+    ///     consent to it.
     ///
-    /// Returns `ReverifyOutcome::NotFound` only when there is neither a
-    /// pending notice nor any existing keyring state for this handle.
-    pub fn reverify_peer(&self, nick_or_handle: &str) -> Result<ReverifyOutcome> {
-        // Drain the pending-notice queue into two partitions: notices
-        // for `nick_or_handle` (consumed here) and everything else
-        // (preserved). Within the consumed set we look for the first
-        // FingerprintChanged variant whose notice also carries the new
-        // pubkey — that's the only combination the automatic apply
-        // path can act on without a second handshake.
-        let mut notices_guard = self
-            .pending_trust_change
-            .lock()
-            .expect("e2e pending trust change mutex poisoned");
-        let mut applied: Option<(Fingerprint, Fingerprint, [u8; 32])> = None;
-        let mut kept: Vec<PendingTrustNotice> = Vec::with_capacity(notices_guard.len());
-        for notice in std::mem::take(&mut *notices_guard) {
-            if notice.handle != nick_or_handle {
-                kept.push(notice);
-                continue;
-            }
-            if applied.is_none()
-                && let TrustChange::FingerprintChanged { old_fp, new_fp, .. } = &notice.change
-                && let Some(pk) = notice.new_pubkey
-            {
-                applied = Some((*old_fp, *new_fp, pk));
-            }
-            // Other match-handle notices are dropped (consumed) so we
-            // don't surface a duplicate warning after the user has
-            // already signalled consent via /e2e reverify.
-        }
-        *notices_guard = kept;
-        drop(notices_guard);
+    /// Selection is deliberately strict, because picking the wrong
+    /// warning means installing a key the user never compared:
+    ///
+    ///   * A warning filed *exactly* under the given handle wins over one
+    ///     that merely names it as the handle a key is moving away from.
+    ///     Otherwise `/e2e reverify H` — the command a "key at H has
+    ///     CHANGED" warning tells you to run — could be answered by an
+    ///     unrelated handle change that happens to mention H.
+    ///   * If more than one distinct change is still in play for the
+    ///     chosen target, nothing is applied and nothing is consumed:
+    ///     [`ReverifyOutcome::Ambiguous`] hands the choice back to the
+    ///     user rather than guessing which fingerprint they verified.
+    ///
+    /// `fingerprint` is that answer: a hex prefix of the key being
+    /// accepted, which narrows the candidates before any of the above.
+    /// Two keys offered at one handle are indistinguishable by handle, so
+    /// this is the only way to resolve them — and it is the value the
+    /// user compared out of band, not an index into a list that could
+    /// shift under them. A selector that matches nothing yields
+    /// [`ReverifyOutcome::NoSuchCandidate`] and touches nothing.
+    ///
+    /// With no applicable warning the handle is purged from the keyring
+    /// so a subsequent handshake starts cold — the destructive recovery
+    /// path documented in the `/e2e reverify` help text.
+    ///
+    /// Returns [`ReverifyOutcome::NotFound`] only when there is neither a
+    /// warning nor any existing keyring state for this handle.
+    pub fn reverify_peer(
+        &self,
+        nick_or_handle: &str,
+        fingerprint: Option<&str>,
+    ) -> Result<ReverifyOutcome> {
+        // Read without consuming — an ambiguous set has to survive being
+        // reported, or the user is left with no way to resolve it.
+        let notices = self.trust_notices_for(nick_or_handle);
+        let exact: Vec<PendingTrustNotice> = notices
+            .iter()
+            .filter(|n| n.handle == nick_or_handle)
+            .cloned()
+            .collect();
+        // Fall back to the old-handle alias only when nothing is filed
+        // under the spelling the user actually typed.
+        let mut candidates = if exact.is_empty() { notices } else { exact };
 
-        // Branch 1: we found a pending FingerprintChanged notice with
-        // an attached pubkey. Install the new identity directly.
-        if let Some((old_fp, new_fp, new_pubkey)) = applied {
-            self.keyring.delete_peer_by_fingerprint(&old_fp)?;
+        if let Some(selector) = fingerprint {
+            let selector = selector.trim().to_ascii_lowercase();
+            let picked: Vec<PendingTrustNotice> = candidates
+                .iter()
+                .filter(|n| selects(n, &selector))
+                .cloned()
+                .collect();
+            if picked.is_empty() {
+                // Falling through would purge on a typo. Report instead.
+                return Ok(ReverifyOutcome::NoSuchCandidate {
+                    candidates: actionable_changes(&candidates),
+                });
+            }
+            candidates = picked;
+        }
+
+        // Collapse by commitment, not by whole-`Consent` equality: two
+        // warnings that would trust the same key at the same handle are one
+        // decision however many historical sources they name. A peer that
+        // moves H→K and then retries J leaves both `H→J` and `K→J` queued,
+        // and calling that ambiguous produces a prompt listing one
+        // fingerprint twice with identical accept commands — unresolvable.
+        let mut consents: Vec<Consent> = Vec::new();
+        for notice in &candidates {
+            if let Some(consent) = consent_for(notice)
+                && !consents
+                    .iter()
+                    .any(|seen| seen.commitment() == consent.commitment())
+            {
+                consents.push(consent);
+            }
+        }
+        if consents.len() > 1 {
+            return Ok(ReverifyOutcome::Ambiguous {
+                candidates: actionable_changes(&candidates),
+            });
+        }
+
+        match consents.pop() {
+            Some(Consent::Rebind {
+                old_handle,
+                new_handle,
+                fingerprint,
+            }) => self.apply_rebind(&candidates, &old_handle, new_handle, fingerprint),
+            Some(Consent::Install {
+                handle,
+                old_fp,
+                new_fp,
+                pubkey,
+            }) => self.apply_install(&candidates, &handle, old_fp, new_fp, pubkey),
+            None => self.purge_handle(nick_or_handle, &candidates),
+        }
+    }
+
+    /// Delete everything filed under `handle`: incoming sessions, outgoing
+    /// recipients, and in-flight handshake state. Leaves peer rows and
+    /// trust warnings alone — those are keyed by identity, not by handle.
+    fn clear_handle_state(&self, handle: &str) -> Result<()> {
+        self.keyring.delete_incoming_sessions_for_handle(handle)?;
+        self.keyring.delete_outgoing_recipients_for_handle(handle)?;
+        self.clear_pending_state_for_handle(handle);
+        Ok(())
+    }
+
+    /// The `ident@host` this fingerprint is bound to right now, if any.
+    fn current_binding(&self, fp: &Fingerprint) -> Result<Option<String>> {
+        Ok(self
+            .keyring
+            .get_peer_by_fingerprint(fp)?
+            .and_then(|peer| peer.last_handle))
+    }
+
+    /// Retire the identity that `handle` is being taken away from.
+    ///
+    /// Usually that means deleting the row: the peer regenerated their
+    /// key and the old one is finished. Two cases must not delete it,
+    /// because the old key is not finished at all — it has a life
+    /// elsewhere, and destroying it here would throw away trust the user
+    /// never withdrew:
+    ///
+    ///   * It is no longer bound to `handle`. Its move was already
+    ///     accepted, so this warning is about a handle it has left and
+    ///     there is nothing here to replace.
+    ///   * It has an unresolved handle change waiting. It has moved, and
+    ///     the user has yet to approve where — so detach it from the
+    ///     handle rather than delete it. That stops `get_peer_by_handle`
+    ///     finding it (two rows at one handle would resolve arbitrarily)
+    ///     while keeping the key and its trust for the pending move to be
+    ///     accepted later.
+    fn evict_replaced_identity(&self, old_fp: &Fingerprint, handle: &str) -> Result<()> {
+        let Some(mut peer) = self.keyring.get_peer_by_fingerprint(old_fp)? else {
+            return Ok(());
+        };
+        if peer.last_handle.as_deref() != Some(handle) {
+            return Ok(());
+        }
+        let moving = self
+            .unresolved_trust_changes
+            .lock()
+            .expect("e2e unresolved trust change mutex poisoned")
+            .iter()
+            .any(|n| {
+                matches!(&n.change, TrustChange::HandleChanged { fingerprint, .. }
+                    if fingerprint == old_fp)
+            });
+        if moving {
+            peer.last_handle = None;
+            self.keyring.upsert_peer(&peer)?;
+        } else {
+            self.keyring.delete_peer_by_fingerprint(old_fp)?;
+        }
+        Ok(())
+    }
+
+    /// Accept a handle change: re-bind an already-trusted key to a new
+    /// `ident@host`. The key itself is unchanged, so the fingerprint the
+    /// user verified is kept — purging here would discard real trust.
+    fn apply_rebind(
+        &self,
+        candidates: &[PendingTrustNotice],
+        old_handle: &str,
+        new_handle: String,
+        fingerprint: Fingerprint,
+    ) -> Result<ReverifyOutcome> {
+            let Some(peer) = self.keyring.get_peer_by_fingerprint(&fingerprint)? else {
+                // The key this warning is about has been forgotten since it
+                // was raised, so there is nothing to re-bind — and nothing
+                // of *its* to clean up either.
+                //
+                // Purging the handle the user named would be actively
+                // wrong. Reaching this branch through the old-handle alias
+                // means that handle is the one the key was moving away
+                // from, which may since have been claimed by an unrelated
+                // peer — whose rows are not ours to delete on the strength
+                // of an obsolete warning. Retire the warning and change
+                // nothing.
+                self.drop_trust_notices(candidates);
+                return Ok(ReverifyOutcome::Stale { fingerprint });
+            };
+            // Clean up where the peer is bound *now*, never the handle
+            // the warning snapshotted as `old_handle`. The two diverge
+            // as soon as an earlier change for this key is accepted,
+            // and the snapshot is then wrong in both directions: the
+            // live trusted session sits under the current binding and
+            // would survive the rebind — `decrypt_incoming` keys on
+            // `(handle, channel)` and never re-checks the peer row, so
+            // it would keep accepting traffic from a handle this peer
+            // no longer owns — while the historical handle may since
+            // have been reassigned, so cleaning it would delete a
+            // different peer's state.
+            //
+            // A detached peer (`last_handle = None`, left by an
+            // eviction) has no binding at all, and there is likewise
+            // nothing of its to clean.
+            self.clear_handle_state(&new_handle)?;
+            if let Some(current) = peer.last_handle.as_deref()
+                && current != new_handle
+            {
+                self.clear_handle_state(current)?;
+            }
+            self.keyring.upsert_peer(&PeerRecord {
+                fingerprint,
+                pubkey: peer.pubkey,
+                last_handle: Some(new_handle.clone()),
+                last_nick: peer.last_nick,
+                first_seen: peer.first_seen,
+                last_seen: now_unix(),
+                // Reverify is consent to the new *binding*, not to the
+                // key — so the key's standing is carried over, never
+                // raised. A peer whose first exchange is still awaiting
+                // `/e2e accept` has a `Pending` row, and a handle change
+                // is classified without regard to that, so hard-coding
+                // Trusted here would promote a peer the user never
+                // accepted on the strength of an unrelated decision.
+                global_status: peer.global_status,
+            })?;
+            // The destination may already have had an owner: a handle
+            // change is classified by fingerprint alone, so nothing
+            // upstream checked whether `new_handle` was free. Leaving
+            // that owner bound would put two trusted fingerprints on
+            // one `ident@host`.
             self.keyring
-                .delete_incoming_sessions_for_handle(nick_or_handle)?;
-            self.keyring
-                .delete_outgoing_recipients_for_handle(nick_or_handle)?;
-            self.clear_pending_state_for_handle(nick_or_handle);
+                .detach_other_peers_from_handle(&new_handle, &fingerprint)?;
+            // Only the handle just *assigned*. Rival claims to it lost
+            // the contest, but claims to the handle being vacated are
+            // untouched decisions about a now-free `ident@host`.
+            self.clear_trust_notices_for_handle(&new_handle);
+            self.drop_trust_notices(candidates);
+            Ok(ReverifyOutcome::Rebound {
+                fingerprint,
+                // Report the binding it actually moved from; the
+                // snapshot would name a handle it left long ago. For a
+                // detached peer there is no such handle, so the
+                // snapshot is the best available answer.
+                old_handle: peer
+                    .last_handle
+                    .unwrap_or_else(|| old_handle.to_string()),
+                new_handle,
+            })
+    }
+
+    /// Accept a key change: install `new_fp` at `handle` in place of the
+    /// identity that held it.
+    fn apply_install(
+        &self,
+        candidates: &[PendingTrustNotice],
+        handle: &str,
+        old_fp: Fingerprint,
+        new_fp: Fingerprint,
+        pubkey: [u8; 32],
+    ) -> Result<ReverifyOutcome> {
+            self.evict_replaced_identity(&old_fp, handle)?;
+            self.clear_handle_state(handle)?;
+            // The key being installed may already be trusted somewhere
+            // else: a warning recorded at this handle does not stop it
+            // being TOFU-pinned at a free one in the meantime. Moving
+            // it here leaves that binding's session behind, and decrypt
+            // never re-checks the peer row — so it would go on trusting
+            // traffic from the handle this key just left.
+            if let Some(current) = self.current_binding(&new_fp)?
+                && current != handle
+            {
+                self.clear_handle_state(&current)?;
+            }
             let now = now_unix();
             self.keyring.upsert_peer(&PeerRecord {
                 fingerprint: new_fp,
-                pubkey: new_pubkey,
-                last_handle: Some(nick_or_handle.to_string()),
+                pubkey,
+                last_handle: Some(handle.to_string()),
                 last_nick: None,
                 first_seen: now,
                 last_seen: now,
                 // Reverify is the user consenting to the NEW key.
                 global_status: TrustStatus::Trusted,
             })?;
-            return Ok(ReverifyOutcome::Applied { old_fp, new_fp });
-        }
+            // `old_fp` is whichever single row the classifier found at
+            // this handle; hold the one-fingerprint-per-handle line
+            // unconditionally rather than trusting that it was alone.
+            self.keyring
+                .detach_other_peers_from_handle(handle, &new_fp)?;
+            // Choosing one key for this handle rejects the others
+            // claiming it; warnings filed elsewhere are untouched.
+            self.clear_trust_notices_for_handle(handle);
+            self.drop_trust_notices(candidates);
+            Ok(ReverifyOutcome::Applied { old_fp, new_fp })
+    }
 
-        // Branch 2: destructive purge. Remove every trace of this
-        // handle so a subsequent handshake starts cold. If nothing is
-        // found, return NotFound so the UI can warn the user.
+    /// Destructive reverify: remove every trace of `handle` so a
+    /// subsequent handshake starts cold.
+    fn purge_handle(
+        &self,
+        handle: &str,
+        resolved: &[PendingTrustNotice],
+    ) -> Result<ReverifyOutcome> {
         let mut deleted: usize = 0;
-        if let Some(peer) = self.keyring.get_peer_by_handle(nick_or_handle)? {
+        if let Some(peer) = self.keyring.get_peer_by_handle(handle)? {
             self.keyring.delete_peer_by_fingerprint(&peer.fingerprint)?;
             deleted += 1;
         }
-        deleted += self
-            .keyring
-            .delete_incoming_sessions_for_handle(nick_or_handle)?;
-        deleted += self
-            .keyring
-            .delete_outgoing_recipients_for_handle(nick_or_handle)?;
-        deleted += self.clear_pending_state_for_handle(nick_or_handle);
+        deleted += self.keyring.delete_incoming_sessions_for_handle(handle)?;
+        deleted += self.keyring.delete_outgoing_recipients_for_handle(handle)?;
+        deleted += self.clear_pending_state_for_handle(handle);
+        // A consumed-but-unapplied warning (a Revoked notice, or a handle
+        // change whose peer row has since been forgotten) still counts as
+        // state we cleared — reporting NotFound after silently eating a
+        // warning is exactly the failure this path must not repeat.
+        deleted += resolved.len();
+        self.drop_trust_notices(resolved);
         if deleted == 0 {
             Ok(ReverifyOutcome::NotFound)
         } else {
@@ -891,7 +1345,38 @@ impl E2eManager {
         deleted += self.keyring.delete_incoming_sessions_for_handle(handle)?;
         deleted += self.keyring.delete_outgoing_recipients_for_handle(handle)?;
         deleted += self.clear_pending_state_for_handle(handle);
+        // Forgetting a peer outright IS a decision about its warnings —
+        // unlike the reverify paths, which retire only what they answer.
+        deleted += self.clear_trust_notices_for_handle(handle);
         Ok(deleted)
+    }
+
+    /// Retire every warning filed under `handle` — the peer is being
+    /// forgotten, so its pending decisions go with it.
+    ///
+    /// Strictly the handle a warning is *filed under*, never the
+    /// old-handle alias: a `HandleChanged` filed under J that names this
+    /// handle only as the one a key moved away from is a decision about
+    /// J, and forgetting this handle must not make it for the user.
+    fn clear_trust_notices_for_handle(&self, handle: &str) -> usize {
+        self.pending_trust_change
+            .lock()
+            .expect("e2e pending trust change mutex poisoned")
+            .retain(|notice| notice.handle != handle);
+
+        // Counted from the unresolved set, not the render queue. The
+        // dispatcher drains that queue the moment it prints a warning, so
+        // counting it reports 0 for state we really did remove — and it
+        // holds one entry per channel a warning was surfaced in, where the
+        // unresolved set holds one per decision, which is the number worth
+        // reporting.
+        let mut unresolved = self
+            .unresolved_trust_changes
+            .lock()
+            .expect("e2e unresolved trust change mutex poisoned");
+        let before = unresolved.len();
+        unresolved.retain(|notice| notice.handle != handle);
+        before.saturating_sub(unresolved.len())
     }
 
     /// Consume an unsolicited REKEY CTCP from `sender_handle`. Verifies

@@ -117,6 +117,17 @@ const SETTING_PATHS: &[&str] = &[
     "statusbar.prompt_color",
     "statusbar.separator",
     "statusbar.text_color",
+    // Per-buffer translation settings are deliberately absent here too: they
+    // live in a map keyed by buffer id and are managed by
+    // `/translate add*|del*`, which a dotted `/set` path cannot spell.
+    "translate.backend",
+    "translate.enabled",
+    "translate.max_in_flight",
+    "translate.max_queue",
+    "translate.my_lang",
+    "translate.show_original_in",
+    "translate.show_original_out",
+    "translate.timeout_ms",
     "typing.send_channels",
     "typing.send_queries",
     "typing.show",
@@ -168,6 +179,28 @@ const MAX_POPUP_ITEMS: usize = 50;
 pub fn InputLine() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
     let (value, set_value) = signal(String::new());
+
+    // A send the core refused comes back here rather than being lost. The
+    // composer was cleared on submit, so without this the author's text is
+    // gone — and restoring it into the TERMINAL's input instead would put it
+    // somewhere they are not looking.
+    //
+    // Only restores into an empty composer: they may have typed something
+    // else while the send was in flight, and clobbering that would be a
+    // second, worse surprise.
+    Effect::new(move |_| {
+        let Some(text) = state.restore_input.get() else {
+            return;
+        };
+        state.restore_input.set(None);
+        // Only into an empty composer: they may have started the next
+        // message, and clobbering that would be a worse surprise. The text
+        // is not lost either way — the core puts it in the error row too,
+        // precisely because this branch can decline to restore it.
+        if value.get_untracked().is_empty() {
+            set_value.set(text);
+        }
+    });
 
     // Report typing to the core, which owns the state machine, the throttle, the
     // flood budget and every guard. We send a predicate, never the text.

@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 pub use defaults::default_config;
 pub use env::{
-    apply_credentials, apply_shrink_credentials, apply_web_credentials, ensure_session_secret,
-    load_env, set_env_value,
+    apply_credentials, apply_shrink_credentials, apply_translate_credentials,
+    apply_web_credentials, ensure_session_secret, load_env, set_env_value,
 };
 
 // === Helper for serde defaults ===
@@ -101,6 +101,8 @@ pub struct AppConfig {
     pub emotes: EmotesConfig,
     #[serde(default)]
     pub typing: TypingConfig,
+    #[serde(default)]
+    pub translate: TranslateConfig,
 }
 
 /// Hand-written (not derived) for one reason: `config_version` must be
@@ -129,6 +131,7 @@ impl Default for AppConfig {
             shrink: ShrinkConfig::default(),
             emotes: EmotesConfig::default(),
             typing: TypingConfig::default(),
+            translate: TranslateConfig::default(),
         }
     }
 }
@@ -379,12 +382,24 @@ pub struct ServerConfig {
     pub reconnect_max_retries: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autosendcmd: Option<String>,
-    /// SASL mechanism to use: `"PLAIN"`, `"EXTERNAL"`, or `None` (auto-detect best).
+    /// SASL mechanism to use — `"PLAIN"`, `"EXTERNAL"`, `"SCRAM-SHA-1"`,
+    /// `"SCRAM-SHA-256"`, `"SCRAM-SHA-512"`, `"ECDSA-NIST256P-CHALLENGE"` — or
+    /// `None` to auto-detect the strongest the server offers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sasl_mechanism: Option<String>,
     /// Path to a client TLS certificate (PEM) for SASL EXTERNAL / `CertFP` auth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_cert_path: Option<String>,
+    /// Path to a PEM NIST P-256 private key for SASL
+    /// `ECDSA-NIST256P-CHALLENGE`. Distinct from `client_cert_path`, which is
+    /// the TLS client certificate: this key is never presented to TLS, only
+    /// used to sign the server's challenge.
+    ///
+    /// A path, not key material, so it is written to `config.toml` like
+    /// `client_cert_path` and unlike `sasl_pass`. Relative paths resolve
+    /// against `~/.repartee/certs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sasl_key_path: Option<String>,
 }
 
 #[expect(
@@ -541,6 +556,255 @@ impl Default for ShrinkConfig {
             cache_max_entries: 500,
         }
     }
+}
+
+/// Near-real-time channel translation.
+///
+/// This configures the *mechanism* — what is eligible, how long a line may
+/// wait, how it is displayed. Everything about how translation is actually
+/// performed lives behind the seam in `src/translate/backend.rs` and is
+/// configured separately.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TranslateConfig {
+    /// Master switch — when false nothing is translated in either
+    /// direction, even for buffers with per-buffer flags set.
+    ///
+    /// On its own it translates NOTHING: it says the mechanism may run, not
+    /// that there is anything to run it with. See `backend`.
+    pub enabled: bool,
+    /// Which implementation behind the seam to install, by name.
+    ///
+    /// `"none"` (the default) means there is no translator: the mechanism
+    /// stays wired but every line is delivered as it arrived. `"ai"` selects
+    /// the OpenAI-compatible provider policy configured under `translate.ai`.
+    /// `"stub"` selects the built-in test backend, which does not translate —
+    /// it REVERSES word order — and exists so the mechanism can be exercised
+    /// end to end with no API key.
+    ///
+    /// Deliberately not implied by `enabled`. A user who turns translation
+    /// on expects a translator; installing the stub would publish reversed
+    /// sentences on a real channel, under their nick, as if they had typed
+    /// them. Naming the stub is the difference between testing the mechanism
+    /// and being handed it by surprise.
+    pub backend: String,
+    /// The language YOU read and write, unless a buffer overrides it.
+    ///
+    /// Named `my_lang` rather than `target_lang` deliberately: "target" is
+    /// ambiguous about WHOSE language it means, and reading it as "the
+    /// language to translate into" is what produced an inverted outgoing
+    /// direction during development.
+    pub my_lang: String,
+    /// Append ` [original]` to incoming translated lines.
+    pub show_original_in: bool,
+    /// Append ` [original]` to the local echo of outgoing translated lines.
+    pub show_original_out: bool,
+    /// How long a line may sit in the reorder queue before it is released
+    /// untranslated. The default sits above the worst case measured during
+    /// research (~4.2 s), so a healthy provider never trips it.
+    pub timeout_ms: u64,
+    /// Concurrent in-flight translations. Raising this past a provider's
+    /// measured concurrency limit makes throughput worse, not better.
+    pub max_in_flight: u32,
+    /// Per-buffer queue ceiling. On overflow the oldest pending entries are
+    /// released untranslated, so a dead provider cannot turn the queue into
+    /// an unbounded memory leak with a frozen channel behind it.
+    pub max_queue: u32,
+    pub ai: TranslateAiConfig,
+    /// Per-buffer settings, keyed by buffer id (`<connection_id>/<target>`).
+    pub buffers: HashMap<String, TranslateBufferConfig>,
+}
+
+/// Which directions are translated for one channel or query.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TranslateBufferConfig {
+    pub incoming: bool,
+    pub outgoing: bool,
+    /// The language spoken in THIS channel or query.
+    ///
+    /// A buffer has a language PAIR, not a per-direction setting: this one
+    /// and ours. The directions swap them —
+    ///
+    /// | direction | source | target |
+    /// |---|---|---|
+    /// | incoming | `lang` | `my_lang` |
+    /// | outgoing | `my_lang` | `lang` |
+    ///
+    /// — which is why both call sites resolve the pair through the single
+    /// [`crate::translate::resolve_langs`] rather than reading these fields
+    /// directly. Reading them per direction is exactly how the outgoing
+    /// direction ended up inverted during development.
+    ///
+    /// `None` is allowed for incoming, where it means "let the broker detect
+    /// it". Outgoing cannot autodetect a TARGET — there is nothing to detect
+    /// which language to write in from — so it requires this to be set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    /// Per-buffer override of [`TranslateConfig::my_lang`].
+    ///
+    /// For reading one channel in a different language than the rest — say
+    /// the machine translation into your own language is poor for that
+    /// source, and English reads better.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub my_lang: Option<String>,
+}
+
+impl Default for TranslateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: "none".to_string(),
+            my_lang: "en".to_string(),
+            show_original_in: true,
+            show_original_out: true,
+            timeout_ms: 15_000,
+            max_in_flight: 4,
+            max_queue: 200,
+            ai: TranslateAiConfig::default(),
+            buffers: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TranslateAiConfig {
+    pub easy: Vec<String>,
+    pub strong: Vec<String>,
+    #[serde(default)]
+    pub terminal: Option<Vec<String>>,
+    pub preferred_attempt_ms: u64,
+    pub prompt_path: String,
+    pub models: Vec<TranslateAiModelConfig>,
+}
+
+impl Default for TranslateAiConfig {
+    fn default() -> Self {
+        Self {
+            easy: vec![
+                "openrouter-gemma4-31b".to_string(),
+                "ollama-gemma4-31b".to_string(),
+                "groq-gptoss-120b".to_string(),
+                "groq-qwen36-27b".to_string(),
+            ],
+            strong: vec![
+                "gemini-36-flash".to_string(),
+                "openrouter-gemma4-31b".to_string(),
+                "ollama-gemma4-31b".to_string(),
+                "groq-qwen36-27b".to_string(),
+                "groq-gptoss-120b".to_string(),
+            ],
+            terminal: Some(vec![
+                "groq-qwen36-27b".to_string(),
+                "groq-gptoss-120b".to_string(),
+            ]),
+            preferred_attempt_ms: 3_000,
+            prompt_path: String::new(),
+            models: default_translate_ai_models(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TranslateAiModelConfig {
+    pub name: String,
+    pub base_url: String,
+    pub model: String,
+    pub api_key_env: String,
+    #[serde(skip)]
+    pub api_key: String,
+    pub rpm: u32,
+    pub tpm: u32,
+    pub max_retries: u32,
+    pub max_output_tokens: u32,
+    pub reasoning_effort: Option<String>,
+    pub provider: Option<TranslateAiProviderConfig>,
+}
+
+impl Default for TranslateAiModelConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            base_url: String::new(),
+            model: String::new(),
+            api_key_env: String::new(),
+            api_key: String::new(),
+            rpm: 0,
+            tpm: 0,
+            max_retries: 2,
+            max_output_tokens: 256,
+            reasoning_effort: None,
+            provider: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TranslateAiProviderConfig {
+    pub only: Vec<String>,
+    pub quantizations: Vec<String>,
+    pub allow_fallbacks: bool,
+}
+
+fn default_translate_ai_models() -> Vec<TranslateAiModelConfig> {
+    vec![
+        TranslateAiModelConfig {
+            name: "openrouter-gemma4-31b".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            model: "google/gemma-4-31b-it".to_string(),
+            api_key_env: "OPENROUTER_API".to_string(),
+            rpm: 60,
+            provider: Some(TranslateAiProviderConfig {
+                only: vec![
+                    "OpenInference".to_string(),
+                    "Venice".to_string(),
+                    "CoreWeave".to_string(),
+                ],
+                quantizations: vec!["bf16".to_string(), "fp16".to_string()],
+                allow_fallbacks: false,
+            }),
+            ..TranslateAiModelConfig::default()
+        },
+        TranslateAiModelConfig {
+            name: "ollama-gemma4-31b".to_string(),
+            base_url: "https://ollama.com/v1".to_string(),
+            model: "gemma4:31b".to_string(),
+            api_key_env: "OLLAMA_API".to_string(),
+            rpm: 20,
+            ..TranslateAiModelConfig::default()
+        },
+        TranslateAiModelConfig {
+            name: "gemini-36-flash".to_string(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
+            model: "gemini-3.6-flash".to_string(),
+            api_key_env: "GEMINI_API".to_string(),
+            rpm: 15,
+            ..TranslateAiModelConfig::default()
+        },
+        TranslateAiModelConfig {
+            name: "groq-qwen36-27b".to_string(),
+            base_url: "https://api.groq.com/openai/v1".to_string(),
+            model: "qwen/qwen3.6-27b".to_string(),
+            api_key_env: "GROQ_API_KEY".to_string(),
+            rpm: 30,
+            tpm: 8_000,
+            reasoning_effort: Some("none".to_string()),
+            ..TranslateAiModelConfig::default()
+        },
+        TranslateAiModelConfig {
+            name: "groq-gptoss-120b".to_string(),
+            base_url: "https://api.groq.com/openai/v1".to_string(),
+            model: "openai/gpt-oss-120b".to_string(),
+            api_key_env: "GROQ_API_KEY".to_string(),
+            rpm: 30,
+            tpm: 8_000,
+            reasoning_effort: Some("low".to_string()),
+            ..TranslateAiModelConfig::default()
+        },
+    ]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1088,6 +1352,7 @@ channels = ["#general"]
                 autosendcmd: None,
                 sasl_mechanism: None,
                 client_cert_path: None,
+                sasl_key_path: None,
             },
         );
 
@@ -1442,5 +1707,17 @@ items = ["time", "nick_info", "channel_info", "lag", "active_windows"]
         let reloaded: AppConfig = toml::from_str(&serialized).expect("parses back");
         assert_eq!(reloaded.config_version, CONFIG_VERSION);
         assert!(reloaded.statusbar.items.contains(&StatusbarItem::Typing));
+    }
+
+    #[test]
+    fn documented_configuration_example_parses() {
+        let markdown = include_str!("../../docs/src/content/configuration.md");
+        let (_, after_fence) = markdown
+            .split_once("```toml\n")
+            .expect("documented TOML example");
+        let (example, _) = after_fence
+            .split_once("\n```")
+            .expect("closed TOML example");
+        let _: AppConfig = toml::from_str(example).expect("documented configuration must parse");
     }
 }

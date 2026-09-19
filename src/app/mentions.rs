@@ -82,7 +82,7 @@ impl App {
             .with_timezone(&chrono::Local)
             .format("%Y/%m/%d %H:%M:%S")
             .to_string();
-        let text = crate::ui::format_mention_line(
+        let text = crate::state::mention_format::format_mention_line(
             &datetime,
             &row.network,
             &row.channel,
@@ -92,6 +92,7 @@ impl App {
             nick_lit,
         );
         Message {
+            log_key: None,
             id,
             timestamp: ts,
             message_type: MessageType::MentionLog,
@@ -104,6 +105,8 @@ impl App {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            wire_origin: None,
+            translation_suffix_at: None,
         }
     }
 }
