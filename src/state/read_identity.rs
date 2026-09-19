@@ -2,15 +2,9 @@ use super::AppState;
 use super::buffer::Message;
 
 #[derive(Default)]
-enum AccountIdentity {
-    #[default]
-    Unknown,
-    Known(Option<String>),
-}
-
-#[derive(Default)]
 pub(super) struct ReadIdentity {
-    account: AccountIdentity,
+    account_known: bool,
+    owned_accounts: std::collections::HashSet<String>,
     current_nick: String,
     current_since: Option<i64>,
     previous: Vec<(String, Option<i64>, i64)>,
@@ -27,14 +21,12 @@ impl AppState {
             .get(conn_id)
             .is_some_and(|conn| conn.server_owns_history() && conn.nick.eq_ignore_ascii_case(nick))
         {
-            self.read_identities
-                .entry(conn_id.to_string())
-                .or_default()
-                .account = AccountIdentity::Known(
-                account
-                    .filter(|account| !account.is_empty() && *account != "*")
-                    .map(str::to_string),
-            );
+            let identity = self.read_identities.entry(conn_id.to_string()).or_default();
+            identity.account_known = true;
+            if let Some(account) = account.filter(|account| !account.is_empty() && *account != "*")
+            {
+                identity.owned_accounts.insert(account.to_ascii_lowercase());
+            }
         }
     }
 
@@ -97,14 +89,12 @@ impl AppState {
             .and_then(|tags| tags.get("account"))
             .filter(|account| !account.is_empty() && *account != "*")
         {
-            if let Some(ReadIdentity {
-                account: AccountIdentity::Known(account_state),
-                ..
-            }) = self.read_identities.get(conn_id)
+            if let Some(identity) = self.read_identities.get(conn_id)
+                && identity.account_known
             {
-                return account_state
-                    .as_deref()
-                    .is_some_and(|own| account.eq_ignore_ascii_case(own));
+                return identity
+                    .owned_accounts
+                    .contains(&account.to_ascii_lowercase());
             }
             let own_account = own_nick.and_then(|own| {
                 self.buffers
