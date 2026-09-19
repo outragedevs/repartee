@@ -9,17 +9,19 @@ process.env.LURKER_BOUNCER_ENABLED = 'true';
 const harnessModule = await import(pathToFileURL(path.join(source, 'server/test-utils/bouncerHarness.ts')).href);
 const account = harnessModule.seedAccount({ password: 'fixture-password', nick: 'tester' });
 const messages = await import(pathToFileURL(path.join(source, 'server/db/messages.ts')).href);
+for (const target of ['history-peer', '#history-channel']) {
 for (let index = 0; index < 300; index += 1) {
   messages.insertMessage({
     networkId: account.network.id,
-    target: 'history-peer',
+    target,
     time: new Date(Date.UTC(2024, 0, 1) + index * 1000).toISOString(),
     type: 'message',
     nick: 'history-peer',
     userhost: 'user@fixture.local',
     text: `fixture-history-${index}`,
-    msgid: `fixture-${index}`,
+    msgid: `fixture-${target}-${index}`,
   });
+}
 }
 const harness = await harnessModule.startHarness();
 fs.writeFileSync(readyFile, JSON.stringify({ port: harness.port, network: account.network.id, user: account.user.username }));

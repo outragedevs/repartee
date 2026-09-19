@@ -770,7 +770,14 @@ impl App {
     /// no stored history yet. No-op unless the connection negotiated
     /// `draft/chathistory`. Returns `true` only when a request actually
     /// went out (and the one-shot claim was taken).
-    fn request_connect_gapfill(&mut self, conn_id: &str, target: &str) -> bool {
+    pub(crate) fn request_connect_gapfill(&mut self, conn_id: &str, target: &str) -> bool {
+        if self.state.connections.get(conn_id).is_some_and(crate::state::connection::Connection::server_owns_history) {
+            return self.queue_connect_history(conn_id, target);
+        }
+        self.send_connect_gapfill(conn_id, target)
+    }
+
+    pub(crate) fn send_connect_gapfill(&mut self, conn_id: &str, target: &str) -> bool {
         use crate::irc::chathistory::Direction;
 
         // Gate once per target per connection. The channel path runs on

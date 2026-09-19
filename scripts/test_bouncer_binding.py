@@ -74,14 +74,16 @@ def main():
                          "network", "create", "-name", "fixture", "-addr", "irc+insecure://127.0.0.1:1",
                          "-enabled", "false"], capture_output=True)
                     with sqlite3.connect(temporary / "main.db") as database:
-                        database.execute("INSERT INTO MessageTarget(network, target) VALUES (1, 'history-peer')")
-                        target_id = database.execute("SELECT id FROM MessageTarget WHERE network=1 AND target='history-peer'").fetchone()[0]
-                        for index in range(300):
-                            timestamp = (datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc) + datetime.timedelta(seconds=index)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-                            body = f"fixture-history-{index}"
-                            raw = f"@time={timestamp} :history-peer!user@fixture.local PRIVMSG fixture :{body}"
-                            database.execute("INSERT INTO Message(target, raw, time, sender, text) VALUES (?, ?, ?, ?, ?)",
-                                             (target_id, raw, timestamp, "history-peer", body))
+                        for target in ("history-peer", "#history-channel"):
+                            database.execute("INSERT INTO MessageTarget(network, target) VALUES (1, ?)", (target,))
+                            target_id = database.execute("SELECT id FROM MessageTarget WHERE network=1 AND target=?", (target,)).fetchone()[0]
+                            for index in range(300):
+                                timestamp = (datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc) + datetime.timedelta(seconds=index)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                                body = f"fixture-history-{index}"
+                                recipient = target if target.startswith("#") else "fixture"
+                                raw = f"@time={timestamp} :history-peer!user@fixture.local PRIVMSG {recipient} :{body}"
+                                database.execute("INSERT INTO Message(target, raw, time, sender, text) VALUES (?, ?, ?, ?, ?)",
+                                                 (target_id, raw, timestamp, "history-peer", body))
                     settings = {"port": port, "network": 1, "user": "fixture"}
                 environment = os.environ.copy()
                 environment.update({

@@ -63,10 +63,10 @@ channel history waits for NAMES completion, including background channels. An
 incomplete BEFORE batch leaves the original retry anchor unchanged. Reconnect
 gap-fills all retained bouncer queries without changing focus. Recreating the
 Mentions buffer restores same-session volatile entries even without SQLite. The real upstream
-fixtures seed 300 messages in each bouncer's store. An automatically discovered
-child fetches the latest 200, retrieves the remaining 100 with BEFORE, verifies
-ordering and exhaustion, and confirms that no message entered the local log
-queue. Soju runs with its upstream disabled, exercising stored history while the
+fixtures seed 300 messages for a query and 300 for a channel in each bouncer's store. The child discovers both targets through TARGETS without manually creating
+a buffer. It loads 200 messages for each, retrieves the remaining 100 query messages
+with BEFORE, verifies ordering and exhaustion, and confirms that neither target
+enters the local log queue. Soju runs with its upstream disabled, exercising stored history while the
 IRC network is offline.
 
 Cancellation regression tests drop registration during CAP negotiation and
@@ -76,3 +76,17 @@ client must abort the pending write instead of finishing it in the background.
 Disabling the abort makes this regression fail. The oversized synthetic payload
 exists only to produce backpressure deterministically, not as a supported login
 format or a real credential.
+
+History discovery regressions cover malformed target rows, truncated batches,
+request windows, overlapping pages and target deduplication. Synthetic scheduler
+tests distinguish a timeout from a successful empty history page, retry failed
+hydration, and enforce two concurrent requests when discovering targets or
+reconnecting retained queries. TARGETS retries use the original window and stop
+after three failed attempts.
+
+Enumeration completeness for timestamp ties larger than a server page and
+server-side filtering after LIMIT is not established by these fixtures. Lurker
+always orders TARGETS descending and groups messages inside the requested window;
+Soju selects the direction and tests the latest message per target. Both filter
+closed/detached targets after their store query. These cases remain explicit
+acceptance gaps for the full bouncer-support contract.
