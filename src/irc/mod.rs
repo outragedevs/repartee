@@ -775,8 +775,8 @@ pub async fn connect_server(
         // reads the same stream), so anything they made it send has already been
         // charged to the real counter — the mirror has to catch up on them too.
         for message in neg.early_messages {
-            for frame in echo.frames_for(&message) {
-                echo_sender.charge(&frame, std::time::Instant::now());
+            if let Err(error) = echo.handle_inbound(&message, &echo_sender, std::time::Instant::now()) {
+                tracing::warn!("failed to send CTCP reply: {error}");
             }
             if !sent_connected && let Command::Response(Response::RPL_WELCOME, _) = &message.command
             {
@@ -803,11 +803,11 @@ pub async fn connect_server(
             match result {
                 Ok(message) => {
                     // The crate has just handled this message inside `poll_next`
-                    // and may already have queued a CTCP reply, the autojoin
+                    // and may already have queued the autojoin
                     // batch or a NICK retry. Book them before anything else can
                     // ask this connection for typing headroom.
-                    for frame in echo.frames_for(&message) {
-                        echo_sender.charge(&frame, std::time::Instant::now());
+                    if let Err(error) = echo.handle_inbound(&message, &echo_sender, std::time::Instant::now()) {
+                        tracing::warn!("failed to send CTCP reply: {error}");
                     }
                     if !sent_connected
                         && let Command::Response(Response::RPL_WELCOME, _) = &message.command
