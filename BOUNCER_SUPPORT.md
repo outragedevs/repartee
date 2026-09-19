@@ -155,3 +155,10 @@ large to review, retaining the acceptance rows and dependencies.
   malformed snapshots and control sessions accidentally bound by their login.
   These complete part of stages 1–2; automatic child-connection lifecycle,
   PASS-specific binding, history ownership and the remaining matrix are pending.
+
+- Registration cancellation now aborts the outgoing task when the connection
+  future is dropped, including a pending socket write. A synthetic backpressure
+  regression fails without the abort and passes with it; ordinary cancellation
+  tests cover capability negotiation and network confirmation. This is a
+  prerequisite for deleting a discovered network while it is still connecting,
+  not yet the automatic child lifecycle itself.
