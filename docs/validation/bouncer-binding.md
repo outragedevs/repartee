@@ -168,3 +168,13 @@ covers, while newer requests remain pending. Changing a connection's network
 scope discards both read thresholds and old unread entries. Query nick changes
 move unread rows but leave thresholds at their original server targets; returning
 to a previous nick restores its threshold instead of inheriting another target's.
+
+Every retained bouncer row carries its original target in volatile read metadata,
+including history pages redirected after a query rename. Remote markers clear
+only rows from that target across renamed buffers, and visible reads send each
+origin's own timestamp. Pending requests expire after 45 seconds; updates and
+previously unqueried targets take priority over repeated queries. Regressions
+cover a full unanswered request window followed by a new user read position.
+Historical self-message classification uses a known upstream account tag when
+available and records nick ownership intervals from live self-NICK events, so
+old self messages stay read while later reuse of the old nick remains unread.

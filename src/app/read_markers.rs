@@ -14,9 +14,15 @@ pub struct ReadMarkers {
     queried: HashMap<String, Instant>,
     rejected: HashMap<String, i64>,
     rejected_queries: HashSet<String>,
-    pending: VecDeque<(String, Option<i64>)>,
+    pending: VecDeque<PendingMarker>,
     failures: HashMap<String, u8>,
     retry_after: HashMap<String, Instant>,
+}
+
+struct PendingMarker {
+    target: String,
+    timestamp: Option<i64>,
+    sent_at: Instant,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -45,11 +51,35 @@ impl ReadMarkers {
         }
     }
 
+    fn prioritized_targets(
+        &self,
+        mut targets: std::collections::BTreeMap<String, String>,
+    ) -> Vec<(String, String)> {
+        for target in self.desired.keys() {
+            targets
+                .entry(target.clone())
+                .or_insert_with(|| target.clone());
+        }
+        let mut targets: Vec<_> = targets.into_iter().collect();
+        targets.sort_by_key(|(target, _)| {
+            (
+                !self.desired.contains_key(target),
+                self.sent
+                    .get(target)
+                    .map(|(_, sent)| *sent)
+                    .or_else(|| self.queried.get(target).copied()),
+            )
+        });
+        targets
+    }
+
     fn receive(&mut self, target: &str, marker: Option<i64>) -> bool {
         let target = target.to_ascii_lowercase();
-        self.pending.retain(|(name, requested)| {
-            name != &target
-                || requested.is_some_and(|requested| marker.is_none_or(|time| requested > time))
+        self.pending.retain(|request| {
+            request.target != target
+                || request
+                    .timestamp
+                    .is_some_and(|requested| marker.is_none_or(|time| requested > time))
         });
         self.rejected.remove(&target);
         self.rejected_queries.remove(&target);
@@ -111,58 +141,45 @@ impl App {
         let Some(buffer) = self.state.buffers.get(buffer_id) else {
             return;
         };
-        let Some(position) = buffer
-            .messages
-            .iter()
-            .position(|message| message.id == message_id)
-        else {
-            return;
-        };
-        let millis = buffer
-            .messages
-            .range(..=position)
-            .rev()
-            .find_map(|message| {
-                message
-                    .tags
-                    .as_ref()
-                    .and_then(|tags| tags.get("time"))
-                    .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
-                    .map(|time| time.timestamp_millis())
-            });
         let conn_id = buffer.connection_id.clone();
-        let target = buffer.name.to_ascii_lowercase();
-        self.state.clear_visible_read_rows(buffer_id, message_id);
-        let Some(millis) = millis else {
-            self.drain_pending_web_events();
+        let Some(boundaries) = self.state.visible_read_markers(buffer_id, message_id) else {
             return;
         };
+        let has_boundaries = !boundaries.is_empty();
+        self.state.clear_visible_read_rows(buffer_id, message_id);
         let scope = self.state.connections[&conn_id].network_key().to_string();
-        let markers = self.read_markers.entry(conn_id).or_default();
-        markers.prepare_scope(&scope);
-        if markers
-            .rejected
-            .get(&target)
-            .is_some_and(|rejected| *rejected >= millis)
-        {
-            self.drain_pending_web_events();
-            return;
+        for (origin, millis) in boundaries {
+            let Some((_, target)) = origin.split_once('/') else {
+                continue;
+            };
+            let target = target.to_ascii_lowercase();
+            let markers = self.read_markers.entry(conn_id.clone()).or_default();
+            markers.prepare_scope(&scope);
+            if markers
+                .rejected
+                .get(&target)
+                .is_some_and(|rejected| *rejected >= millis)
+            {
+                continue;
+            }
+            markers.rejected.remove(&target);
+            if markers.rejected_queries.remove(&target) {
+                markers.failures.remove(&target);
+                markers.retry_after.remove(&target);
+            }
+            if !markers
+                .confirmed
+                .get(&target)
+                .is_some_and(|confirmed| confirmed.is_some_and(|time| time >= millis))
+            {
+                let desired = markers.desired.entry(target).or_insert(millis);
+                *desired = (*desired).max(millis);
+            }
+            self.state.apply_server_read_marker(&origin, millis);
         }
-        markers.rejected.remove(&target);
-        if markers.rejected_queries.remove(&target) {
-            markers.failures.remove(&target);
-            markers.retry_after.remove(&target);
+        if has_boundaries {
+            self.tick_read_markers();
         }
-        if !markers
-            .confirmed
-            .get(&target)
-            .is_some_and(|confirmed| confirmed.is_some_and(|time| time >= millis))
-        {
-            let desired = markers.desired.entry(target).or_insert(millis);
-            *desired = (*desired).max(millis);
-        }
-        self.state.apply_server_read_marker(buffer_id, millis);
-        self.tick_read_markers();
         self.drain_pending_web_events();
     }
 
@@ -233,7 +250,10 @@ impl App {
             };
             let markers = self.read_markers.entry(conn_id.clone()).or_default();
             markers.prepare_scope(conn.network_key());
-            let mut targets: std::collections::BTreeMap<String, String> = self
+            markers
+                .pending
+                .retain(|request| now.duration_since(request.sent_at) < Duration::from_secs(45));
+            let targets: std::collections::BTreeMap<String, String> = self
                 .state
                 .buffers
                 .values()
@@ -247,11 +267,7 @@ impl App {
                 })
                 .map(|buffer| (buffer.name.to_ascii_lowercase(), buffer.name.clone()))
                 .collect();
-            for target in markers.desired.keys() {
-                targets
-                    .entry(target.clone())
-                    .or_insert_with(|| target.clone());
-            }
+            let targets = markers.prioritized_targets(targets);
             for (target, name) in targets {
                 if budget == 0 {
                     return;
@@ -295,7 +311,11 @@ impl App {
                     .is_ok()
                 {
                     budget -= 1;
-                    markers.pending.push_back((target.clone(), desired));
+                    markers.pending.push_back(PendingMarker {
+                        target: target.clone(),
+                        timestamp: desired,
+                        sent_at: now,
+                    });
                     if let Some(millis) = desired {
                         markers.sent.insert(target, (millis, now));
                     } else {
@@ -314,10 +334,10 @@ impl App {
             return false;
         };
         let context = (params.len() > 3).then(|| params[2].as_str());
-        let position = markers.pending.iter().position(|(target, timestamp)| {
+        let position = markers.pending.iter().position(|request| {
             context.is_none_or(|context| {
-                context.eq_ignore_ascii_case(target)
-                    || timestamp.is_some_and(|millis| {
+                context.eq_ignore_ascii_case(&request.target)
+                    || request.timestamp.is_some_and(|millis| {
                         context
                             == format!(
                                 "timestamp={}",
@@ -326,11 +346,11 @@ impl App {
                     })
             })
         });
-        let Some((target, rejected)) =
-            position.and_then(|position| markers.pending.remove(position))
-        else {
+        let Some(request) = position.and_then(|position| markers.pending.remove(position)) else {
             return false;
         };
+        let target = request.target;
+        let rejected = request.timestamp;
         let failures = markers.failures.entry(target.clone()).or_default();
         *failures = failures.saturating_add(1);
         if params[1] == "INTERNAL_ERROR" && *failures < 3 {
@@ -481,6 +501,153 @@ mod tests {
             crate::state::buffer::ActivityLevel::Activity,
         );
         id
+    }
+
+    #[tokio::test]
+    async fn renamed_rows_keep_their_original_marker_target_in_both_directions() {
+        let mut app = sending_app();
+        let seen = server_message(&mut app, 1000);
+        crate::irc::events::rename_query_buffers_for_test(
+            &mut app.state,
+            "account",
+            "Peer",
+            "Renamed",
+            &["account/peer".into()],
+        );
+        app.handle_read_marker(
+            "account",
+            &":bnc MARKREAD Renamed timestamp=1970-01-01T00:00:02.000Z"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(app.state.buffers["account/renamed"].unread_count, 1);
+        app.mark_visible_message_read("account/renamed", seen);
+        let captured = app.irc_handles["account"].sender().captured();
+        assert!(captured.iter().any(|message| matches!(&message.command, irc::proto::Command::Raw(command, params) if command == "MARKREAD" && params == &["peer", "timestamp=1970-01-01T00:00:01.000Z"])));
+        assert!(!captured.iter().any(|message| matches!(&message.command, irc::proto::Command::Raw(_, params) if params.first().is_some_and(|target| target.eq_ignore_ascii_case("renamed")) && params.len() == 2)));
+        let mut late = crate::state::events::tests::make_test_message(
+            &mut app.state,
+            "late old-target history",
+        );
+        late.nick = Some("Peer".into());
+        late.timestamp = chrono::DateTime::from_timestamp_millis(1500).unwrap();
+        app.state.surface_history_page_from_target(
+            "account/renamed",
+            vec![late],
+            false,
+            "account/peer",
+        );
+        assert_eq!(app.state.buffers["account/renamed"].unread_count, 1);
+        app.handle_read_marker(
+            "account",
+            &":bnc MARKREAD Renamed timestamp=1970-01-01T00:00:03.000Z"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(app.state.buffers["account/renamed"].unread_count, 1);
+        app.handle_read_marker(
+            "account",
+            &":bnc MARKREAD Peer timestamp=1970-01-01T00:00:02.000Z"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(app.state.buffers["account/renamed"].unread_count, 0);
+    }
+
+    #[tokio::test]
+    async fn unanswered_requests_expire_and_do_not_starve_new_read_positions() {
+        let mut app = sending_app();
+        for index in 0..140 {
+            app.state.add_buffer_with_focus(
+                crate::state::buffer::Buffer::empty(
+                    "account",
+                    crate::state::buffer::BufferType::Query,
+                    &format!("target{index:03}"),
+                ),
+                false,
+            );
+        }
+        for _ in 0..20 {
+            app.tick_read_markers();
+        }
+        assert_eq!(app.read_markers["account"].pending.len(), 128);
+        let seen = server_message(&mut app, 1123);
+        app.mark_visible_message_read("account/peer", seen);
+        for request in &mut app.read_markers.get_mut("account").unwrap().pending {
+            request.sent_at = Instant::now().checked_sub(Duration::from_secs(46)).unwrap();
+        }
+        for _ in 0..20 {
+            app.tick_read_markers();
+        }
+        let captured = app.irc_handles["account"].sender().captured();
+        assert!(captured.iter().any(|message| matches!(&message.command, irc::proto::Command::Raw(_, params) if params == &["Peer", "timestamp=1970-01-01T00:00:01.123Z"])));
+        assert!(captured.iter().any(|message| matches!(&message.command, irc::proto::Command::Raw(_, params) if params == &["target139"])));
+        assert!(app.read_markers["account"].pending.len() < 128);
+    }
+
+    #[tokio::test]
+    async fn historical_self_messages_use_nick_ownership_intervals() {
+        let mut app = sending_app();
+        let old = app.state.connections["account"].nick.clone();
+        app.handle_irc_event(crate::irc::IrcEvent::Message(
+            "account".into(),
+            Box::new(
+                format!("@time=1970-01-01T00:00:02.000Z :{old}!user@host NICK :NewSelf")
+                    .parse()
+                    .unwrap(),
+            ),
+        ));
+        let rows = [
+            (old.as_str(), 1000),
+            ("NewSelf", 3000),
+            (old.as_str(), 3000),
+        ]
+        .into_iter()
+        .map(|(nick, timestamp)| {
+            let mut message = crate::state::events::tests::make_test_message(
+                &mut app.state,
+                &format!("history {nick} {timestamp}"),
+            );
+            message.nick = Some(nick.into());
+            message.timestamp = chrono::DateTime::from_timestamp_millis(timestamp).unwrap();
+            message
+        })
+        .collect();
+        app.state.surface_history_page("account/peer", rows, false);
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 1);
+    }
+
+    #[tokio::test]
+    async fn historical_account_identity_overrides_nickname_reuse() {
+        let mut app = sending_app();
+        let own = app.state.connections["account"].nick.clone();
+        app.state.add_nick(
+            "account/peer",
+            crate::state::buffer::NickEntry {
+                nick: own.clone(),
+                prefix: String::new(),
+                modes: String::new(),
+                away: false,
+                account: Some("our-upstream-account".into()),
+                ident: None,
+                host: None,
+            },
+        );
+        let rows = [
+            ("EarlierNick", "our-upstream-account"),
+            (own.as_str(), "somebody-else"),
+        ]
+        .into_iter()
+        .map(|(nick, account)| {
+            let mut message =
+                crate::state::events::tests::make_test_message(&mut app.state, account);
+            message.nick = Some(nick.into());
+            message.tags = Some(HashMap::from([("account".into(), account.into())]));
+            message
+        })
+        .collect();
+        app.state.surface_history_page("account/peer", rows, false);
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 1);
     }
 
     #[tokio::test]
@@ -709,7 +876,8 @@ mod tests {
         let markers = &app.read_markers["account"];
         assert!(markers.rejected_queries.contains("other"));
         assert!(!markers.rejected_queries.contains("peer"));
-        assert_eq!(markers.pending.front(), Some(&("peer".into(), None)));
+        assert_eq!(markers.pending.front().unwrap().target, "peer");
+        assert_eq!(markers.pending.front().unwrap().timestamp, None);
         app.handle_read_marker("account", &":bnc MARKREAD Peer *".parse().unwrap());
         let seen = server_message(&mut app, 1123);
         app.mark_visible_message_read("account/peer", seen);
