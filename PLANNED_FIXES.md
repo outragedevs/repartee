@@ -24,6 +24,8 @@ The fix should:
 
 ### Make `/ignore` changes effective immediately
 
+Status: completed on `fix/ignore-runtime-sync`; Clippy, 2265 native tests, 127 web tests, and Sol medium review passed.
+
 The `/ignore` and `/unignore` commands currently update the persisted configuration but do not synchronize the runtime ignore list. Rules therefore do not take effect until `/reload` or restart.
 
 The fix should:
