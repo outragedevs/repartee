@@ -6,6 +6,8 @@ This document tracks confirmed bugs and deferred hardening work that still needs
 
 ### Fix SASL EXTERNAL client certificate authentication
 
+Status: completed on `fix/sasl-external-certificate`; Clippy, 2258 native tests, 127 web tests, and Sol medium review passed.
+
 GitHub issue: [#43](https://github.com/outragedevs/repartee/issues/43)
 
 The current implementation does not provide the TLS layer with all the client certificate material it requires. It also passes `client_cert_path` through without resolving relative paths against the certificates directory, despite the documented behavior.
