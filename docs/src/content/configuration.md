@@ -237,6 +237,19 @@ Set `sasl_mechanism` to one of those names to pin it. A pinned mechanism the ser
 
 `client_cert_path` and `sasl_key_path` are separate keys with separate jobs: the first is presented during the TLS handshake, the second is only ever used to sign a challenge. Relative paths resolve against `~/.repartee/certs`.
 
+To use `EXTERNAL` / CertFP, set `tls = true` and point `client_cert_path` to one **PEM file containing both the certificate chain (leaf first) and its unencrypted private key**. PKCS#8 (`PRIVATE KEY`), PKCS#1 (`RSA PRIVATE KEY`), and SEC1 (`EC PRIVATE KEY`) keys are supported. PKCS#12 (`.p12` / `.pfx`) and encrypted private keys are not supported. The IRC connection uses rustls for this PEM identity.
+
+```bash
+mkdir -p ~/.repartee/certs
+chmod 700 ~/.repartee/certs
+(umask 077; openssl req -x509 -newkey rsa:3072 -sha256 -days 365 -nodes \
+  -subj "/CN=IRC client" -keyout ~/.repartee/certs/libera-key.pem \
+  -out ~/.repartee/certs/libera-cert.pem)
+cat ~/.repartee/certs/libera-cert.pem >> ~/.repartee/certs/libera-key.pem
+```
+
+Set `client_cert_path = "libera-key.pem"` in the server block, then reconnect and register the certificate with your network's NickServ according to its CertFP instructions. Absolute paths and `~/` paths are also accepted. Relative paths always resolve against the certificates directory, regardless of the working directory. Missing files, missing certificate/key blocks, and mismatched keys produce an error before connecting; `sasl_key_path` is not used for EXTERNAL.
+
 To use `ECDSA-NIST256P-CHALLENGE`, generate a key and register its public half:
 
 ```bash

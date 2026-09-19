@@ -339,6 +339,15 @@ levels = [&quot;ALL&quot;]
 </tbody></table>
 <p>Set <code>sasl_mechanism</code> to one of those names to pin it. A pinned mechanism the server does not offer means <strong>no SASL at all</strong>, never a quiet downgrade to a weaker one. The <code>-PLUS</code> (channel-binding) variants are not implemented and are never selected.</p>
 <p><code>client_cert_path</code> and <code>sasl_key_path</code> are separate keys with separate jobs: the first is presented during the TLS handshake, the second is only ever used to sign a challenge. Relative paths resolve against <code>~/.repartee/certs</code>.</p>
+<p>To use <code>EXTERNAL</code> / CertFP, set <code>tls = true</code> and point <code>client_cert_path</code> to one <strong>PEM file containing both the certificate chain (leaf first) and its unencrypted private key</strong>. PKCS#8 (<code>PRIVATE KEY</code>), PKCS#1 (<code>RSA PRIVATE KEY</code>), and SEC1 (<code>EC PRIVATE KEY</code>) keys are supported. PKCS#12 (<code>.p12</code> / <code>.pfx</code>) and encrypted private keys are not supported. The IRC connection uses rustls for this PEM identity.</p>
+<pre><code class="language-bash">mkdir -p ~/.repartee/certs
+chmod 700 ~/.repartee/certs
+(umask 077; openssl req -x509 -newkey rsa:3072 -sha256 -days 365 -nodes \
+  -subj &quot;/CN=IRC client&quot; -keyout ~/.repartee/certs/libera-key.pem \
+  -out ~/.repartee/certs/libera-cert.pem)
+cat ~/.repartee/certs/libera-cert.pem &gt;&gt; ~/.repartee/certs/libera-key.pem
+</code></pre>
+<p>Set <code>client_cert_path = &quot;libera-key.pem&quot;</code> in the server block, then reconnect and register the certificate with your network&#39;s NickServ according to its CertFP instructions. Absolute paths and <code>~/</code> paths are also accepted. Relative paths always resolve against the certificates directory, regardless of the working directory. Missing files, missing certificate/key blocks, and mismatched keys produce an error before connecting; <code>sasl_key_path</code> is not used for EXTERNAL.</p>
 <p>To use <code>ECDSA-NIST256P-CHALLENGE</code>, generate a key and register its public half:</p>
 <pre><code class="language-bash">openssl ecparam -genkey -name prime256v1 -noout -out ~/.repartee/certs/libera-key.pem
 chmod 600 ~/.repartee/certs/libera-key.pem
