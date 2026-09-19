@@ -307,6 +307,13 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
         return Err("Invalid path".to_string());
     }
 
+    if raw.trim().is_empty()
+        && (matches!(path, "general.nick" | "general.username")
+            || (parts[0] == "servers" && parts.len() >= 3 && matches!(parts[2], "label" | "address")))
+    {
+        return Err("This setting cannot be empty".to_string());
+    }
+
     match parts[0] {
         "general" => match parts[1] {
             "nick" => config.general.nick = raw.to_string(),
@@ -453,7 +460,7 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                 config.dcc.autoaccept_lowports = parse_bool(raw)?;
             }
             "autochat_masks" => {
-                config.dcc.autochat_masks = raw.split(',').map(|s| s.trim().to_string()).collect();
+                config.dcc.autochat_masks = split_list(raw);
             }
             "max_connections" => {
                 config.dcc.max_connections =
@@ -583,7 +590,7 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
             }
             "languages" => {
                 config.spellcheck.languages =
-                    raw.split(',').map(|s| s.trim().to_string()).collect();
+                    split_list(raw);
             }
             "dictionary_dir" => config.spellcheck.dictionary_dir = raw.to_string(),
             _ => return Err(format!("Unknown field: {path}")),
@@ -652,33 +659,29 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                 "tls_verify" => server.tls_verify = parse_bool(raw)?,
                 "autoconnect" => server.autoconnect = parse_bool(raw)?,
                 "channels" => {
-                    server.channels = raw.split(',').map(|s| s.trim().to_string()).collect();
+                    server.channels = split_list(raw);
                 }
-                "nick" => server.nick = Some(raw.to_string()),
-                "username" => server.username = Some(raw.to_string()),
-                "realname" => server.realname = Some(raw.to_string()),
-                "password" => server.password = Some(raw.to_string()),
-                "sasl_user" => server.sasl_user = Some(raw.to_string()),
-                "sasl_pass" => server.sasl_pass = Some(raw.to_string()),
-                "bind_ip" => server.bind_ip = Some(raw.to_string()),
-                "encoding" => server.encoding = Some(raw.to_string()),
-                "auto_reconnect" => server.auto_reconnect = Some(parse_bool(raw)?),
+                "nick" => server.nick = (!raw.is_empty()).then(|| raw.to_string()),
+                "username" => server.username = (!raw.is_empty()).then(|| raw.to_string()),
+                "realname" => server.realname = (!raw.is_empty()).then(|| raw.to_string()),
+                "password" => server.password = (!raw.is_empty()).then(|| raw.to_string()),
+                "sasl_user" => server.sasl_user = (!raw.is_empty()).then(|| raw.to_string()),
+                "sasl_pass" => server.sasl_pass = (!raw.is_empty()).then(|| raw.to_string()),
+                "bind_ip" => server.bind_ip = (!raw.is_empty()).then(|| raw.to_string()),
+                "encoding" => server.encoding = (!raw.is_empty()).then(|| raw.to_string()),
+                "auto_reconnect" => server.auto_reconnect = (!raw.is_empty()).then(|| parse_bool(raw)).transpose()?,
                 "reconnect_delay" => {
-                    server.reconnect_delay = Some(
-                        raw.parse()
-                            .map_err(|_| "Expected a positive integer".to_string())?,
-                    );
+                    server.reconnect_delay = (!raw.is_empty()).then(|| raw.parse()
+                        .map_err(|_| "Expected a positive integer".to_string())).transpose()?;
                 }
                 "reconnect_max_retries" => {
-                    server.reconnect_max_retries = Some(
-                        raw.parse()
-                            .map_err(|_| "Expected a positive integer".to_string())?,
-                    );
+                    server.reconnect_max_retries = (!raw.is_empty()).then(|| raw.parse()
+                        .map_err(|_| "Expected a positive integer".to_string())).transpose()?;
                 }
-                "autosendcmd" => server.autosendcmd = Some(raw.to_string()),
-                "sasl_mechanism" => server.sasl_mechanism = Some(parse_sasl_mechanism(raw)?),
-                "client_cert_path" => server.client_cert_path = Some(raw.to_string()),
-                "sasl_key_path" => server.sasl_key_path = Some(raw.to_string()),
+                "autosendcmd" => server.autosendcmd = (!raw.is_empty()).then(|| raw.to_string()),
+                "sasl_mechanism" => server.sasl_mechanism = (!raw.is_empty()).then(|| parse_sasl_mechanism(raw)).transpose()?,
+                "client_cert_path" => server.client_cert_path = (!raw.is_empty()).then(|| raw.to_string()),
+                "sasl_key_path" => server.sasl_key_path = (!raw.is_empty()).then(|| raw.to_string()),
                 _ => return Err(format!("Unknown field: {path}")),
             }
         }
@@ -915,6 +918,32 @@ pub fn get_setting_paths(config: &AppConfig) -> Vec<String> {
 
 // === Command handler ===
 
+fn decode_setting_value(raw: &str) -> Result<String, &'static str> {
+    if raw.contains(['\n', '\r', '\0']) {
+        return Err("Setting values must be a single line without NUL characters");
+    }
+    let trimmed = raw.trim_start();
+    let Some(quote @ ('\'' | '"')) = trimmed.chars().next() else {
+        return Ok(raw.to_string());
+    };
+    let mut value = String::new();
+    let mut chars = trimmed[quote.len_utf8()..].char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if ch == quote {
+            if !trimmed[quote.len_utf8() + index + ch.len_utf8()..].trim().is_empty() {
+                return Err("Unexpected text after the closing quote");
+            }
+            return Ok(value);
+        }
+        if ch == '\\' && chars.peek().is_some_and(|(_, next)| *next == quote || *next == '\\') {
+            value.push(chars.next().expect("peeked character").1);
+        } else {
+            value.push(ch);
+        }
+    }
+    Err("Unterminated quoted value")
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "flat dispatcher with per-section side-effects"
@@ -946,7 +975,14 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
     }
 
     // Set value
-    let raw = &args[1];
+    let value = match decode_setting_value(&args[1]) {
+        Ok(value) => value,
+        Err(error) => {
+            ev(app, &format!("{C_ERR}{error}{C_RST}"));
+            return;
+        }
+    };
+    let raw = &value;
 
     // Validate path exists first
     if get_config_value(&app.config, path).is_none() {
@@ -1866,4 +1902,71 @@ mod tests {
         assert!(set_config_value(&mut config, "display.nick_color_saturation", "1.5").is_err());
         assert!(set_config_value(&mut config, "display.nick_color_saturation", "-0.1").is_err());
     }
+    #[test]
+    fn quoted_setting_values_preserve_content_and_round_trip() {
+        for (input, expected) in [
+            (r#""""#, ""),
+            ("''", ""),
+            (r#""❯ ""#, "❯ "),
+            ("'  two words  '", "  two words  "),
+            (r#""say \"hi\" \\ end""#, "say \"hi\" \\ end"),
+            (r#""C:\path\file""#, r"C:\path\file"),
+            ("  \"hello\"  ", "hello"),
+            ("unquoted words", "unquoted words"),
+            ("don't change me", "don't change me"),
+        ] {
+            let parsed = crate::commands::parser::parse_command(&format!("/set statusbar.prompt {input}")).unwrap();
+            let decoded = decode_setting_value(&parsed.args[1]).unwrap();
+            let mut config = AppConfig::default();
+            set_config_value(&mut config, &parsed.args[0], &decoded).unwrap();
+            let saved = toml::to_string(&config).unwrap();
+            let reloaded: AppConfig = toml::from_str(&saved).unwrap();
+            assert_eq!(reloaded.statusbar.prompt, expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn malformed_setting_quotes_are_rejected() {
+        for input in ["\"unfinished", "'unfinished", "\"value\" extra", "\"trailing\\", "\"one\"\"two\""] {
+            assert!(decode_setting_value(input).is_err(), "{input}");
+        }
+    }
+
+    #[test]
+    fn empty_values_clear_lists_and_server_overrides() {
+        let mut config = config_with_server();
+        let id = config.servers.keys().next().unwrap().clone();
+        for field in ["channels", "nick", "username", "realname", "bind_ip", "encoding", "autosendcmd", "client_cert_path", "sasl_key_path", "password", "sasl_pass", "sasl_user"] {
+            let path = format!("servers.{id}.{field}");
+            set_config_value(&mut config, &path, "example").unwrap();
+            set_config_value(&mut config, &path, "").unwrap();
+        }
+        for (field, value) in [("sasl_mechanism", "PLAIN"), ("auto_reconnect", "true"), ("reconnect_delay", "5"), ("reconnect_max_retries", "3")] {
+            let path = format!("servers.{id}.{field}");
+            set_config_value(&mut config, &path, value).unwrap();
+            set_config_value(&mut config, &path, "").unwrap();
+        }
+        let saved = toml::to_string(&config).unwrap();
+        let reloaded: AppConfig = toml::from_str(&saved).unwrap();
+        let server = &reloaded.servers[&id];
+        assert!(server.sasl_mechanism.is_none());
+        assert!(server.auto_reconnect.unwrap_or(true));
+        assert!(server.reconnect_delay.is_none());
+        assert!(server.reconnect_max_retries.is_none());
+        assert!(server.channels.is_empty());
+        assert!(server.nick.is_none());
+        assert!(server.username.is_none());
+        assert!(server.bind_ip.is_none());
+        assert!(server.encoding.is_none());
+        assert_eq!(server.nick.as_deref().unwrap_or(&reloaded.general.nick), reloaded.general.nick);
+        for path in ["dcc.autochat_masks", "spellcheck.languages"] {
+            set_config_value(&mut config, path, "").unwrap();
+        }
+        assert!(config.dcc.autochat_masks.is_empty());
+        assert!(config.spellcheck.languages.is_empty());
+        for path in ["general.nick".to_string(), format!("servers.{id}.address"), format!("servers.{id}.port")] {
+            assert!(set_config_value(&mut config, &path, "").is_err());
+        }
+    }
+
 }
