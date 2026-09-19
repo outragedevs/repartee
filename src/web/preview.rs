@@ -477,9 +477,18 @@ fn url_is_publicly_resolvable(raw: &str) -> Result<(), &'static str> {
 /// String wrapper around [`validate_url_shape`] suitable for use as the
 /// `url_validator` function pointer on [`FetchConfig`]. Parses the URL
 /// and delegates to the typed function.
-fn validate_url_shape_str(url: &str) -> Result<(), &'static str> {
+pub fn validate_url_shape_str(url: &str) -> Result<(), &'static str> {
     let parsed = reqwest::Url::parse(url).map_err(|_| "invalid url")?;
     validate_url_shape(&parsed)
+}
+
+pub fn public_image_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(30))
+        .redirect(redirect_policy())
+        .dns_resolver(Arc::new(PublicOnlyResolver))
+        .build()
 }
 
 /// DNS-free URL validation: scheme is http/https and, when the host is

@@ -103,6 +103,7 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
         "image_preview" => {
             let val = match parts[1] {
                 "enabled" => config.image_preview.enabled.to_string(),
+                "inline" => config.image_preview.inline.to_string(),
                 "max_width" => config.image_preview.max_width.to_string(),
                 "max_height" => config.image_preview.max_height.to_string(),
                 "cache_max_mb" => config.image_preview.cache_max_mb.to_string(),
@@ -413,6 +414,7 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
         },
         "image_preview" => match parts[1] {
             "enabled" => config.image_preview.enabled = parse_bool(raw)?,
+            "inline" => config.image_preview.inline = parse_bool(raw)?,
             "max_width" => {
                 config.image_preview.max_width =
                     raw.parse().map_err(|_| "Expected a number".to_string())?;
@@ -804,6 +806,7 @@ const BASE_PATHS: &[&str] = &[
     "statusbar.input_color",
     "statusbar.cursor_color",
     "image_preview.enabled",
+    "image_preview.inline",
     "image_preview.max_width",
     "image_preview.max_height",
     "image_preview.cache_max_mb",
@@ -953,6 +956,10 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
 
     match set_config_value(&mut app.config, path, raw) {
         Ok(()) => {
+            app.inline_previews.invalidate_layout();
+            if path == "image_preview.protocol" {
+                app.refresh_image_protocol();
+            }
             app.cached_config_toml = None;
             ev(
                 app,

@@ -88,6 +88,7 @@ autosendcmd = "MSG NickServ identify pass; WAIT 2000; MODE $N +i"
 
 [image_preview]
 enabled = true
+inline = false                # automatically show direct-image links below chat messages
 protocol = "auto"              # "auto", "kitty", "iterm2", "sixel", "symbols"
 max_width = 0                  # 0 = auto
 max_height = 0                 # 0 = auto
@@ -380,3 +381,25 @@ models whose keys are absent are skipped.
 
 - **`/set section.field value`** — change a config value at runtime. Changes are saved immediately.
 - **`/reload`** — reload config, `.env` credentials, and the current theme from disk.
+
+## Inline terminal images
+
+Set `/set image_preview.inline true` to show a thumbnail below messages containing
+a direct-image URL. The option is off by default. The first direct-image link in
+each message receives a fixed 48-column by 8-row slot (narrow terminals use the
+available width). Images load only when their slot is visible; scrolling keeps
+message positions stable while a download finishes. Partial thumbnails are clipped
+to the chat viewport. Clicking a link still opens the larger popup.
+
+Automatic downloads accept public HTTP/HTTPS image URLs, with the same DNS and
+redirect address checks used by web previews. Private-network URLs and generic
+web pages are not automatically fetched. Up to four downloads run concurrently,
+and the in-memory thumbnail cache holds at most 32 message previews. Existing
+file-size and timeout settings apply; inline downloads do not write to the disk cache. Decoding is additionally limited
+to 8192 pixels per dimension and a 64 MiB allocation budget. Animated files show
+a static thumbnail.
+
+The renderer uses the detected terminal graphics protocol, with Unicode half-block
+images as the fallback. Inline graphics are preserved across unchanged frames, including clock ticks,
+single-line typing and emote animation. Changes to chat content or layout clear
+and rebuild the graphics to avoid stale pixels after scrolling or buffer changes.

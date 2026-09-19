@@ -100,6 +100,7 @@ impl App {
             crate::image_preview::PreviewStatus::Ready { .. }
         ) {
             self.cleanup_image_graphics();
+            self.inline_previews.invalidate_protocols();
         }
         self.image_preview = crate::image_preview::PreviewStatus::Hidden;
 
@@ -299,10 +300,10 @@ impl App {
 
         match proto {
             ProtocolType::Kitty => {
-                write_kitty_tmux_direct(raw_png, inner_x, inner_y, inner_w, inner_h);
+                crate::image_preview::tmux::write_kitty(&mut std::io::stdout().lock(), raw_png, Rect::new(inner_x, inner_y, inner_w, inner_h));
             }
             ProtocolType::Iterm2 => {
-                write_iterm2_tmux_direct(raw_png, inner_x, inner_y, inner_w, inner_h);
+                crate::image_preview::tmux::write_iterm2(&mut std::io::stdout().lock(), raw_png, Rect::new(inner_x, inner_y, inner_w, inner_h));
             }
             _ => {}
         }
@@ -317,12 +318,17 @@ impl App {
     pub(crate) fn handle_preview_event(&mut self, event: crate::image_preview::ImagePreviewEvent) {
         use crate::image_preview::{ImagePreviewEvent, PreviewStatus};
 
+        if let ImagePreviewEvent::Inline { request, result } = event {
+            self.inline_previews.accept(request, result);
+            return;
+        }
         let loading_url = match &self.image_preview {
             PreviewStatus::Loading { url } => url.as_str(),
             _ => return, // dismissed or different preview — drop the stale event
         };
 
         let event_url = match &event {
+            ImagePreviewEvent::Inline { .. } => unreachable!(),
             ImagePreviewEvent::Ready { url, .. } | ImagePreviewEvent::Error { url, .. } => {
                 url.as_str()
             }
@@ -333,6 +339,7 @@ impl App {
         }
 
         self.image_preview = match event {
+            ImagePreviewEvent::Inline { .. } => unreachable!(),
             ImagePreviewEvent::Ready {
                 url,
                 title,
@@ -352,117 +359,4 @@ impl App {
             ImagePreviewEvent::Error { url, message } => PreviewStatus::Error { url, message },
         };
     }
-}
-
-// ---------------------------------------------------------------------------
-// Direct-write image functions (free functions, called from App methods)
-// ---------------------------------------------------------------------------
-
-/// Write Kitty graphics image directly to stdout via tmux DCS passthrough.
-///
-/// Sends the original PNG (`f=100`) at full resolution with `c`/`r` params
-/// telling the terminal to scale the image to fit the cell area. This
-/// produces much better quality than ratatui-image's pre-downscaled RGBA.
-///
-/// Image data is chunked into 4096-byte base64 pieces, each individually
-/// wrapped in DCS passthrough (tmux has a ~1MB limit per passthrough block).
-fn write_kitty_tmux_direct(raw_png: &[u8], inner_x: u16, inner_y: u16, inner_w: u16, inner_h: u16) {
-    use std::io::Write;
-
-    const CHARS_PER_CHUNK: usize = 4096;
-    const CHUNK_SIZE: usize = (CHARS_PER_CHUNK / 4) * 3;
-
-    let mut out = std::io::stdout().lock();
-
-    // Save cursor + position at inner area (1-based for CUP).
-    let row = inner_y + 1;
-    let col = inner_x + 1;
-    let _ = write!(out, "\x1b7\x1b[{row};{col}H");
-    let _ = out.flush();
-
-    let chunks: Vec<&[u8]> = raw_png.chunks(CHUNK_SIZE).collect();
-    let chunk_count = chunks.len();
-
-    for (i, chunk) in chunks.iter().enumerate() {
-        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, chunk);
-        let more = u8::from(i + 1 < chunk_count);
-
-        // DCS passthrough: \x1bPtmux; <escaped-kitty-cmd> \x1b\\
-        // Inside DCS, ESC is doubled: \x1b → \x1b\x1b
-        if i == 0 {
-            // First chunk: transmit with display params.
-            // f=100 = PNG format (terminal decodes at native quality)
-            // a=T   = transmit and display
-            // c/r   = cell area (terminal scales image to fit)
-            // q=2   = suppress response
-            let _ = write!(
-                out,
-                "\x1bPtmux;\x1b\x1b_Gq=2,a=T,f=100,t=d,c={inner_w},r={inner_h},m={more};{b64}\x1b\x1b\\\x1b\\"
-            );
-        } else {
-            // Continuation chunks: just data + more flag.
-            let _ = write!(out, "\x1bPtmux;\x1b\x1b_Gm={more};{b64}\x1b\x1b\\\x1b\\");
-        }
-        let _ = out.flush();
-    }
-
-    // Restore cursor.
-    let _ = write!(out, "\x1b8");
-    let _ = out.flush();
-}
-
-/// Write iTerm2 image directly to stdout via tmux DCS passthrough.
-///
-/// Sends the original PNG via OSC 1337 at full resolution with cell-based
-/// dimensions. The terminal handles scaling.
-fn write_iterm2_tmux_direct(
-    raw_png: &[u8],
-    inner_x: u16,
-    inner_y: u16,
-    inner_w: u16,
-    inner_h: u16,
-) {
-    use std::io::Write;
-
-    // Mouse tracking modes — must be disabled during DCS image write to
-    // prevent interference with tmux passthrough (matches kokoirc).
-    const MOUSE_DISABLE: &[u8] = b"\x1b[?1003l\x1b[?1006l\x1b[?1002l\x1b[?1000l";
-    const MOUSE_ENABLE: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h";
-
-    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw_png);
-
-    // Build the iTerm2 OSC 1337 sequence.
-    let osc = format!(
-        "\x1b]1337;File=inline=1;width={inner_w};height={inner_h};preserveAspectRatio=0:{b64}\x07"
-    );
-
-    // Wrap in tmux DCS passthrough: double all ESC bytes in the payload.
-    let escaped = osc.replace('\x1b', "\x1b\x1b");
-    let dcs = format!("\x1bPtmux;{escaped}\x1b\\");
-
-    // Terminal rows/cols are 1-based for CUP.
-    let row = inner_y + 1;
-    let col = inner_x + 1;
-
-    let mut out = std::io::stdout().lock();
-
-    // Step 1: Disable mouse tracking.
-    let _ = out.write_all(MOUSE_DISABLE);
-    let _ = out.flush();
-
-    // Step 2: Save cursor + position.
-    let _ = write!(out, "\x1b7\x1b[{row};{col}H");
-    let _ = out.flush();
-
-    // Step 3: Write DCS-wrapped image data.
-    let _ = out.write_all(dcs.as_bytes());
-    let _ = out.flush();
-
-    // Step 4: Restore cursor.
-    let _ = out.write_all(b"\x1b8");
-    let _ = out.flush();
-
-    // Step 5: Re-enable mouse tracking.
-    let _ = out.write_all(MOUSE_ENABLE);
-    let _ = out.flush();
 }

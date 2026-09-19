@@ -226,6 +226,7 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
 
     // Recompute cached wrap-indent (depends on config + theme).
     app.recompute_wrap_indent();
+    app.refresh_image_protocol();
 }
 
 fn apply_env_credentials(

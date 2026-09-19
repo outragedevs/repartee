@@ -178,6 +178,7 @@ autosendcmd = &quot;MSG NickServ identify pass; WAIT 2000; MODE $N +i&quot;
 
 [image_preview]
 enabled = true
+inline = false                # automatically show direct-image links below chat messages
 protocol = &quot;auto&quot;              # &quot;auto&quot;, &quot;kitty&quot;, &quot;iterm2&quot;, &quot;sixel&quot;, &quot;symbols&quot;
 max_width = 0                  # 0 = auto
 max_height = 0                 # 0 = auto
@@ -435,6 +436,24 @@ models whose keys are absent are skipped.</p>
 <li><strong><code>/set section.field value</code></strong> — change a config value at runtime. Changes are saved immediately.</li>
 <li><strong><code>/reload</code></strong> — reload config, <code>.env</code> credentials, and the current theme from disk.</li>
 </ul>
+<h2>Inline terminal images</h2>
+<p>Set <code>/set image_preview.inline true</code> to show a thumbnail below messages containing
+a direct-image URL. The option is off by default. The first direct-image link in
+each message receives a fixed 48-column by 8-row slot (narrow terminals use the
+available width). Images load only when their slot is visible; scrolling keeps
+message positions stable while a download finishes. Partial thumbnails are clipped
+to the chat viewport. Clicking a link still opens the larger popup.</p>
+<p>Automatic downloads accept public HTTP/HTTPS image URLs, with the same DNS and
+redirect address checks used by web previews. Private-network URLs and generic
+web pages are not automatically fetched. Up to four downloads run concurrently,
+and the in-memory thumbnail cache holds at most 32 message previews. Existing
+file-size and timeout settings apply; inline downloads do not write to the disk cache. Decoding is additionally limited
+to 8192 pixels per dimension and a 64 MiB allocation budget. Animated files show
+a static thumbnail.</p>
+<p>The renderer uses the detected terminal graphics protocol, with Unicode half-block
+images as the fallback. Inline graphics are preserved across unchanged frames, including clock ticks,
+single-line typing and emote animation. Changes to chat content or layout clear
+and rebuild the graphics to avoid stale pixels after scrolling or buffer changes.</p>
 
 
         <!-- Prev / Next navigation -->
