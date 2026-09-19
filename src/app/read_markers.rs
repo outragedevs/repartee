@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::state::buffer::make_buffer_id;
@@ -12,7 +12,9 @@ pub struct ReadMarkers {
     desired: HashMap<String, i64>,
     sent: HashMap<String, (i64, Instant)>,
     queried: HashMap<String, Instant>,
-    rejected: HashMap<String, Option<i64>>,
+    rejected: HashMap<String, i64>,
+    rejected_queries: HashSet<String>,
+    pending: VecDeque<(String, Option<i64>)>,
     failures: HashMap<String, u8>,
     retry_after: HashMap<String, Instant>,
 }
@@ -45,7 +47,11 @@ impl ReadMarkers {
 
     fn receive(&mut self, target: &str, marker: Option<i64>) -> bool {
         let target = target.to_ascii_lowercase();
+        if let Some(position) = self.pending.iter().position(|(name, _)| name == &target) {
+            self.pending.remove(position);
+        }
         self.rejected.remove(&target);
+        self.rejected_queries.remove(&target);
         self.failures.remove(&target);
         self.retry_after.remove(&target);
         if let Some(previous) = self.confirmed.get(&target)
@@ -91,6 +97,8 @@ impl App {
         markers.sent.clear();
         markers.queried.clear();
         markers.rejected.clear();
+        markers.rejected_queries.clear();
+        markers.pending.clear();
         markers.failures.clear();
         markers.retry_after.clear();
     }
@@ -134,12 +142,16 @@ impl App {
         if markers
             .rejected
             .get(&target)
-            .is_some_and(|rejected| rejected.is_none_or(|time| time >= millis))
+            .is_some_and(|rejected| *rejected >= millis)
         {
             self.drain_pending_web_events();
             return;
         }
         markers.rejected.remove(&target);
+        if markers.rejected_queries.remove(&target) {
+            markers.failures.remove(&target);
+            markers.retry_after.remove(&target);
+        }
         if !markers
             .confirmed
             .get(&target)
@@ -264,12 +276,16 @@ impl App {
                         "timestamp={}",
                         crate::irc::chathistory::rfc3339_millis(millis)
                     ));
-                } else if markers.confirmed.contains_key(&target)
+                } else if markers.rejected_queries.contains(&target)
+                    || markers.confirmed.contains_key(&target)
                     || markers
                         .queried
                         .get(&target)
                         .is_some_and(|sent| now.duration_since(*sent) < Duration::from_secs(30))
                 {
+                    continue;
+                }
+                if markers.pending.len() >= 128 {
                     continue;
                 }
                 if handle
@@ -278,6 +294,7 @@ impl App {
                     .is_ok()
                 {
                     budget -= 1;
+                    markers.pending.push_back((target.clone(), desired));
                     if let Some(millis) = desired {
                         markers.sent.insert(target, (millis, now));
                     } else {
@@ -296,48 +313,51 @@ impl App {
             return false;
         };
         let context = (params.len() > 3).then(|| params[2].as_str());
-        let targets: std::collections::HashSet<_> = markers
-            .sent
-            .keys()
-            .chain(markers.queried.keys())
-            .filter(|target| {
-                context.is_none_or(|context| {
-                    context.eq_ignore_ascii_case(target)
-                        || markers.sent.get(*target).is_some_and(|(millis, _)| {
-                            context
-                                == format!(
-                                    "timestamp={}",
-                                    crate::irc::chathistory::rfc3339_millis(*millis)
-                                )
-                        })
-                })
+        let position = markers.pending.iter().position(|(target, timestamp)| {
+            context.is_none_or(|context| {
+                context.eq_ignore_ascii_case(target)
+                    || timestamp.is_some_and(|millis| {
+                        context
+                            == format!(
+                                "timestamp={}",
+                                crate::irc::chathistory::rfc3339_millis(millis)
+                            )
+                    })
             })
-            .cloned()
-            .collect();
-        if targets.is_empty() {
+        });
+        let Some((target, rejected)) =
+            position.and_then(|position| markers.pending.remove(position))
+        else {
             return false;
-        }
-        for target in targets {
-            let failures = markers.failures.entry(target.clone()).or_default();
-            *failures = failures.saturating_add(1);
-            if params[1] == "INTERNAL_ERROR" && *failures < 3 {
-                markers
-                    .retry_after
-                    .insert(target, Instant::now() + Duration::from_secs(5 << *failures));
-            } else {
-                let rejected = markers.sent.remove(&target).map(|(millis, _)| millis);
-                if rejected.is_none_or(|time| {
-                    markers
-                        .desired
-                        .get(&target)
-                        .is_none_or(|desired| *desired <= time)
-                }) {
+        };
+        let failures = markers.failures.entry(target.clone()).or_default();
+        *failures = failures.saturating_add(1);
+        if params[1] == "INTERNAL_ERROR" && *failures < 3 {
+            markers
+                .retry_after
+                .insert(target, Instant::now() + Duration::from_secs(5 << *failures));
+        } else {
+            if let Some(rejected) = rejected {
+                if markers
+                    .sent
+                    .get(&target)
+                    .is_some_and(|(sent, _)| *sent == rejected)
+                {
+                    markers.sent.remove(&target);
+                }
+                if markers
+                    .desired
+                    .get(&target)
+                    .is_none_or(|desired| *desired <= rejected)
+                {
                     markers.desired.remove(&target);
                     markers.rejected.insert(target.clone(), rejected);
                 }
+            } else {
+                markers.rejected_queries.insert(target.clone());
                 markers.queried.remove(&target);
-                markers.retry_after.remove(&target);
             }
+            markers.retry_after.remove(&target);
         }
         if let Some(buffer_id) = self
             .state
@@ -460,6 +480,62 @@ mod tests {
             crate::state::buffer::ActivityLevel::Activity,
         );
         id
+    }
+
+    #[tokio::test]
+    async fn unscoped_marker_failure_affects_only_the_first_pending_request() {
+        let mut app = sending_app();
+        app.state.add_buffer_with_focus(
+            crate::state::buffer::Buffer::empty(
+                "account",
+                crate::state::buffer::BufferType::Query,
+                "Other",
+            ),
+            false,
+        );
+        app.tick_read_markers();
+        assert_eq!(app.irc_handles["account"].sender().captured().len(), 2);
+        assert!(
+            app.handle_read_marker(
+                "account",
+                &":bnc FAIL MARKREAD NEED_MORE_PARAMS :Missing parameters"
+                    .parse()
+                    .unwrap()
+            )
+        );
+        let markers = &app.read_markers["account"];
+        assert!(markers.rejected_queries.contains("other"));
+        assert!(!markers.rejected_queries.contains("peer"));
+        assert_eq!(markers.pending.front(), Some(&("peer".into(), None)));
+        app.handle_read_marker("account", &":bnc MARKREAD Peer *".parse().unwrap());
+        let seen = server_message(&mut app, 1123);
+        app.mark_visible_message_read("account/peer", seen);
+        assert_eq!(app.irc_handles["account"].sender().captured().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn failed_initial_query_does_not_reject_later_read_updates() {
+        let mut app = sending_app();
+        app.tick_read_markers();
+        app.handle_read_marker(
+            "account",
+            &":bnc FAIL MARKREAD INVALID_TARGET Peer :Not joined"
+                .parse()
+                .unwrap(),
+        );
+        app.tick_read_markers();
+        assert_eq!(app.irc_handles["account"].sender().captured().len(), 1);
+        let seen = server_message(&mut app, 1123);
+        app.mark_visible_message_read("account/peer", seen);
+        assert_eq!(app.irc_handles["account"].sender().captured().len(), 2);
+        app.handle_read_marker(
+            "account",
+            &":bnc MARKREAD Peer timestamp=1970-01-01T00:00:01.123Z"
+                .parse()
+                .unwrap(),
+        );
+        assert!(app.read_markers["account"].desired.is_empty());
+        assert!(app.read_markers["account"].pending.is_empty());
     }
 
     #[tokio::test]
