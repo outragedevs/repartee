@@ -4,6 +4,7 @@ pub mod emote_layout;
 pub mod emote_picker;
 pub mod image_overlay;
 pub mod input;
+mod glyph_backend;
 pub mod layout;
 pub mod message_line;
 pub mod nick_list;
@@ -26,7 +27,7 @@ use ratatui::prelude::*;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-pub type Tui = Terminal<CrosstermBackend<Box<dyn Write + Send>>>;
+pub type Tui = Terminal<glyph_backend::GlyphBackend<Box<dyn Write + Send>>>;
 
 /// Set up the terminal for TUI mode (local stdout).
 pub fn setup_terminal() -> Result<Tui> {
@@ -38,7 +39,7 @@ pub fn setup_terminal() -> Result<Tui> {
         EnableMouseCapture,
         EnableBracketedPaste
     )?;
-    let backend = CrosstermBackend::new(Box::new(stdout) as Box<dyn Write + Send>);
+    let backend = glyph_backend::GlyphBackend::new(Box::new(stdout) as Box<dyn Write + Send>);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
 }
@@ -56,7 +57,7 @@ pub fn setup_socket_terminal(
         EnableMouseCapture,
         EnableBracketedPaste
     )?;
-    let backend = CrosstermBackend::new(writer);
+    let backend = glyph_backend::GlyphBackend::new(writer);
     // Use Fixed viewport — Fullscreen would call backend.size() every frame,
     // which queries ioctl on stdout (= /dev/null in the daemon) and gets garbage.
     // Fixed viewport uses the stored area, updated via terminal.resize() on SIGWINCH.
