@@ -186,3 +186,8 @@ retained independently of channel membership using 900/901, live account-notify,
 extended JOIN, account tags and WHOX. Lurker bouncer-login numerics are excluded
 because their account names are not upstream IRC identities. Tests cover a
 query-only connection, nickname reuse, account login/logout, and local clock skew.
+
+Marker scheduling, acknowledgments and FAIL correlation use the same Unicode
+lowercase keys as buffer IDs, while active buffers retain their wire spelling.
+A regression covers non-ASCII query/channel names with both MARKREAD and legacy
+READ, ensuring acknowledgments retire pending writes and failures match queries.

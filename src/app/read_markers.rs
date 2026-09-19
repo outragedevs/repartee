@@ -74,7 +74,7 @@ impl ReadMarkers {
     }
 
     fn receive(&mut self, target: &str, marker: Option<i64>) -> bool {
-        let target = target.to_ascii_lowercase();
+        let target = target.to_lowercase();
         self.pending.retain(|request| {
             request.target != target
                 || request
@@ -109,7 +109,7 @@ impl App {
         self.read_markers
             .get(conn_id)?
             .confirmed
-            .get(&target.to_ascii_lowercase())
+            .get(&target.to_lowercase())
             .copied()
             .flatten()
     }
@@ -152,7 +152,7 @@ impl App {
             let Some((_, target)) = origin.split_once('/') else {
                 continue;
             };
-            let target = target.to_ascii_lowercase();
+            let target = target.to_lowercase();
             let markers = self.read_markers.entry(conn_id.clone()).or_default();
             markers.prepare_scope(&scope);
             if markers
@@ -265,7 +265,7 @@ impl App {
                                 | crate::state::buffer::BufferType::Query
                         )
                 })
-                .map(|buffer| (buffer.name.to_ascii_lowercase(), buffer.name.clone()))
+                .map(|buffer| (buffer.name.to_lowercase(), buffer.name.clone()))
                 .collect();
             let targets = markers.prioritized_targets(targets);
             for (target, name) in targets {
@@ -336,7 +336,7 @@ impl App {
         let context = (params.len() > 3).then(|| params[2].as_str());
         let position = markers.pending.iter().position(|request| {
             context.is_none_or(|context| {
-                context.eq_ignore_ascii_case(&request.target)
+                context.to_lowercase() == request.target
                     || request.timestamp.is_some_and(|millis| {
                         context
                             == format!(
@@ -441,7 +441,7 @@ impl App {
         let markers = self.read_markers.entry(conn_id.to_string()).or_default();
         markers.prepare_scope(conn.network_key());
         if !markers.receive(&params[0], marker)
-            && markers.confirmed.get(&params[0].to_ascii_lowercase()) != Some(&marker)
+            && markers.confirmed.get(&params[0].to_lowercase()) != Some(&marker)
         {
             return true;
         }
@@ -490,7 +490,6 @@ mod tests {
         let mut message =
             crate::state::events::tests::make_test_message(&mut app.state, "server message");
         message.timestamp = chrono::DateTime::from_timestamp_millis(millis).unwrap();
-            message.tags = Some(HashMap::from([("time".into(), message.timestamp.to_rfc3339())]));
         message.tags = Some(HashMap::from([(
             "time".into(),
             crate::irc::chathistory::rfc3339_millis(millis),
@@ -502,6 +501,45 @@ mod tests {
             crate::state::buffer::ActivityLevel::Activity,
         );
         id
+    }
+
+    #[tokio::test]
+    async fn unicode_targets_share_one_marker_key_and_preserve_wire_spelling() {
+        for command in ["MARKREAD", "READ"] {
+            for name in ["Älice", "#Ärea"] {
+                let mut app = sending_app();
+                if command == "READ" {
+                    let caps = &mut app.state.connections.get_mut("account").unwrap().enabled_caps;
+                    caps.clear();
+                    caps.insert("soju.im/read".into());
+                }
+                app.state.remove_buffer("account/peer");
+                let kind = if name.starts_with('#') { crate::state::buffer::BufferType::Channel } else { crate::state::buffer::BufferType::Query };
+                let buffer_id = make_buffer_id("account", name);
+                app.state.add_buffer_with_focus(crate::state::buffer::Buffer::empty("account", kind, name), false);
+                let mut row = crate::state::events::tests::make_test_message(&mut app.state, "unicode target");
+                row.tags = Some(HashMap::from([("time".into(), "1970-01-01T00:00:01.123Z".into())]));
+                let id = row.id;
+                app.state.add_transient_message_with_activity(&buffer_id, row, crate::state::buffer::ActivityLevel::Activity);
+                app.mark_visible_message_read(&buffer_id, id);
+                let captured = app.irc_handles["account"].sender().captured();
+                assert_eq!(captured.len(), 1);
+                assert!(matches!(&captured[0].command, irc::proto::Command::Raw(verb, params) if verb == command && params[0] == name && params.len() == 2));
+                let response = format!(":bnc {command} {name} timestamp=1970-01-01T00:00:01.123Z");
+                assert!(app.handle_read_marker("account", &response.parse().unwrap()));
+                assert_eq!(app.confirmed_read_marker("account", name), Some(1123));
+                assert!(app.read_markers["account"].pending.is_empty());
+                assert!(app.read_markers["account"].desired.is_empty());
+                app.tick_read_markers();
+                assert_eq!(app.irc_handles["account"].sender().captured().len(), 1);
+                app.reconnect_read_markers("account");
+                app.tick_read_markers();
+                let failure = format!(":bnc FAIL {command} INVALID_PARAMS {name} :Rejected query");
+                assert!(app.handle_read_marker("account", &failure.parse().unwrap()));
+                assert!(app.read_markers["account"].pending.is_empty());
+                assert!(app.read_markers["account"].rejected_queries.contains(&name.to_lowercase()));
+            }
+        }
     }
 
     #[tokio::test]
