@@ -208,6 +208,9 @@ pub enum WebCommand {
         #[serde(default)]
         before_message_id: Option<u64>,
     },
+    CollapseBacklog {
+        buffer_id: String,
+    },
     FetchNickList {
         buffer_id: String,
     },

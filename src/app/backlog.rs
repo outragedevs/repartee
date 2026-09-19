@@ -874,6 +874,9 @@ impl App {
             return;
         }
         if let Some(id) = self.state.active_buffer_id.clone() {
+            if self.web_history_buffers.values().any(|buffer_id| buffer_id == &id) {
+                return;
+            }
             self.state.collapse_buffer_backlog(&id);
         }
     }
