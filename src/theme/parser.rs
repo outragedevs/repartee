@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fmt::Write as _;
 
 use ratatui::style::Color;
 
@@ -117,6 +116,19 @@ fn read_hex6_bytes(bytes: &[u8], pos: usize) -> Option<String> {
 /// no arguments and means it — abstraction resolution — and left its `$0`
 /// standing for the enclosing format's first parameter to swallow later.
 pub fn substitute_vars(input: &str, params: &[&str]) -> String {
+    substitute_vars_impl(input, params, false)
+}
+
+fn append_param(result: &mut String, value: &str, literal: bool) {
+    for ch in value.chars() {
+        result.push(ch);
+        if literal && ch == '%' {
+            result.push('%');
+        }
+    }
+}
+
+fn substitute_vars_impl(input: &str, params: &[&str], literal: bool) -> String {
     let chars: Vec<char> = input.chars().collect();
     let mut result = String::new();
     let mut i = 0;
@@ -141,7 +153,7 @@ pub fn substitute_vars(input: &str, params: &[&str]) -> String {
 
             // $* -- all params joined with space
             if chars[i] == '*' {
-                result.push_str(&params.join(" "));
+                append_param(&mut result, &params.join(" "), literal);
                 i += 1;
                 continue;
             }
@@ -171,9 +183,9 @@ pub fn substitute_vars(input: &str, params: &[&str]) -> String {
 
                 let abs_width = pad_width.unsigned_abs() as usize;
                 if pad_width < 0 {
-                    let _ = write!(result, "{value:>abs_width$}");
+                    append_param(&mut result, &format!("{value:>abs_width$}"), literal);
                 } else {
-                    let _ = write!(result, "{value:<abs_width$}");
+                    append_param(&mut result, &format!("{value:<abs_width$}"), literal);
                 }
                 continue;
             }
@@ -187,7 +199,7 @@ pub fn substitute_vars(input: &str, params: &[&str]) -> String {
                 }
                 let idx: usize = idx_str.parse().unwrap_or(0);
                 if idx < params.len() {
-                    result.push_str(params[idx]);
+                    append_param(&mut result, params[idx], literal);
                 }
                 continue;
             }
@@ -319,6 +331,17 @@ pub fn resolve_abstractions(
 // ---------------------------------------------------------------------------
 // parse_format_string
 // ---------------------------------------------------------------------------
+
+pub fn parse_irc_text(text: &str) -> Vec<StyledSpan> {
+    parse_format_string(&text.replace('%', "%%"), &[])
+}
+
+pub fn parse_literal_params(input: &str, params: &[&str]) -> Vec<StyledSpan> {
+    if params.is_empty() {
+        return parse_format_string(input, &[]);
+    }
+    parse_format_string(&substitute_vars_impl(input, params, true), &[])
+}
 
 #[expect(
     clippy::too_many_lines,
@@ -608,6 +631,20 @@ mod tests {
     // -----------------------------------------------------------------------
     // substitute_vars tests
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn literal_params_preserve_padding_and_data() {
+        for (format, params, expected) in [
+            ("[$[5]0]", vec!["%"], "[%    ]"),
+            ("[$[-5]0]", vec!["%"], "[    %]"),
+            ("%R$*%N", vec!["%N", "$0"], "%N $0"),
+            ("$0 $1", vec!["100%", "%%"], "100% %%"),
+        ] {
+            let spans = parse_literal_params(format, &params);
+            let text: String = spans.iter().map(|span| span.text.as_str()).collect();
+            assert_eq!(text, expected);
+        }
+    }
 
     #[test]
     fn substitute_positional() {

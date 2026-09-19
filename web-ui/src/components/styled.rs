@@ -58,5 +58,9 @@ pub fn render_message_text(text: &str, emotes_on: bool) -> Vec<AnyView> {
 
 /// Topic pipeline: parse → linkify (no emote expansion — topics stay clean).
 pub fn render_topic_text(text: &str) -> Vec<AnyView> {
-    render_spans(format::linkify_spans(format::parse_format(text)))
+    render_spans(format::linkify_spans(format::parse_irc_text(text)))
+}
+
+pub fn render_chat_text(text: &str, emotes_on: bool) -> Vec<AnyView> {
+    render_message_text(&text.replace('%', "%%"), emotes_on)
 }

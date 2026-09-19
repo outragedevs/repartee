@@ -27,7 +27,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
             // Parse topic through the format string parser to handle IRC colors
             let topic_spans = buf.topic.as_ref().map_or_else(Vec::new, |topic_text| {
-                crate::theme::parse_format_string(topic_text, &[])
+                crate::theme::parser::parse_irc_text(topic_text)
             });
             let topic_line = styled_spans_to_line_with_fg(&topic_spans, fg);
 

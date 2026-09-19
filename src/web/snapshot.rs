@@ -129,7 +129,7 @@ pub fn message_to_wire(
         msg_type: msg.message_type.as_str().to_string(),
         nick: msg.nick.clone(),
         nick_mode: msg.nick_mode.clone(),
-        text: msg.text.clone(),
+        text: if msg.message_type == crate::state::buffer::MessageType::Event && msg.event_key.is_some() { msg.text.replace('%', "%%") } else { msg.text.clone() },
         highlight: msg.highlight,
         // Only set when this in-memory message was itself loaded from the log DB
         // (backlog); live messages have no rowid yet.
@@ -155,7 +155,7 @@ pub fn stored_to_wire(
         msg_type: msg.msg_type.clone(),
         nick: msg.nick.clone(),
         nick_mode: None,
-        text: msg.text.clone(),
+        text: if msg.msg_type == "event" && msg.event_key.is_some() { msg.text.replace('%', "%%") } else { msg.text.clone() },
         highlight: msg.highlight,
         // The SQLite rowid — the lossless scroll-back cursor key.
         log_id: Some(msg.id),

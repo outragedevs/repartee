@@ -3,6 +3,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::config::AppConfig;
 use crate::state::buffer::{Message, MessageType};
 use crate::theme::{StyledSpan, parse_format_string, resolve_abstractions};
+use crate::theme::parser::{parse_irc_text, parse_literal_params};
 use crate::ui::styled_text::styled_spans_to_line;
 use ratatui::style::Color;
 use ratatui::text::Line;
@@ -74,19 +75,18 @@ fn render_event(msg: &Message, theme: &crate::theme::ThemeFile) -> Vec<StyledSpa
     let events = &theme.formats.events;
     let abstracts = &theme.abstracts;
 
-    if let Some(event_key) = &msg.event_key
+    if let (Some(event_key), Some(params)) = (&msg.event_key, &msg.event_params)
         && let Some(format) = events.get(event_key)
     {
         let resolved = resolve_abstractions(format, abstracts, 0);
-        let params: Vec<&str> = msg
-            .event_params
-            .as_ref()
-            .map(|p| p.iter().map(String::as_str).collect())
-            .unwrap_or_default();
-        return parse_format_string(&resolved, &params);
+        let params: Vec<&str> = params.iter().map(String::as_str).collect();
+        return parse_literal_params(&resolved, &params);
     }
-    // Fallback: parse text directly (may contain inline format codes).
-    parse_format_string(&msg.text, &[])
+    if msg.event_key.is_some() {
+        parse_irc_text(&msg.text)
+    } else {
+        parse_format_string(&msg.text, &[])
+    }
 }
 
 fn render_chat_message(
@@ -161,7 +161,7 @@ fn render_chat_message(
     // an emote token cannot contain one — so no token straddles the seam and
     // both halves tokenize exactly as the whole would.
     let (body, dim_suffix) = split_body_for_dimming(msg, emote_sizing);
-    let mut spans = parse_format_string(&resolved, &[&display_nick, &body, &padded_nick_mode]);
+    let mut spans = parse_literal_params(&resolved, &[&display_nick, &body, &padded_nick_mode]);
 
     // Apply nick color override: recolor spans containing the nick text.
     // Only applies to pubmsg (not own, mention, highlight, action, notice).
@@ -185,7 +185,7 @@ fn render_chat_message(
     // suffix undimmed on exactly the lines whose original had formatting in
     // it, and disagreeing with the web front end, which dims by offset.
     if let Some(suffix) = dim_suffix {
-        let rendered: String = parse_format_string(&suffix, &[])
+        let rendered: String = parse_irc_text(&suffix)
             .iter()
             .map(|s| s.text.as_str())
             .collect();
@@ -470,11 +470,6 @@ mod tests {
 
     #[test]
     fn a_formatted_original_is_still_dimmed() {
-        // The original is a person's own message and may carry mIRC or theme
-        // codes — bold, a colour — which are consumed on the way into spans.
-        // Comparing the STORED suffix against rendered spans then measures
-        // bytes that are not on screen, matches nothing, and leaves the
-        // suffix undimmed on exactly the lines whose original was formatted.
         let original = "\x02bla\x02 %Z112233bla%N";
         let text = format!("albalb [{original}]");
         let suffix_at = "albalb".len();
@@ -487,9 +482,8 @@ mod tests {
         let spans = chat_spans(&msg);
         assert_eq!(
             dim_text(&spans),
-            " [bla bla]",
-            "the codes are gone from the text, but the run they styled is \
-             still the run that dims"
+            " [bla %Z112233bla%N]",
+            "IRC formatting is parsed while literal percent codes remain visible"
         );
     }
 
@@ -917,4 +911,37 @@ mod tests {
             .any(|s| s.style.fg == Some(ratatui::style::Color::Rgb(255, 0, 0)));
         assert!(has_override, "nick color override should be applied");
     }
+    #[test]
+    fn shipped_chat_formats_preserve_literal_percent_and_irc_styles() {
+        for source in [include_str!("../../themes/default.theme"), include_str!("../../themes/spring.theme")] {
+            let theme = shipped_theme(source);
+            for kind in [MessageType::Message, MessageType::Action, MessageType::Notice] {
+                for body in ["%", "100%", "%N", "%%", "%Zabcdef", "$0 and %_bold", "https://example.org/a%20b"] {
+                    for own in [false, true] {
+                        let mut msg = test_message("alice", body, kind.clone());
+                        msg.nick_mode = Some("%".into());
+                        let spans = render_chat_message(&msg, own, &theme, &default_config(), None, None);
+                        let text: String = spans.iter().map(|span| span.text.as_str()).collect();
+                        assert!(text.ends_with(body), "{text:?} should end with {body:?}");
+                    }
+                }
+            }
+            let msg = test_message("alice", "\x02bold 100%\x02", MessageType::Message);
+            let spans = render_chat_message(&msg, false, &theme, &default_config(), None, None);
+            assert!(spans.iter().any(|span| span.bold && span.text.contains("bold 100%")));
+        }
+    }
+
+    #[test]
+    fn mention_aggregate_preserves_percent_without_exposing_its_theme_codes() {
+        let text = crate::state::mention_format::format_mention_line(
+            "2026/09/19", "net%N", "#100%", "alice", "100% %N \x02bold\x02", 0.5, 0.5,
+        );
+        let spans = parse_format_string(&text, &[]);
+        let visible: String = spans.iter().map(|span| span.text.as_str()).collect();
+        assert!(visible.contains("[net%N] [#100%]"), "{visible}");
+        assert!(visible.ends_with("100% %N bold"), "{visible}");
+        assert!(spans.iter().any(|span| span.bold && span.text == "bold"));
+    }
+
 }

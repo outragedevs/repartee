@@ -1114,7 +1114,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         .into_any()
     } else if is_notice {
         let nick_text = msg.nick.unwrap_or_default();
-        let styled = render_styled_text(&msg.text, emotes_on);
+        let styled = crate::components::styled::render_chat_text(&msg.text, emotes_on);
         view! {
             <>
                 <div class=line_class data-mid=mid>
@@ -1388,13 +1388,13 @@ fn render_body(
     emotes_on: bool,
 ) -> Vec<leptos::prelude::AnyView> {
     let Some((body, suffix)) = split_original_suffix(text, orig_offset) else {
-        return render_styled_text(text, emotes_on);
+        return crate::components::styled::render_chat_text(text, emotes_on);
     };
-    let mut nodes = render_styled_text(body, emotes_on);
+    let mut nodes = crate::components::styled::render_chat_text(body, emotes_on);
     // Its own element, so the suffix keeps whatever colours the original
     // carried and is merely de-emphasised — and so the styling cannot be
     // undone by format codes inside the body.
-    let suffix = render_styled_text(suffix, emotes_on);
+    let suffix = crate::components::styled::render_chat_text(suffix, emotes_on);
     nodes.push(view! { <span class="translated-original">{suffix}</span> }.into_any());
     nodes
 }
