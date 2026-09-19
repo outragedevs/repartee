@@ -11,13 +11,19 @@ pub(super) struct ReadActivity {
 
 impl AppState {
     pub(crate) fn reset_connection_read_markers(&mut self, conn_id: &str) {
-        for (buffer_id, state) in &mut self.read_activity {
-            if buffer_id
-                .split_once('/')
-                .is_some_and(|(id, _)| id == conn_id)
-            {
-                state.through = None;
-            }
+        let buffers: Vec<_> = self
+            .read_activity
+            .keys()
+            .filter(|buffer_id| {
+                buffer_id
+                    .split_once('/')
+                    .is_some_and(|(id, _)| id == conn_id)
+            })
+            .cloned()
+            .collect();
+        for buffer_id in buffers {
+            self.read_activity.remove(&buffer_id);
+            self.refresh_read_activity(&buffer_id);
         }
     }
 

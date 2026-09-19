@@ -162,3 +162,9 @@ Closing a buffer drops its unread rows but retains the target watermark. Reopeni
 restores both the read threshold and last-read timestamp before server history
 is hydrated, preventing already-read rows from regaining unread activity. Active
 mouse actions also confirm terminal focus; pointer motion alone does not.
+
+A confirming marker retires every pending retransmission whose timestamp it
+covers, while newer requests remain pending. Changing a connection's network
+scope discards both read thresholds and old unread entries. Query nick changes
+move unread rows but leave thresholds at their original server targets; returning
+to a previous nick restores its threshold instead of inheriting another target's.

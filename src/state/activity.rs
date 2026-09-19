@@ -23,8 +23,16 @@ impl AppState {
             return;
         }
         if let Some(mut state) = self.read_activity.remove(old_id) {
-            state.through = None;
-            self.read_activity.insert(new_id.to_string(), state);
+            let destination = self.read_activity.entry(new_id.to_string()).or_default();
+            destination.unread.extend(std::mem::take(&mut state.unread));
+            if let Some(timestamp) = destination.through.and_then(chrono::DateTime::from_timestamp_millis)
+                && let Some(buffer) = self.buffers.get_mut(new_id)
+            {
+                buffer.last_read = timestamp;
+            }
+            if state.through.is_some() {
+                self.read_activity.insert(old_id.to_string(), state);
+            }
         }
         if let Some(order) = self.activity_order.remove(old_id) {
             self.activity_order.insert(new_id.to_string(), order);
