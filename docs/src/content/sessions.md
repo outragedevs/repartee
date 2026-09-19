@@ -108,7 +108,7 @@ Instead of detaching to run a quick command, you can open a shell directly insid
 /shell close        # close active shell
 ```
 
-Shell buffers appear under a "Shell" group in the sidebar. Press **Ctrl+]** to switch back to IRC input mode. All keyboard input (including Alt combos for bash/vim) is forwarded to the shell while in shell input mode.
+Shell buffers appear under a "Shell" group in the sidebar. Press **Ctrl+]** to switch back to IRC input mode. Other keyboard input is forwarded to the shell. Alt+digits and Alt+arrows switch buffers; Alt+A switches to a buffer with unread activity.
 
 Full-screen TUI programs (btop, vim, irssi, weechat) work correctly, including mouse support, 256 colors, and alternate screen buffer.
 
