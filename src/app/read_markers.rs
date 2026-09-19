@@ -89,19 +89,25 @@ impl App {
         let Some(buffer) = self.state.buffers.get(buffer_id) else {
             return;
         };
-        let Some(message) = buffer
+        let Some(position) = buffer
             .messages
             .iter()
-            .find(|message| message.id == message_id)
+            .position(|message| message.id == message_id)
         else {
             return;
         };
-        let Some(millis) = message
-            .tags
-            .as_ref()
-            .and_then(|tags| tags.get("time"))
-            .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
-            .map(|time| time.timestamp_millis())
+        let Some(millis) = buffer
+            .messages
+            .range(..=position)
+            .rev()
+            .find_map(|message| {
+                message
+                    .tags
+                    .as_ref()
+                    .and_then(|tags| tags.get("time"))
+                    .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
+                    .map(|time| time.timestamp_millis())
+            })
         else {
             return;
         };
@@ -416,7 +422,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nonexistent_or_local_rows_cannot_advance_the_server_marker() {
+    async fn local_tail_resolves_preceding_irc_time_without_reading_later_arrivals() {
         let mut app = sending_app();
         server_message(&mut app, 1123);
         let local = crate::state::events::tests::make_test_message(&mut app.state, "local output");
@@ -427,9 +433,18 @@ mod tests {
             .unwrap()
             .messages
             .push_back(local);
+        server_message(&mut app, 2456);
         app.mark_visible_message_read("account/peer", local_id);
         app.mark_visible_message_read("account/peer", u64::MAX);
-        assert!(app.irc_handles["account"].sender().captured().is_empty());
+        let captured = app.irc_handles["account"].sender().captured();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            captured[0].command,
+            irc::proto::Command::Raw(
+                "MARKREAD".into(),
+                vec!["Peer".into(), "timestamp=1970-01-01T00:00:01.123Z".into()]
+            )
+        );
         assert_eq!(app.state.buffers["account/peer"].unread_count, 1);
     }
 
