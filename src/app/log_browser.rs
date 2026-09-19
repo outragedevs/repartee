@@ -77,8 +77,9 @@ impl App {
         let label_for = |net: &str| -> String {
             self.config
                 .servers
-                .get(net)
-                .map_or_else(|| net.to_string(), |c| c.label.clone())
+                .iter()
+                .find(|(id, server)| id.as_str() == net || config::network_scope::network_scope(id, server, &self.config.general.username) == net)
+                .map_or_else(|| net.to_string(), |(_, server)| server.label.clone())
         };
 
         let mut first_buffer_id: Option<String> = None;
@@ -89,6 +90,7 @@ impl App {
             self.state.add_connection(Connection {
                 id: conn_id.clone(),
                 label: net_label.clone(),
+                network_scope: Some(net.clone()),
                 status: ConnectionStatus::Connected,
                 own_handle: None,
                 nick: String::new(),

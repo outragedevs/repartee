@@ -18,6 +18,7 @@ pub enum ConnectionStatus {
 pub struct Connection {
     pub id: String,
     pub label: String,
+    pub network_scope: Option<String>,
     pub status: ConnectionStatus,
     pub nick: String,
     /// Our own server-stamped `ident@host` on this connection, learned from
@@ -71,6 +72,10 @@ pub struct Connection {
 }
 
 impl Connection {
+    pub fn network_key(&self) -> &str {
+        self.network_scope.as_deref().unwrap_or(&self.label)
+    }
+
     /// Allocate a unique outbound BATCH reference tag for this connection.
     pub fn next_batch_ref(&mut self) -> String {
         self.batch_ref_counter = self.batch_ref_counter.wrapping_add(1);

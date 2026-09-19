@@ -452,3 +452,34 @@ command input support `/bouncer`.
 Automatic connections to discovered networks and server-owned history are
 separate implementation stages. Neither explicit binding nor control mode alone
 disables the existing local history policy.
+
+## Bouncer network identity
+
+For explicit network binding and control connections, local data uses a stable
+scope separate from the display label. It combines the configured server ID,
+endpoint, login selectors and network ID. Two configured accounts using the same
+network name and numeric ID therefore remain isolated. Changing a display label
+or rotating a password preserves the scope; changing the account entry ID,
+endpoint or login selector creates a different scope. Keep the account entry ID
+stable when renaming its display label. The username selector includes the global
+`general.username` fallback when the server has no explicit `username`. Invalid
+network IDs are rejected while loading the configuration. Automatic reconnects
+retain the username captured for the existing connection; a fresh connection
+uses the updated configuration. The SASL mechanism selector also participates
+in the scope. If multiple authentication methods are configured for a bouncer,
+set an explicit `sasl_mechanism` to avoid switching accounts through automatic
+mechanism negotiation.
+
+History lookup, E2E contexts and peer-handle caches use this scope in both terminal
+and web flows. Existing rows stored under old display labels remain untouched;
+these ambiguous rows are not automatically adopted into a bouncer scope. If E2E was enabled under the old label-based scope, sending is refused until
+you verify this network and explicitly use `/e2e on` or `/e2e off` in its new
+scope. The refusal also prevents translation and URL-shortening from seeing
+the content. For DMs whose peer has not spoken since reconnecting, the explicit
+decision may use a unique previous cached handle; ambiguous handles require a
+fresh message from the peer. No previous encryption keys are copied. Direct IRC connections retain
+their existing label-based storage and migration behavior.
+
+This identity change does not yet implement server-owned history. That separate
+stage will prevent new bouncer chat history from being persisted locally and
+serve scrolling from the bouncer.
