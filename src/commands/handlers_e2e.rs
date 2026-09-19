@@ -2302,7 +2302,7 @@ mod tests {
         // The `highlight` flag is what drives the mentions-panel / tab
         // activity indicator. Errors must highlight; info/warning must
         // not (operators should not be paged for a successful /e2e on).
-        assert!(E2eEventLevel::Error == E2eEventLevel::Error);
+        assert_eq!(E2eEventLevel::Error, E2eEventLevel::Error);
         assert_ne!(E2eEventLevel::Info, E2eEventLevel::Error);
         assert_ne!(E2eEventLevel::Warning, E2eEventLevel::Error);
     }

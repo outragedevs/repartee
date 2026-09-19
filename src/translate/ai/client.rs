@@ -18,7 +18,7 @@ static THINK_OPEN: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"(?is)<think>.*\z").expect("valid regex"));
 
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
-const RETRY_AFTER_OVERFLOW_PENALTY: Duration = Duration::from_secs(24 * 60 * 60);
+const RETRY_AFTER_OVERFLOW_PENALTY: Duration = Duration::from_hours(24);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureKind {

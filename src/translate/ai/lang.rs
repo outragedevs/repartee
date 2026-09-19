@@ -214,7 +214,7 @@ pub fn detect(text: &str) -> Detection {
     add_ngrams(&mut scores[1], &joined, PL_NGRAMS);
     add_ngrams(&mut scores[2], &joined, EN_NGRAMS);
     let transliterated = u16::try_from(DE_TRANSLIT.find_iter(&lower).count()).unwrap_or(u16::MAX);
-    scores[0] += 2.0 * f32::from(transliterated);
+    scores[0] = 2.0_f32.mul_add(f32::from(transliterated), scores[0]);
 
     let mut ranked = [
         (KnownLanguage::De, scores[0]),
@@ -245,7 +245,7 @@ fn contains_word(words: &str, needle: &str) -> bool {
 fn add_ngrams(score: &mut f32, text: &str, ngrams: &[(&str, f32)]) {
     for &(needle, weight) in ngrams {
         let occurrences = u16::try_from(text.match_indices(needle).count()).unwrap_or(u16::MAX);
-        *score += f32::from(occurrences) * weight;
+        *score = f32::from(occurrences).mul_add(weight, *score);
     }
 }
 
