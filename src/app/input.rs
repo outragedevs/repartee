@@ -2956,6 +2956,7 @@ pub mod submit_typing_tests {
             log_db: None,
             socket_listener: None,
             socket_output_tx: None,
+            socket_output: None,
             shim_event_rx: None,
             is_socket_attached: false,
             term_reader_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),

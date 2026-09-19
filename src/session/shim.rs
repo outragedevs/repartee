@@ -70,7 +70,7 @@ pub async fn run_connected_shim(pid: u32, stream: UnixStream) -> Result<()> {
     // and forwards them through an mpsc channel. This avoids the cancellation-
     // safety bug where `select!` could cancel a `read_exact` mid-read on large
     // messages (e.g. Kitty image frames), desynchronizing the byte stream.
-    let (downstream_tx, mut downstream_rx) = mpsc::channel::<MainMessage>(1024);
+    let (downstream_tx, mut downstream_rx) = mpsc::channel::<MainMessage>(2);
     tokio::spawn(async move {
         let mut reader = read_half;
         loop {
