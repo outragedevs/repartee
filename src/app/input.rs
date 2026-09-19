@@ -44,9 +44,15 @@ impl App {
             Event::Key(key) => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Paste(text) => self.handle_paste(&text),
-            Event::Resize(cols, rows) => {
+            Event::Resize(cols, rows) if cols > 0 && rows > 0 => {
                 self.cached_term_cols = cols;
                 self.cached_term_rows = rows;
+                if let Some(terminal) = &mut self.terminal {
+                    if let Err(error) = terminal.resize(ratatui::layout::Rect::new(0, 0, cols, rows)) {
+                        tracing::debug!("terminal resize deferred to redraw: {error}");
+                    }
+                    self.needs_full_redraw = true;
+                }
                 self.refresh_emote_font_size();
                 self.resize_all_shells();
             }
