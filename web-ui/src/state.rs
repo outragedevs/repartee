@@ -92,6 +92,14 @@ pub(crate) const fn is_resize(prev: Option<i32>, current: i32) -> bool {
     }
 }
 
+pub(crate) fn is_history_key(key: &str, shift: bool) -> bool {
+    matches!(key, "PageUp" | "Home" | "ArrowUp") || (key == " " && shift)
+}
+
+pub(crate) fn is_scrollbar_press(x: f64, content_right: f64, on_container: bool) -> bool {
+    on_container && x >= content_right - 16.0
+}
+
 /// Client-side application state, stored as Leptos signals.
 #[derive(Clone, Copy)]
 pub struct AppState {
@@ -1705,4 +1713,21 @@ mod tests {
         assert!(ScrollMode::FollowingTail.is_following_tail());
         assert!(!ScrollMode::ReadingHistory.is_following_tail());
     }
+    #[test]
+    fn keyboard_history_gestures_include_shift_space() {
+        assert!(is_history_key(" ", true));
+        assert!(is_history_key("PageUp", false));
+        assert!(is_history_key("Home", false));
+        assert!(!is_history_key(" ", false));
+        assert!(!is_history_key("ArrowDown", true));
+    }
+
+    #[test]
+    fn scrollbar_press_covers_overlay_and_classic_but_not_content() {
+        assert!(is_scrollbar_press(399.0, 400.0, true));
+        assert!(is_scrollbar_press(405.0, 400.0, true));
+        assert!(!is_scrollbar_press(399.0, 400.0, false));
+        assert!(!is_scrollbar_press(200.0, 400.0, true));
+    }
+
 }
