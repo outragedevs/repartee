@@ -12,6 +12,9 @@ pub struct ReadMarkers {
     desired: HashMap<String, i64>,
     sent: HashMap<String, (i64, Instant)>,
     queried: HashMap<String, Instant>,
+    rejected: HashMap<String, Option<i64>>,
+    failures: HashMap<String, u8>,
+    retry_after: HashMap<String, Instant>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -42,6 +45,9 @@ impl ReadMarkers {
 
     fn receive(&mut self, target: &str, marker: Option<i64>) -> bool {
         let target = target.to_ascii_lowercase();
+        self.rejected.remove(&target);
+        self.failures.remove(&target);
+        self.retry_after.remove(&target);
         if let Some(previous) = self.confirmed.get(&target)
             && *previous >= marker
         {
@@ -84,6 +90,9 @@ impl App {
         markers.confirmed.clear();
         markers.sent.clear();
         markers.queried.clear();
+        markers.rejected.clear();
+        markers.failures.clear();
+        markers.retry_after.clear();
     }
 
     pub(crate) fn mark_visible_message_read(&mut self, buffer_id: &str, message_id: u64) {
@@ -122,6 +131,15 @@ impl App {
         let scope = self.state.connections[&conn_id].network_key().to_string();
         let markers = self.read_markers.entry(conn_id).or_default();
         markers.prepare_scope(&scope);
+        if markers
+            .rejected
+            .get(&target)
+            .is_some_and(|rejected| rejected.is_none_or(|time| time >= millis))
+        {
+            self.drain_pending_web_events();
+            return;
+        }
+        markers.rejected.remove(&target);
         if !markers
             .confirmed
             .get(&target)
@@ -225,6 +243,14 @@ impl App {
                 if budget == 0 {
                     return;
                 }
+                if markers.rejected.contains_key(&target)
+                    || markers
+                        .retry_after
+                        .get(&target)
+                        .is_some_and(|until| now < *until)
+                {
+                    continue;
+                }
                 let desired = markers.desired.get(&target).copied();
                 let mut params = vec![name];
                 if let Some(millis) = desired {
@@ -262,6 +288,77 @@ impl App {
         }
     }
 
+    fn handle_read_marker_failure(&mut self, conn_id: &str, params: &[String]) -> bool {
+        if params.len() < 3 {
+            return true;
+        }
+        let Some(markers) = self.read_markers.get_mut(conn_id) else {
+            return false;
+        };
+        let context = (params.len() > 3).then(|| params[2].as_str());
+        let targets: std::collections::HashSet<_> = markers
+            .sent
+            .keys()
+            .chain(markers.queried.keys())
+            .filter(|target| {
+                context.is_none_or(|context| {
+                    context.eq_ignore_ascii_case(target)
+                        || markers.sent.get(*target).is_some_and(|(millis, _)| {
+                            context
+                                == format!(
+                                    "timestamp={}",
+                                    crate::irc::chathistory::rfc3339_millis(*millis)
+                                )
+                        })
+                })
+            })
+            .cloned()
+            .collect();
+        if targets.is_empty() {
+            return false;
+        }
+        for target in targets {
+            let failures = markers.failures.entry(target.clone()).or_default();
+            *failures = failures.saturating_add(1);
+            if params[1] == "INTERNAL_ERROR" && *failures < 3 {
+                markers
+                    .retry_after
+                    .insert(target, Instant::now() + Duration::from_secs(5 << *failures));
+            } else {
+                let rejected = markers.sent.remove(&target).map(|(millis, _)| millis);
+                if rejected.is_none_or(|time| {
+                    markers
+                        .desired
+                        .get(&target)
+                        .is_none_or(|desired| *desired <= time)
+                }) {
+                    markers.desired.remove(&target);
+                    markers.rejected.insert(target.clone(), rejected);
+                }
+                markers.queried.remove(&target);
+                markers.retry_after.remove(&target);
+            }
+        }
+        if let Some(buffer_id) = self
+            .state
+            .buffers
+            .values()
+            .find(|buffer| {
+                buffer.connection_id == conn_id
+                    && buffer.buffer_type == crate::state::buffer::BufferType::Server
+            })
+            .map(|buffer| buffer.id.clone())
+        {
+            let text = crate::commands::helpers::escape_format(&format!(
+                "Read-marker synchronization failed: {}",
+                params[1..].join(" ")
+            ));
+            crate::irc::events::emit(&mut self.state, &buffer_id, &text);
+        }
+        self.drain_pending_web_events();
+        true
+    }
+
     pub(crate) fn handle_read_marker(
         &mut self,
         conn_id: &str,
@@ -270,6 +367,13 @@ impl App {
         let irc::proto::Command::Raw(command, params) = &message.command else {
             return false;
         };
+        if command == "FAIL"
+            && params
+                .first()
+                .is_some_and(|name| matches!(name.as_str(), "MARKREAD" | "READ"))
+        {
+            return self.handle_read_marker_failure(conn_id, params);
+        }
         if !matches!(command.as_str(), "MARKREAD" | "READ") {
             return false;
         }
@@ -356,6 +460,103 @@ mod tests {
             crate::state::buffer::ActivityLevel::Activity,
         );
         id
+    }
+
+    #[tokio::test]
+    async fn permanent_marker_failure_stops_the_rejected_timestamp() {
+        for command in ["MARKREAD", "READ"] {
+            let mut app = sending_app();
+            let seen = server_message(&mut app, 1123);
+            app.mark_visible_message_read("account/peer", seen);
+            let failure = format!(
+                ":bnc FAIL {command} INVALID_PARAMS timestamp=1970-01-01T00:00:01.123Z :Invalid timestamp"
+            );
+            assert!(app.handle_read_marker("account", &failure.parse().unwrap()));
+            assert!(app.read_markers["account"].desired.is_empty());
+            app.mark_visible_message_read("account/peer", seen);
+            app.tick_read_markers();
+            assert_eq!(app.irc_handles["account"].sender().captured().len(), 1);
+            assert!(app.state.buffers.values().any(|buffer| {
+                buffer
+                    .messages
+                    .iter()
+                    .any(|message| message.text.contains("Read-marker synchronization failed"))
+            }));
+            let newer = server_message(&mut app, 2456);
+            app.mark_visible_message_read("account/peer", newer);
+            assert_eq!(app.irc_handles["account"].sender().captured().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_marker_failure_retries_with_bounded_backoff() {
+        let mut app = sending_app();
+        let seen = server_message(&mut app, 1123);
+        app.mark_visible_message_read("account/peer", seen);
+        let failure = ":bnc FAIL MARKREAD INTERNAL_ERROR Peer :Internal error"
+            .parse()
+            .unwrap();
+        for attempt in 1..=3 {
+            assert!(app.handle_read_marker("account", &failure));
+            app.tick_read_markers();
+            assert_eq!(
+                app.irc_handles["account"].sender().captured().len(),
+                attempt
+            );
+            if attempt < 3 {
+                let markers = app.read_markers.get_mut("account").unwrap();
+                let past = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
+                *markers.retry_after.get_mut("peer").unwrap() = past;
+                markers.sent.get_mut("peer").unwrap().1 = past;
+                app.tick_read_markers();
+            }
+        }
+        app.mark_visible_message_read("account/peer", seen);
+        app.tick_read_markers();
+        assert_eq!(app.irc_handles["account"].sender().captured().len(), 3);
+        app.reconnect_read_markers("account");
+        app.mark_visible_message_read("account/peer", seen);
+        assert_eq!(app.irc_handles["account"].sender().captured().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn query_rename_does_not_transfer_the_old_targets_watermark() {
+        let mut app = sending_app();
+        server_message(&mut app, 2000);
+        app.handle_read_marker(
+            "account",
+            &":bnc MARKREAD Peer timestamp=1970-01-01T00:00:02.000Z"
+                .parse()
+                .unwrap(),
+        );
+        crate::irc::events::rename_query_buffers_for_test(
+            &mut app.state,
+            "account",
+            "Peer",
+            "Renamed",
+            &["account/peer".into()],
+        );
+        app.handle_read_marker(
+            "account",
+            &":bnc MARKREAD Renamed timestamp=1970-01-01T00:00:00.500Z"
+                .parse()
+                .unwrap(),
+        );
+        let mut message =
+            crate::state::events::tests::make_test_message(&mut app.state, "new target unread");
+        message.timestamp = chrono::DateTime::from_timestamp_millis(1000).unwrap();
+        app.state.add_transient_message_with_activity(
+            "account/renamed",
+            message,
+            crate::state::buffer::ActivityLevel::Activity,
+        );
+        assert_eq!(app.state.buffers["account/renamed"].unread_count, 1);
+        assert_eq!(
+            app.state.buffers["account/renamed"]
+                .last_read
+                .timestamp_millis(),
+            500
+        );
     }
 
     #[tokio::test]
