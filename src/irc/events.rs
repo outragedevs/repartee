@@ -1547,11 +1547,7 @@ fn handle_privmsg(
     // CTCP framing from NOTICEs) is routed to `try_dispatch_rpe2e_ctcp` below,
     // which performs its own DM handle migration. Skip it here so the migration
     // (and its keyring cache write) does not run twice for the same message.
-    let is_rpe2e_handshake = {
-        let stripped = text.strip_prefix('\x01').unwrap_or(text);
-        let stripped = stripped.strip_suffix('\x01').unwrap_or(stripped);
-        stripped.starts_with(crate::e2e::handshake::CTCP_TAG)
-    };
+    let is_rpe2e_handshake = rpe2e_handshake_body(text).is_some();
     if !target_is_channel && !is_own && !is_rpe2e_handshake {
         let new_handle = format!("{ident}@{host}");
         // `Some(old)` only when the handle is new for this buffer (old may be
@@ -1953,12 +1949,19 @@ fn handle_notice(
         } else {
             None
         };
+        let is_handshake = state.e2e_manager.as_ref().and_then(|_| rpe2e_handshake_body(text)).is_some();
+        let level = if (text.starts_with('\x01') && text.ends_with('\x01')) || is_handshake
+        {
+            IgnoreLevel::Ctcps
+        } else {
+            IgnoreLevel::Notices
+        };
         if should_ignore(
             &state.ignores,
             &n,
             Some(&ident),
             Some(&host),
-            &IgnoreLevel::Notices,
+            &level,
             channel,
         ) {
             return;
@@ -5144,6 +5147,12 @@ enum RpEe2eOutcome {
     NotE2e,
 }
 
+fn rpe2e_handshake_body(text: &str) -> Option<&str> {
+    let trimmed = text.strip_prefix('\x01').unwrap_or(text);
+    let inner = trimmed.strip_suffix('\x01').unwrap_or(trimmed);
+    (inner.split_whitespace().next() == Some(crate::e2e::handshake::CTCP_TAG)).then_some(inner)
+}
+
 /// Try to dispatch an incoming CTCP body as an RPE2E KEYREQ/KEYRSP.
 /// Returns `None` if the E2E manager is not initialized (caller treats
 /// this as "not handled" and falls through to the default rendering).
@@ -5166,11 +5175,9 @@ fn try_dispatch_rpe2e_ctcp(
 
     // Strip optional CTCP framing \x01...\x01. Servers sometimes drop the
     // trailing byte, so accept both variants and anything in between.
-    let trimmed = text.strip_prefix('\x01').unwrap_or(text);
-    let inner = trimmed.strip_suffix('\x01').unwrap_or(trimmed);
-    if !inner.starts_with(crate::e2e::handshake::CTCP_TAG) {
+    let Some(inner) = rpe2e_handshake_body(text) else {
         return Some(RpEe2eOutcome::NotE2e);
-    }
+    };
     let mgr = state.e2e_manager.clone()?;
 
     let (nick, ident, host) = extract_nick_userhost(prefix);
@@ -11460,6 +11467,61 @@ mod tests {
             levels,
             channels: None,
         });
+    }
+
+    #[test]
+    fn notice_ctcp_uses_ctcps_instead_of_notices_level() {
+        for (level, text, suppressed) in [
+            (IgnoreLevel::Ctcps, "\x01VERSION client\x01", true),
+            (IgnoreLevel::Ctcps, "ordinary notice", false),
+            (IgnoreLevel::Notices, "\x01VERSION client\x01", false),
+            (IgnoreLevel::Notices, "ordinary notice", true),
+            (IgnoreLevel::Notices, "\x01VERSION incomplete", true),
+            (IgnoreLevel::Ctcps, "\x01VERSION incomplete", false),
+        ] {
+            let mut state = make_test_state();
+            state.add_buffer(make_channel_buffer("test", "#rust"));
+            ignore(&mut state, "alice", vec![level]);
+            let message: IrcMessage = format!(":alice!u@h NOTICE #rust :{text}\r\n")
+                .parse().unwrap();
+            handle_irc_message(&mut state, "test", &message);
+            assert_eq!(state.buffers["test/#rust"].messages.is_empty(), suppressed);
+        }
+    }
+
+    #[test]
+    fn similar_protocol_prefix_keeps_private_message_handle_tracking() {
+        let mut state = make_test_state();
+        let db = crate::storage::db::open_database(false).unwrap();
+        let keyring = crate::e2e::keyring::Keyring::new(std::sync::Arc::new(std::sync::Mutex::new(db)));
+        state.e2e_manager = Some(std::sync::Arc::new(crate::e2e::manager::E2eManager::load_or_init(keyring).unwrap()));
+        let message: IrcMessage = ":alice!u@new.host PRIVMSG me :RPEE2Extra ordinary message\r\n".parse().unwrap();
+        handle_irc_message(&mut state, "test", &message);
+        assert_eq!(state.resolve_query_peer_handle("test/alice", "alice").unwrap().as_deref(), Some("u@new.host"));
+    }
+
+    #[test]
+    fn handshake_recognition_requires_the_complete_protocol_tag() {
+        assert!(rpe2e_handshake_body("RPEE2Ex ordinary notice").is_none());
+        assert!(rpe2e_handshake_body("\x01RPEE2Ex ordinary notice").is_none());
+        assert!(rpe2e_handshake_body("RPEE2E KEYREQ truncated").is_some());
+    }
+
+    #[test]
+    fn ctcp_ignore_blocks_lenient_e2e_notice_dispatch() {
+        for text in ["\x01RPEE2E KEYREQ truncated", "RPEE2E KEYREQ truncated\x01", "RPEE2E KEYREQ truncated"] {
+            for (level, expected_dispatch) in [(IgnoreLevel::Ctcps, false), (IgnoreLevel::Notices, true)] {
+                let mut state = make_test_state();
+                let db = crate::storage::db::open_database(false).unwrap();
+                let keyring = crate::e2e::keyring::Keyring::new(std::sync::Arc::new(std::sync::Mutex::new(db)));
+                state.e2e_manager = Some(std::sync::Arc::new(crate::e2e::manager::E2eManager::load_or_init(keyring).unwrap()));
+                ignore(&mut state, "alice", vec![level]);
+                let message: IrcMessage = format!(":alice!u@h NOTICE me :{text}\r\n").parse().unwrap();
+                handle_irc_message(&mut state, "test", &message);
+                let handle = state.resolve_query_peer_handle("test/alice", "alice").unwrap();
+                assert_eq!(handle.is_some(), expected_dispatch);
+            }
+        }
     }
 
     #[test]
