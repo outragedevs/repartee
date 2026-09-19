@@ -201,3 +201,9 @@ including reconnects to the same network. Network-scoped read thresholds remain.
 A regression changes the own nick, reconnects under the original nick, and
 verifies that new holders of the previous nick/account remain unread while old
 rows covered by the preserved marker remain read.
+
+Logging out or switching upstream accounts during one session retains the set
+of positively observed own accounts for history classification. Historical rows
+from those accounts remain self-authored; unrelated account tags remain unread.
+Reconnect still discards this session-specific evidence. A hydration regression
+covers two own accounts followed by logout and one unrelated account.

@@ -616,7 +616,7 @@ mod tests {
             "account",
             &format!(":{nick}!user@host ACCOUNT *").parse().unwrap(),
         );
-        assert!(!state.is_own_history_message("account/peer", &own, Some(&nick)));
+        assert!(state.is_own_history_message("account/peer", &own, Some(&nick)));
         crate::irc::events::handle_irc_message(
             &mut state,
             "account",
@@ -632,6 +632,36 @@ mod tests {
                 .parse()
                 .unwrap(),
         );
-        assert!(!state.is_own_history_message("account/peer", &own, Some(&nick)));
+        assert!(state.is_own_history_message("account/peer", &own, Some(&nick)));
+    }
+    #[tokio::test]
+    async fn own_history_survives_account_switch_and_logout() {
+        let mut state = state();
+        let nick = state.connections["account"].nick.clone();
+        for account in ["first-account", "second-account", "*"] {
+            crate::irc::events::handle_irc_message(
+                &mut state,
+                "account",
+                &format!(":{nick}!user@host ACCOUNT {account}")
+                    .parse()
+                    .unwrap(),
+            );
+        }
+        let rows = ["first-account", "second-account", "unrelated-account"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, account)| {
+                let mut message = history_row(&mut state, i64::try_from(index).unwrap() + 1000);
+                message.nick = Some("EarlierNick".into());
+                message
+                    .tags
+                    .as_mut()
+                    .unwrap()
+                    .insert("account".into(), account.into());
+                message
+            })
+            .collect();
+        state.surface_history_page("account/peer", rows, false);
+        assert_eq!(state.buffers["account/peer"].unread_count, 1);
     }
 }
