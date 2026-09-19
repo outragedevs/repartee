@@ -621,6 +621,16 @@ pub fn resolve_bind_ip(
         .or_else(|| general.default_bind_ip.clone())
 }
 
+struct RegistrationOutgoing(Option<tokio::task::JoinHandle<()>>);
+
+impl Drop for RegistrationOutgoing {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+
 /// Connect to an IRC server, returning a handle and the event receiver.
 ///
 /// Always performs capability negotiation (CAP LS 302), requesting all
@@ -737,10 +747,7 @@ pub async fn connect_server(
     // any other traffic, and the handle must inherit that — see `IrcHandle::new`.
     let sender = IrcSender::new(client.sender(), u64::from(penalty_threshold));
     let mut stream = client.stream()?;
-    // Extract the outgoing task handle so we can abort it on disconnect.
-    // Without this, the Pinger inside Outgoing holds a tx_outgoing clone
-    // that keeps the write half of the TCP socket alive (CLOSE-WAIT leak).
-    let outgoing_handle = client.outgoing_handle.take();
+    let mut outgoing = RegistrationOutgoing(client.outgoing_handle.take());
 
     let reg_params = RegistrationParams {
         nick,
@@ -770,15 +777,7 @@ pub async fn connect_server(
     } else {
         negotiation.await
     };
-    let neg = match result {
-        Ok(neg) => neg,
-        Err(error) => {
-            if let Some(task) = outgoing_handle {
-                task.abort();
-            }
-            return Err(error);
-        }
-    };
+    let neg = result?;
 
     let (tx, rx) = mpsc::channel(4096);
     let id = conn_id.to_string();
@@ -876,7 +875,7 @@ pub async fn connect_server(
         let _ = tx.send(IrcEvent::Disconnected(id, error)).await;
     });
 
-    Ok((IrcHandle::new(id2, sender, local_ip, outgoing_handle), rx))
+    Ok((IrcHandle::new(id2, sender, local_ip, outgoing.0.take()), rx))
 }
 
 /// Parameters for IRC connection registration, bundled to avoid long argument lists.

@@ -38,6 +38,8 @@ enum Reply {
     WrongNetwork,
     MissingNetwork,
     Disconnect,
+    CancelNegotiation,
+    CancelConfirmation,
 }
 
 #[expect(
@@ -48,6 +50,7 @@ async fn registration(reply: Reply, bound: bool) {
     let control = matches!(reply, Reply::ControlSuccess | Reply::ControlUnexpectedBound);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     let peer = tokio::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
         let (read, mut write) = socket.into_split();
@@ -72,6 +75,11 @@ async fn registration(reply: Reply, bound: bool) {
                 .unwrap()
                 .starts_with("USER ")
         );
+        if matches!(reply, Reply::CancelNegotiation) {
+            cancel_tx.send(()).unwrap();
+            assert!(next_command(&mut lines, &mut write).await.is_none());
+            return;
+        }
         let advertised = if matches!(reply, Reply::NoCapability) {
             "sasl=PLAIN"
         } else {
@@ -142,6 +150,11 @@ async fn registration(reply: Reply, bound: bool) {
             next_command(&mut lines, &mut write).await.unwrap(),
             "CAP END"
         );
+        if matches!(reply, Reply::CancelConfirmation) {
+            cancel_tx.send(()).unwrap();
+            assert!(next_command(&mut lines, &mut write).await.is_none());
+            return;
+        }
         if matches!(reply, Reply::Disconnect) {
             return;
         }
@@ -191,7 +204,17 @@ async fn registration(reply: Reply, bound: bool) {
         flood_protection: false,
         ..GeneralConfig::default()
     };
-    let result = connect_server("fixture", &server, &general).await;
+    let mut attempt = Box::pin(connect_server("fixture", &server, &general));
+    if matches!(reply, Reply::CancelNegotiation | Reply::CancelConfirmation) {
+        tokio::select! {
+            _ = &mut attempt => panic!("registration completed before cancellation"),
+            ready = cancel_rx => ready.unwrap(),
+        }
+        drop(attempt);
+        peer.await.unwrap();
+        return;
+    }
+    let result = attempt.await;
     if matches!(reply, Reply::Success | Reply::ControlSuccess) {
         let (handle, mut events) = result.unwrap();
         let mut connected = false;
@@ -392,4 +415,66 @@ async fn pinned_bouncer_discovery() {
     if let Some(task) = handle.outgoing_handle {
         task.abort();
     }
+}
+
+#[tokio::test]
+async fn cancelled_registration_closes_the_socket_at_both_await_points() {
+    for reply in [Reply::CancelNegotiation, Reply::CancelConfirmation] {
+        tokio::time::timeout(Duration::from_secs(5), registration(reply, true))
+            .await
+            .expect("cancelled registration retained an open socket");
+    }
+}
+
+#[tokio::test]
+async fn cancellation_discards_a_blocked_registration_write() {
+    use tokio::io::AsyncReadExt;
+
+    const PAYLOAD_SIZE: usize = 16 * 1024 * 1024;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (drain_tx, drain_rx) = tokio::sync::oneshot::channel();
+    let peer = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(socket);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "CAP LS 302\r\n");
+        ready_tx.send(()).unwrap();
+        drain_rx.await.unwrap();
+        let mut received = Vec::new();
+        reader.read_to_end(&mut received).await.unwrap();
+        received.len()
+    });
+    let mut server: ServerConfig = toml::from_str(
+        "label = 'fixture'\naddress = '127.0.0.1'\nport = 6667\ntls = false\nchannels = []\n",
+    )
+    .unwrap();
+    server.port = port;
+    server.password = Some("x".repeat(PAYLOAD_SIZE));
+    server.bouncer_control = true;
+    let general = GeneralConfig {
+        flood_protection: false,
+        ..GeneralConfig::default()
+    };
+    let mut attempt = Box::pin(connect_server("fixture", &server, &general));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            _ = &mut attempt => panic!("registration completed before cancellation"),
+            ready = ready_rx => ready.unwrap(),
+        }
+    })
+    .await
+    .unwrap();
+    drop(attempt);
+    drain_tx.send(()).unwrap();
+    let received = tokio::time::timeout(Duration::from_secs(5), peer)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        received < PAYLOAD_SIZE,
+        "cancelled registration completed its blocked write"
+    );
 }
