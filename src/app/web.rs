@@ -821,7 +821,7 @@ impl App {
 
     /// Mark a buffer as read from a web client.
     fn web_mark_read(&mut self, buffer_id: &str, message_id: Option<u64>) {
-        if self.state.buffer_uses_server_history(buffer_id) {
+        if self.state.uses_read_markers(buffer_id) {
             if let Some(message_id) = message_id {
                 self.mark_visible_message_read(buffer_id, message_id);
             }
@@ -1032,6 +1032,20 @@ impl App {
 #[cfg(test)]
 mod activity_read_tests {
     use crate::state::buffer::{ActivityLevel, Buffer, BufferType};
+
+    #[tokio::test]
+    async fn bouncer_without_marker_capability_keeps_local_web_read_clearing() {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let config = toml::from_str("label='Bouncer'\naddress='bnc.example.org'\nport=6697\ntls=true\nchannels=[]\nbouncer_network_id='42'").unwrap();
+        app.setup_connection("account", &config);
+        app.state.add_buffer_with_focus(Buffer::empty("account", BufferType::Query, "Peer"), false);
+        let message = crate::state::events::tests::make_test_message(&mut app.state, "unread");
+        app.state.add_transient_message_with_activity("account/peer", message, ActivityLevel::Activity);
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 1);
+        app.web_mark_read("account/peer", None);
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 0);
+        assert_eq!(app.state.buffers["account/peer"].activity, ActivityLevel::None);
+    }
 
     #[test]
     fn web_reads_and_silent_switches_remove_shortcut_candidates() {
