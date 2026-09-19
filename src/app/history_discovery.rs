@@ -20,8 +20,8 @@ pub struct HistoryDiscovery {
     retry_at: Instant,
 }
 
-fn decode_targets(batch: &BatchInfo, upper_ms: i64, limit: usize) -> Option<Vec<(String, i64)>> {
-    if batch.dropped_messages != 0 || batch.messages.len() > limit {
+fn decode_targets(batch: &BatchInfo, upper_ms: i64) -> Option<Vec<(String, i64)>> {
+    if batch.dropped_messages != 0 {
         return None;
     }
     let mut targets = Vec::new();
@@ -69,7 +69,7 @@ impl App {
             .or_insert_with(|| HistoryDiscovery {
                 pending: None,
                 discovery_started: false,
-                upper_ms: chrono::Utc::now().timestamp_millis(),
+                upper_ms: chrono::Utc::now().timestamp_millis().saturating_add(5_000),
                 limit,
                 queue: VecDeque::new(),
                 active: HashSet::new(),
@@ -175,13 +175,17 @@ impl App {
         {
             return;
         }
-        let Some(targets) = decode_targets(batch, discovery.upper_ms, discovery.limit) else {
+        let Some(targets) = decode_targets(batch, discovery.upper_ms) else {
             return;
         };
         discovery.pending = None;
         discovery.attempts = 0;
         discovery.retry_at = Instant::now();
-        if targets.len() < discovery.limit {
+        if batch
+            .opener_tags
+            .as_ref()
+            .is_some_and(|tags| tags.iter().any(|tag| tag.0 == "draft/chathistory-end"))
+        {
             discovery.finished = true;
         }
         if let Some(oldest) = targets.iter().map(|(_, time)| *time).min() {
@@ -356,6 +360,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn short_and_oversized_target_pages_continue_until_explicit_end() {
+        let mut app = app();
+        app.start_history_discovery("account");
+        let upper = app.history_discovery["account"].upper_ms;
+        assert!(upper > chrono::Utc::now().timestamp_millis() + 4_000);
+        app.receive_history_targets(
+            "account",
+            &batch(&[":bnc CHATHISTORY TARGETS First 2024-01-01T00:00:02.000Z"]),
+        );
+        assert!(!app.history_discovery["account"].finished);
+        app.history_discovery.get_mut("account").unwrap().limit = 1;
+        let mut page = batch(&[
+            ":bnc CHATHISTORY TARGETS Second 2024-01-01T00:00:01.000Z",
+            ":bnc CHATHISTORY TARGETS Third 2024-01-01T00:00:00.000Z",
+        ]);
+        page.opener_tags = Some(vec![irc::proto::message::Tag(
+            "draft/chathistory-end".into(),
+            None,
+        )]);
+        app.receive_history_targets("account", &page);
+        assert!(app.history_discovery["account"].finished);
+        assert!(app.state.buffers.contains_key("account/third"));
+    }
+
+    #[tokio::test]
     async fn retained_queries_use_the_same_bounded_queue_before_targets_start() {
         let mut app = app();
         for target in ["First", "Second", "Third"] {
@@ -510,7 +539,7 @@ mod tests {
             ":bnc CHATHISTORY TARGETS Peer 2024-01-01T00:00:01.000Z",
         ]);
         assert_eq!(
-            decode_targets(&batch, 1_800_000_000_000, 10),
+            decode_targets(&batch, 1_800_000_000_000),
             Some(vec![
                 ("#chat".into(), 1_704_067_200_000),
                 ("Peer".into(), 1_704_067_201_000)
@@ -521,10 +550,9 @@ mod tests {
     #[test]
     fn targets_reject_truncation_and_rows_outside_the_requested_window() {
         let mut batch = batch(&[":bnc CHATHISTORY TARGETS Peer 2024-01-01T00:00:00.000Z"]);
-        assert!(decode_targets(&batch, 1_700_000_000_000, 10).is_none());
-        assert!(decode_targets(&batch, 1_800_000_000_000, 0).is_none());
+        assert!(decode_targets(&batch, 1_700_000_000_000).is_none());
         batch.dropped_messages = 1;
-        assert!(decode_targets(&batch, 1_800_000_000_000, 10).is_none());
+        assert!(decode_targets(&batch, 1_800_000_000_000).is_none());
     }
 
     #[test]
@@ -533,6 +561,6 @@ mod tests {
             ":bnc CHATHISTORY TARGETS Peer 2024-01-01T00:00:00.000Z",
             ":bnc CHATHISTORY TARGETS Other invalid-time",
         ]);
-        assert!(decode_targets(&batch, 1_800_000_000_000, 10).is_none());
+        assert!(decode_targets(&batch, 1_800_000_000_000).is_none());
     }
 }
