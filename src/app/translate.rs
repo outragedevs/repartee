@@ -432,11 +432,8 @@ pub fn startup_backend_notice(cfg: &crate::config::TranslateConfig) -> Option<St
              real conversation.{C_RST}"
         ),
         BackendKind::Ai => {
-            if let Some(error) = AiBackend::configuration_error(&cfg.ai) {
-                format!("{C_ERR}translate: AI backend is unavailable — {error}{C_RST}")
-            } else {
-                return None;
-            }
+            let error = AiBackend::configuration_error(&cfg.ai)?;
+            format!("{C_ERR}translate: AI backend is unavailable — {error}{C_RST}")
         }
     })
 }
@@ -4790,7 +4787,7 @@ mod app_tests {
         // abandoned nick.
         let app = app_with_buffer();
         let long_ago = std::time::Instant::now()
-            .checked_sub(std::time::Duration::from_secs(600))
+            .checked_sub(std::time::Duration::from_mins(10))
             .expect("600s before now");
 
         assert_eq!(
@@ -4823,7 +4820,7 @@ mod app_tests {
         out.buffer_name = "frank".to_string();
         out.buffer_type = BufferType::Query;
         out.submitted_at = std::time::Instant::now()
-            .checked_sub(std::time::Duration::from_secs(600))
+            .checked_sub(std::time::Duration::from_mins(10))
             .expect("600s before now");
 
         assert!(
@@ -4923,7 +4920,7 @@ mod app_tests {
             false,
         );
         out.submitted_at = std::time::Instant::now()
-            .checked_sub(std::time::Duration::from_secs(600))
+            .checked_sub(std::time::Duration::from_mins(10))
             .expect("600s before now");
         assert_eq!(
             app.state
@@ -5047,7 +5044,7 @@ mod app_tests {
         app.state.remove_buffer("test/frank");
         assert!(
             app.state
-                .has_outgoing_in_flight("test/frank", std::time::Duration::from_secs(60)),
+                .has_outgoing_in_flight("test/frank", std::time::Duration::from_mins(1)),
             "closing the window does not recall the message"
         );
 
@@ -6824,7 +6821,7 @@ mod app_tests {
         assert!(
             app.state.has_outgoing_in_flight(
                 "test/frankie",
-                std::time::Duration::from_secs(60)
+                std::time::Duration::from_mins(1)
             ),
             "precondition: the marker moved with the buffer"
         );
@@ -6846,7 +6843,7 @@ mod app_tests {
         assert!(
             !app.state.has_outgoing_in_flight(
                 "test/frankie",
-                std::time::Duration::from_secs(60)
+                std::time::Duration::from_mins(1)
             ),
             "the send came back, so the conversation it moved to is free again"
         );

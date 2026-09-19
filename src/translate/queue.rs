@@ -946,7 +946,7 @@ mod tests {
         q.push_pending_at(4, "vier".into(), payload(4, "vier"), t0);
         q.push_pending_at(5, "fuenf".into(), payload(5, "fuenf"), t0);
         q.resolve(5, Ok("piec".into()));
-        let expired = q.expire(t0 + Duration::from_millis(5001), Duration::from_millis(5000));
+        let expired = q.expire(t0 + Duration::from_millis(5001), Duration::from_secs(5));
         assert_eq!(expired.timed_out, 1, "only the still-pending entry expires");
         let ready = q.drain_ready();
         assert_eq!(ids(&ready), vec![4, 5]);
@@ -963,7 +963,7 @@ mod tests {
         let mut q = TranslateQueue::new();
         let t0 = Instant::now();
         q.push_pending_at(1, "a b".into(), payload(1, "a b"), t0);
-        let expired = q.expire(t0 + Duration::from_millis(4999), Duration::from_millis(5000));
+        let expired = q.expire(t0 + Duration::from_millis(4999), Duration::from_secs(5));
         assert_eq!(expired.timed_out, 0);
         assert_eq!(q.pending_len(), 1);
     }
@@ -1057,7 +1057,7 @@ mod tests {
         q.reserve_at(10, t0);
         q.push_pending_at(11, "later".into(), payload(11, "later"), t0);
         q.resolve(11, Ok("translated later".into()));
-        q.expire(t0 + Duration::from_millis(5001), Duration::from_millis(5000));
+        q.expire(t0 + Duration::from_millis(5001), Duration::from_secs(5));
         assert_eq!(ids(&q.drain_ready()), vec![11]);
         assert!(q.is_empty());
     }
@@ -1072,9 +1072,9 @@ mod tests {
         let t0 = Instant::now();
         q.reserve_at(10, t0);
         q.push_pending_at(11, "stuck".into(), payload(11, "stuck"), t0);
-        q.reserve_at(12, t0 + Duration::from_millis(4000));
+        q.reserve_at(12, t0 + Duration::from_secs(4));
 
-        let expired = q.expire(t0 + Duration::from_millis(5001), Duration::from_millis(5000));
+        let expired = q.expire(t0 + Duration::from_millis(5001), Duration::from_secs(5));
 
         assert_eq!(expired.timed_out, 2, "the old reservation and the stuck line");
         assert_eq!(
