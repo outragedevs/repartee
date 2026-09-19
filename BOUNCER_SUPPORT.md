@@ -34,12 +34,12 @@ in part of its extension document.
 
 | Surface | Lurker | Soju | Required behavior / evidence still needed |
 | --- | --- | --- | --- |
-| Authentication | PASS and SASL PLAIN; dedicated bouncer credential parsing in `bouncerLogin.ts` | Configured SASL mechanisms, optionally EXTERNAL; connection/client/network selectors | Credential isolation, selectors, failure handling, TLS and reconnect tests against both |
+| Authentication | PASS and SASL PLAIN; dedicated bouncer credential parsing in `bouncerLogin.ts` | PLAIN or configured OAUTHBEARER, optionally EXTERNAL; connection/client/network selectors | Credential isolation, selectors, failure handling, TLS and reconnect tests against both |
 | Network discovery | `soju.im/bouncer-networks`, notify; batched or unbatched NETWORK | Same extensions | Control connection, initial list, partial attribute updates, attribute removal, deletion, unknown attributes |
-| Binding | BIND before registration; requires successful SASL or supplied PASS | BIND before registration, authenticated account | Bind after authentication and before CAP END; independent child connections per account/netid |
+| Binding | BIND before registration; requires successful SASL or supplied PASS | BIND before registration, authenticated account | Bind after SASL success, or after supplying PASS (verified at CAP END), always before CAP END; independent child connections per account/netid |
 | Network editing | ADDNETWORK/CHANGENETWORK/DELNETWORK explicitly rejected; web UI manages networks | All three implemented | Soju commands and replies; display Lurker's rejection without claiming a change succeeded |
 | Network lifecycle | State/nick/error notifications; retained upstream session on downstream QUIT | State/error notifications and retained upstream sessions | Separate transport and upstream status; no accidental PART/rejoin, duplicated autojoin, or reconnect storms |
-| History | CHATHISTORY LATEST/BEFORE/AFTER/AROUND/BETWEEN/TARGETS, event playback, limit 1000 | Same query family; availability depends on message store | Initial channels and DMs, scrollback, reconnect gaps, equal timestamps/msgids, limits, failures, cancellation, offline upstream |
+| History | CHATHISTORY LATEST/BEFORE/AFTER/AROUND/BETWEEN/TARGETS, event playback, limit 1000 | Same query family; availability depends on message store | Initial channels and DMs, scrollback, reconnect gaps, timestamp-only references on both servers, msgid deduplication, limits, failures, cancellation, offline upstream |
 | Automatic replay | Suppressed when CHATHISTORY negotiated | Suppressed when CHATHISTORY negotiated | Explicit initial hydration and target discovery; never rely on automatic replay after requesting the cap |
 | Read state | `draft/read-marker`, shared with Lurker web/iOS | `draft/read-marker` and legacy `soju.im/read` | Query/update markers, monotonic timestamps, remote read updates, no playback notifications, native/web parity |
 | Presence | `draft/pre-away`, aggregate account away, background `AWAY *` | `draft/pre-away` and aggregate presence | Explicit attached/away behavior; daemon attachment must not imply active user; test multiple clients |
@@ -50,7 +50,7 @@ in part of its extension document.
 | Name population | Implicit names supported | no-implicit-names plus two aliases | If negotiated, explicitly request needed names; no empty nicklists; aliases handled consistently |
 | Server search | Not implemented in bouncer | `soju.im/search` when store supports history | Structured query and result view, isolation from live unread/history, empty/error/timeout handling |
 | Buffer metadata | Not advertised | `draft/metadata-2`: pinned, muted, blocked | Subscribe/query/update and reflect remote changes in native/web ordering, notifications, filtering |
-| File upload | `soju.im/FILEHOST` points to `/api/filehost` | FILEHOST points to configured ingress `/uploads` | Credentialed OPTIONS/POST, MIME/size/errors, 201 Location; TLS downgrade and credential redirect protection |
+| File upload | `soju.im/FILEHOST` points to `/api/filehost` | FILEHOST points to configured ingress `/uploads` | Unauthenticated OPTIONS then authenticated POST, MIME/size/errors, 201 Location; TLS downgrade and credential redirect protection |
 | Client certificate management | Not advertised | `soju.im/client-cert` conditionally available | CREATE/LIST/DELETE, batches and failures; SASL EXTERNAL reconnect after pinning |
 | Push notifications | Not exposed over IRC bouncer | `soju.im/webpush`, VAPID, REGISTER/UNREGISTER | Full subscription lifecycle and web delivery; reconnect persistence and failure behavior; permission by user action |
 | Bouncer service commands | Normal forwarding where supported | BouncerServ management in `service.go` | Ensure service conversations/commands and replies remain usable without unsafe rewriting |
@@ -93,7 +93,7 @@ large to review, retaining the acceptance rows and dependencies.
 1. **Protocol state and configuration:** account/netid identity, bouncer mode,
    history ownership policy, network attribute encoding/decoding, isolated unit
    tests. Do not request new caps before their consumers exist.
-2. **Registration and explicit binding:** SASL/PASS selector handling, BIND
+2. **Registration and explicit binding:** SASL/PASS selector handling (PASS need only be supplied before BIND), BIND
    ordering, control-mode registration, reconnect identity, socket tests.
 3. **Discovery and connection lifecycle:** network batches/notifications, child
    connection creation and teardown, offline states, duplicate names, two
