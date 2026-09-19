@@ -1,6 +1,7 @@
 pub mod batch;
 pub mod cap;
 pub mod chathistory;
+mod client_cert;
 pub mod events;
 pub mod extban;
 pub mod flood;
@@ -694,7 +695,7 @@ pub async fn connect_server(
         alt_nicks: alt_nicks.clone(),
     };
 
-    let irc_config = Config {
+    let mut irc_config = Config {
         nickname: Some(nick.to_string()),
         alt_nicks,
         username: Some(username.to_string()),
@@ -708,12 +709,13 @@ pub async fn connect_server(
         channel_keys: autojoin_keys,
         encoding: server_config.encoding.clone(),
         version: Some(general.ctcp_version.clone()),
-        client_cert_path: server_config.client_cert_path.clone(),
         bind_address: server_config.bind_ip.clone(),
         ping_timeout: Some(IRC_PING_TIMEOUT_SECS),
         flood_penalty_threshold: Some(penalty_threshold),
         ..Config::default()
     };
+
+    client_cert::configure(&mut irc_config, server_config.client_cert_path.as_deref())?;
 
     let mut client = Client::from_config(irc_config).await?;
     let local_ip = client.local_addr().map(|a| a.ip());
