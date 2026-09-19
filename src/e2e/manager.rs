@@ -26,6 +26,8 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 use x25519_dalek::{PublicKey as XPub, StaticSecret};
 
+use zeroize::Zeroizing;
+
 use crate::e2e::DEFAULT_TS_TOLERANCE_SECS;
 use crate::e2e::chunker::split_plaintext;
 use crate::e2e::crypto::{
@@ -53,7 +55,7 @@ struct PendingHandshake {
     #[allow(dead_code, reason = "future diagnostics: pending channel listing")]
     channel: String,
     peer_handle: Option<String>,
-    eph_x25519_secret: [u8; 32],
+    eph_x25519_secret: Zeroizing<[u8; 32]>,
     /// Unix time the KEYREQ was built — drives TTL eviction
     /// (`PENDING_KEYREQ_TTL_SECS`); a KEYRSP that never arrives must not
     /// pin the ephemeral secret in memory forever.
@@ -1192,9 +1194,9 @@ impl E2eManager {
         new_sk: &SessionKey,
     ) -> Result<KeyRekey> {
         // Fresh ephemeral X25519 from us (initiator of the distribution).
-        let mut eph_sk_bytes = [0u8; 32];
-        rand::fill(&mut eph_sk_bytes);
-        let eph_sk = StaticSecret::from(eph_sk_bytes);
+        let mut eph_sk_bytes = Zeroizing::new([0u8; 32]);
+        rand::fill(eph_sk_bytes.as_mut_slice());
+        let eph_sk = StaticSecret::from(*eph_sk_bytes);
         let eph_pub = XPub::from(&eph_sk).to_bytes();
 
         // Derive the peer's X25519 public from their Ed25519 identity.
@@ -1209,11 +1211,11 @@ impl E2eManager {
         let wire_channel = crate::e2e::wire_context(channel);
         let info = rekey_info(wire_channel);
         let hk = Hkdf::<Sha256>::new(Some(b"RPE2E01-WRAP"), shared.as_bytes());
-        let mut wrap_key = [0u8; 32];
-        hk.expand(info.as_bytes(), &mut wrap_key)
+        let mut wrap_key = Zeroizing::new([0u8; 32]);
+        hk.expand(info.as_bytes(), wrap_key.as_mut_slice())
             .expect("hkdf expand 32 bytes never fails");
 
-        let (wrap_nonce, wrap_ct) = aead::encrypt(&wrap_key, info.as_bytes(), new_sk)?;
+        let (wrap_nonce, wrap_ct) = aead::encrypt(&wrap_key, info.as_bytes(), new_sk.as_slice())?;
 
         let mut nonce = [0u8; 16];
         rand::fill(&mut nonce);
@@ -1450,12 +1452,12 @@ impl E2eManager {
         // Derive our X25519 secret from our Ed25519 seed and complete ECDH.
         let my_seed = self.identity.secret_bytes();
         let my_x25519_scalar = ecdh::ed25519_seed_to_x25519(&my_seed);
-        let my_sk = StaticSecret::from(my_x25519_scalar);
+        let my_sk = StaticSecret::from(*my_x25519_scalar);
         let shared = my_sk.diffie_hellman(&XPub::from(rekey.eph_pub));
         let info = rekey_info(crate::e2e::wire_context(&rekey.channel));
         let hk = Hkdf::<Sha256>::new(Some(b"RPE2E01-WRAP"), shared.as_bytes());
-        let mut wrap_key = [0u8; 32];
-        hk.expand(info.as_bytes(), &mut wrap_key)
+        let mut wrap_key = Zeroizing::new([0u8; 32]);
+        hk.expand(info.as_bytes(), wrap_key.as_mut_slice())
             .expect("hkdf expand 32 bytes never fails");
 
         let new_sk_bytes = aead::decrypt(
@@ -1470,7 +1472,7 @@ impl E2eManager {
                 new_sk_bytes.len()
             )));
         }
-        let mut new_sk = [0u8; 32];
+        let mut new_sk = Zeroizing::new([0u8; 32]);
         new_sk.copy_from_slice(&new_sk_bytes);
 
         let sess = IncomingSession {
@@ -1535,8 +1537,8 @@ impl E2eManager {
             wire.part,
             wire.total,
         );
-        let utf8_or_reject = |pt: Vec<u8>| match String::from_utf8(pt) {
-            Ok(s) => DecryptOutcome::Plaintext(s),
+        let utf8_or_reject = |pt: Zeroizing<Vec<u8>>| match std::str::from_utf8(&pt) {
+            Ok(s) => DecryptOutcome::Plaintext(s.to_string()),
             Err(e) => DecryptOutcome::Rejected(format!("utf8: {e}")),
         };
         match aead::decrypt(&sess.sk, &wire.nonce, &aad, &wire.ciphertext) {
@@ -1597,10 +1599,10 @@ impl E2eManager {
         let mut nonce = [0u8; 16];
         rand::fill(&mut nonce);
 
-        let mut eph_secret = [0u8; 32];
-        rand::fill(&mut eph_secret);
+        let mut eph_secret = Zeroizing::new([0u8; 32]);
+        rand::fill(eph_secret.as_mut_slice());
         let eph_pub = {
-            let sec = StaticSecret::from(eph_secret);
+            let sec = StaticSecret::from(*eph_secret);
             XPub::from(&sec).to_bytes()
         };
 
@@ -1774,7 +1776,7 @@ impl E2eManager {
             // path rejects it before ever touching these bytes; it is
             // replaced on `/e2e accept` when the real KEYRSP session is
             // installed.
-            sk: [0u8; 32],
+            sk: [0u8; 32].into(),
             status: TrustStatus::Pending,
             created_at: now_unix(),
         };
@@ -1883,9 +1885,9 @@ impl E2eManager {
 
         // Fresh ephemeral X25519 keypair for ECDH with the initiator's
         // ephemeral public.
-        let mut our_eph_secret = [0u8; 32];
-        rand::fill(&mut our_eph_secret);
-        let our_eph_sec = StaticSecret::from(our_eph_secret);
+        let mut our_eph_secret = Zeroizing::new([0u8; 32]);
+        rand::fill(our_eph_secret.as_mut_slice());
+        let our_eph_sec = StaticSecret::from(*our_eph_secret);
         let our_eph_pub = XPub::from(&our_eph_sec).to_bytes();
 
         // `info` (and AEAD `aad`) must be computable identically by both
@@ -1895,7 +1897,7 @@ impl E2eManager {
         // themselves bind the exchange to a specific peer.
         let info = wrap_info(crate::e2e::wire_context(&req.channel));
         let wrap_key = derive_wrap_key(&our_eph_sec, &req.eph_x25519, info.as_bytes());
-        let (wrap_nonce, wrap_ct) = aead::encrypt(&wrap_key, info.as_bytes(), &our_sk)?;
+        let (wrap_nonce, wrap_ct) = aead::encrypt(&wrap_key, info.as_bytes(), our_sk.as_slice())?;
 
         // Sign response. `pubkey` is our long-term Ed25519 identity; it is
         // bound into the signature so the initiator can verify the KEYRSP
@@ -2036,14 +2038,14 @@ impl E2eManager {
             .record_outgoing_recipient(&req.channel, sender_handle, &fp, now_unix())?;
 
         // Fresh ephemeral X25519 keypair for ECDH.
-        let mut our_eph_secret = [0u8; 32];
-        rand::fill(&mut our_eph_secret);
-        let our_eph_sec = StaticSecret::from(our_eph_secret);
+        let mut our_eph_secret = Zeroizing::new([0u8; 32]);
+        rand::fill(our_eph_secret.as_mut_slice());
+        let our_eph_sec = StaticSecret::from(*our_eph_secret);
         let our_eph_pub = XPub::from(&our_eph_sec).to_bytes();
 
         let info = wrap_info(crate::e2e::wire_context(&req.channel));
         let wrap_key = derive_wrap_key(&our_eph_sec, &req.eph_x25519, info.as_bytes());
-        let (wrap_nonce, wrap_ct) = aead::encrypt(&wrap_key, info.as_bytes(), &our_sk)?;
+        let (wrap_nonce, wrap_ct) = aead::encrypt(&wrap_key, info.as_bytes(), our_sk.as_slice())?;
 
         let our_pubkey = self.identity.public_bytes();
         let mut rsp_nonce = [0u8; 16];
@@ -2145,7 +2147,7 @@ impl E2eManager {
     /// tag-verification failure in `aead::decrypt` and we move on.
     /// Unrelated entries for the same channel stay in the map; they
     /// are still awaiting their own KEYRSPs.
-    fn consume_matching_pending_for_keyrsp(&self, rsp: &KeyRsp) -> Result<[u8; 32]> {
+    fn consume_matching_pending_for_keyrsp(&self, rsp: &KeyRsp) -> Result<SessionKey> {
         // Enforce the TTL on the CONSUMER side, not only on insert: a KEYRSP
         // arriving after `PENDING_KEYREQ_TTL_SECS` with no intervening
         // handshake to trigger pruning must not complete an arbitrarily old
@@ -2170,16 +2172,16 @@ impl E2eManager {
         let matched = candidate_keys.iter().find_map(|key| {
             let eph_secret = {
                 let pending = self.pending.lock().expect("e2e pending mutex poisoned");
-                pending.get(key).map(|ph| ph.eph_x25519_secret)?
+                pending.get(key).map(|ph| ph.eph_x25519_secret.clone())?
             };
-            let our_sec = StaticSecret::from(eph_secret);
+            let our_sec = StaticSecret::from(*eph_secret);
             let wrap_key = derive_wrap_key(&our_sec, &rsp.ephemeral_pub, info.as_bytes());
             let sk_bytes =
                 aead::decrypt(&wrap_key, &rsp.wrap_nonce, info.as_bytes(), &rsp.wrap_ct).ok()?;
             if sk_bytes.len() != 32 {
                 return None;
             }
-            let mut sk_arr = [0u8; 32];
+            let mut sk_arr = Zeroizing::new([0u8; 32]);
             sk_arr.copy_from_slice(&sk_bytes);
             Some((sk_arr, key.clone()))
         });
@@ -2346,12 +2348,12 @@ fn rekey_info(channel: &str) -> String {
 
 /// Derive a 32-byte wrap key from a pair of ephemeral X25519 keys. Matches
 /// the same HKDF construction used by `crypto::ecdh::EphemeralKeypair`.
-fn derive_wrap_key(secret: &StaticSecret, peer_pub_bytes: &[u8; 32], info: &[u8]) -> [u8; 32] {
+fn derive_wrap_key(secret: &StaticSecret, peer_pub_bytes: &[u8; 32], info: &[u8]) -> Zeroizing<[u8; 32]> {
     let peer_pub = XPub::from(*peer_pub_bytes);
     let shared = secret.diffie_hellman(&peer_pub);
     let hk = Hkdf::<Sha256>::new(Some(b"RPE2E01-WRAP"), shared.as_bytes());
-    let mut okm = [0u8; 32];
-    hk.expand(info, &mut okm)
+    let mut okm = Zeroizing::new([0u8; 32]);
+    hk.expand(info, okm.as_mut_slice())
         .expect("hkdf expand 32 bytes never fails for OKM ≤ 255 * HashLen");
     okm
 }

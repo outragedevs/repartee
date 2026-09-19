@@ -50,12 +50,12 @@ impl EphemeralKeypair {
     /// The HKDF `info` string binds the wrap key to the RPE2E protocol and
     /// to the handshake context (sender/recipient handles, channel).
     #[must_use]
-    pub fn derive_wrap_key(&self, peer_pub: &[u8; 32], info: &[u8]) -> [u8; 32] {
+    pub fn derive_wrap_key(&self, peer_pub: &[u8; 32], info: &[u8]) -> Zeroizing<[u8; 32]> {
         let peer = PublicKey::from(*peer_pub);
         let shared = self.secret.diffie_hellman(&peer);
         let hk = Hkdf::<Sha256>::new(Some(b"RPE2E01-WRAP"), shared.as_bytes());
-        let mut okm = [0u8; 32];
-        hk.expand(info, &mut okm).expect("hkdf expand 32 bytes");
+        let mut okm = Zeroizing::new([0u8; 32]);
+        hk.expand(info, okm.as_mut_slice()).expect("hkdf expand 32 bytes");
         okm
     }
 }
@@ -68,12 +68,12 @@ pub fn static_derive_wrap_key(
     my_secret: &[u8; 32],
     peer_public: &[u8; 32],
     info: &[u8],
-) -> [u8; 32] {
+) -> Zeroizing<[u8; 32]> {
     let secret = StaticSecret::from(*my_secret);
     let shared = secret.diffie_hellman(&PublicKey::from(*peer_public));
     let hk = Hkdf::<Sha256>::new(Some(b"RPE2E01-WRAP"), shared.as_bytes());
-    let mut okm = [0u8; 32];
-    hk.expand(info, &mut okm).expect("hkdf expand 32 bytes");
+    let mut okm = Zeroizing::new([0u8; 32]);
+    hk.expand(info, okm.as_mut_slice()).expect("hkdf expand 32 bytes");
     okm
 }
 
@@ -100,9 +100,9 @@ pub fn ed25519_pub_to_x25519(ed_pub: &[u8; 32]) -> Result<[u8; 32]> {
 /// (RFC 8032 §7.1 seeds) which is mirrored below in `ed25519_to_x25519_rfc8032_vectors`
 /// to guarantee byte-for-byte interop with libsodium-based peers.
 #[must_use]
-pub fn ed25519_seed_to_x25519(ed_seed: &[u8; 32]) -> [u8; 32] {
+pub fn ed25519_seed_to_x25519(ed_seed: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     let signing = SigningKey::from_bytes(ed_seed);
-    signing.to_scalar_bytes()
+    Zeroizing::new(signing.to_scalar_bytes())
 }
 
 #[cfg(test)]
@@ -153,8 +153,8 @@ mod tests {
         let scalar_a = ed25519_seed_to_x25519(&seed_a);
         let scalar_b = ed25519_seed_to_x25519(&seed_b);
 
-        let x_sk_a = StaticSecret::from(scalar_a);
-        let x_sk_b = StaticSecret::from(scalar_b);
+        let x_sk_a = StaticSecret::from(*scalar_a);
+        let x_sk_b = StaticSecret::from(*scalar_b);
 
         // Known-good X25519 publics derived from the Ed25519 seeds via
         // libsodium's map — taken verbatim from ed25519-dalek's test vectors.
@@ -198,7 +198,7 @@ mod tests {
         let seed = id.secret_bytes();
         let pub_ed = id.public_bytes();
         let scalar = ed25519_seed_to_x25519(&seed);
-        let pub_from_secret = PublicKey::from(&StaticSecret::from(scalar)).to_bytes();
+        let pub_from_secret = PublicKey::from(&StaticSecret::from(*scalar)).to_bytes();
         let pub_from_ed = ed25519_pub_to_x25519(&pub_ed).unwrap();
         assert_eq!(pub_from_secret, pub_from_ed);
     }

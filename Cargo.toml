@@ -83,7 +83,7 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 chacha20poly1305 = "0.10"
 hkdf = "0.12"
 bip39 = "2"
-zeroize = { version = "1", features = ["derive"] }
+zeroize = { version = "1", features = ["derive", "serde"] }
 mlua = { version = "0.11.6", features = ["lua54", "vendored", "send"] }
 ratatui-image = { version = "10.0", default-features = false, features = ["image-defaults", "crossterm"] }
 spellbook = "0.4"
