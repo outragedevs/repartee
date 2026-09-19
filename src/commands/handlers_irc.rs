@@ -149,34 +149,9 @@ fn spawn_connection(app: &mut App, conn_id: &str, server_config: &crate::config:
 
     app.setup_connection(conn_id, server_config);
 
-    let general = app.config.general.clone();
-    let tx = app.irc_tx.clone();
-    let id = conn_id.to_string();
     let mut cfg = server_config.clone();
-    // Apply CLI / config-default bind-IP fallback if the server has
-    // none of its own. Per-server `bind_ip` (already set on `cfg`)
-    // wins unconditionally; this only fills in the blank.
-    cfg.bind_ip = crate::irc::resolve_bind_ip(&cfg, app.cli_bind_override.as_deref(), &general);
-
-    tokio::spawn(async move {
-        match crate::irc::connect_server(&id, &cfg, &general).await {
-            Ok((handle, mut rx)) => {
-                let _ = tx
-                    .send(crate::irc::IrcEvent::HandleReady(Box::new(handle)))
-                    .await;
-                while let Some(event) = rx.recv().await {
-                    if tx.send(event).await.is_err() {
-                        break;
-                    }
-                }
-            }
-            Err(e) => {
-                let _ = tx
-                    .send(crate::irc::IrcEvent::Disconnected(id, Some(e.to_string())))
-                    .await;
-            }
-        }
-    });
+    cfg.bind_ip = crate::irc::resolve_bind_ip(&cfg, app.cli_bind_override.as_deref(), &app.config.general);
+    app.start_connection_attempt(conn_id, cfg);
 }
 
 pub(crate) fn cmd_disconnect(app: &mut App, args: &[String]) {
@@ -209,6 +184,9 @@ pub(crate) fn cmd_disconnect(app: &mut App, args: &[String]) {
     // are still alive.
     if let Some(handle) = app.irc_handles.get(&conn_id) {
         let _ = handle.sender().send_quit(quit_msg);
+    } else {
+        app.cancel_connection_attempt(&conn_id);
+        app.handle_irc_event(crate::irc::IrcEvent::Disconnected(conn_id, None));
     }
 }
 

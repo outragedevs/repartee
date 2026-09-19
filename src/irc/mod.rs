@@ -35,6 +35,7 @@ const IRC_PING_TIMEOUT_SECS: u32 = 60;
 /// An IRC event forwarded from the reader task to the main loop.
 #[derive(Debug)]
 pub enum IrcEvent {
+    Attempt(String, u64, Box<Self>),
     /// A raw IRC protocol message from the server.
     Message(String, Box<irc::proto::Message>),
     /// Registration complete (`RPL_WELCOME` received). Carries the negotiated
@@ -803,7 +804,7 @@ pub async fn connect_server(
     let mut echo = crate::irc::handle::CrateEcho::new(echo_config);
 
     // Spawn reader task
-    tokio::spawn(async move {
+    let reader = tokio::spawn(async move {
         // Send negotiation diagnostics immediately so they're visible even if
         // registration fails (e.g. server requires SASL but auth didn't complete).
         let _ = tx
@@ -845,7 +846,12 @@ pub async fn connect_server(
         }
 
         // Continue reading from the stream.
-        while let Some(result) = stream.next().await {
+        loop {
+            let result = tokio::select! {
+                () = tx.closed() => return,
+                result = stream.next() => result,
+            };
+            let Some(result) = result else { break };
             match result {
                 Ok(message) => {
                     // The crate has just handled this message inside `poll_next`
@@ -885,7 +891,9 @@ pub async fn connect_server(
         let _ = tx.send(IrcEvent::Disconnected(id, error)).await;
     });
 
-    Ok((IrcHandle::new(id2, sender, local_ip, outgoing.0.take()), rx))
+    let mut handle = IrcHandle::new(id2, sender, local_ip, outgoing.0.take());
+    handle.reader_handle = Some(reader);
+    Ok((handle, rx))
 }
 
 /// Parameters for IRC connection registration, bundled to avoid long argument lists.
