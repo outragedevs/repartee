@@ -37,6 +37,44 @@ pub struct ShellManager {
     next_id: u32,
 }
 
+fn command_arguments(command: Option<&str>) -> Result<Vec<String>, String> {
+    let mut args = match command {
+        Some(command) => {
+            if command.contains('\0') {
+                return Err("Shell command must not contain NUL characters".to_string());
+            }
+            shell_words::split(&command.replace('#', "\0"))
+                .map_err(|e| format!("Invalid shell command: {e}"))?
+                .into_iter()
+                .map(|arg| arg.replace('\0', "#"))
+                .collect()
+        }
+        None => vec![std::env::var("SHELL")
+            .ok()
+            .filter(|shell| !shell.is_empty())
+            .unwrap_or_else(|| "/bin/sh".to_string())],
+    };
+    if args.is_empty() {
+        args.push("/bin/sh".to_string());
+    }
+    if args[0].is_empty() {
+        return Err("Shell command executable must not be empty".to_string());
+    }
+    Ok(args)
+}
+
+fn program_label(program: &str) -> String {
+    std::path::Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("shell")
+        .to_string()
+}
+
+pub fn command_label(command: Option<&str>) -> Result<String, String> {
+    Ok(program_label(&command_arguments(command)?[0]))
+}
+
 impl ShellManager {
     pub fn new() -> (Self, mpsc::Receiver<ShellEvent>) {
         let (event_tx, event_rx) = mpsc::channel(256);
@@ -63,6 +101,7 @@ impl ShellManager {
         command: Option<&str>,
         buffer_id: &str,
     ) -> Result<(String, String), String> {
+        let arguments = command_arguments(command)?;
         let id = format!("shell-{}", self.next_id);
         self.next_id += 1;
 
@@ -76,26 +115,9 @@ impl ShellManager {
             })
             .map_err(|e| format!("Failed to open PTY: {e}"))?;
 
-        let full_command = command
-            .map(String::from)
-            .or_else(|| std::env::var("SHELL").ok())
-            .unwrap_or_else(|| "/bin/sh".to_string());
-
-        // Split command into program + arguments for multi-word commands
-        // (e.g. "vim /etc/hosts" → program="vim", args=["/etc/hosts"]).
-        let mut parts = full_command.split_whitespace();
-        let program = parts.next().unwrap_or("/bin/sh");
-
-        let label = std::path::Path::new(program)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("shell")
-            .to_string();
-
-        let mut cmd = CommandBuilder::new(program);
-        for arg in parts {
-            cmd.arg(arg);
-        }
+        let label = program_label(&arguments[0]);
+        let mut cmd = CommandBuilder::new(&arguments[0]);
+        cmd.args(&arguments[1..]);
         // TERM tells programs what escape sequences the terminal supports.
         // xterm-256color is the standard for modern 256-color terminals.
         cmd.env("TERM", "xterm-256color");
@@ -650,6 +672,53 @@ fn rewrite_hvp_to_cup(input: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_arguments_preserve_quotes_escapes_and_empty_arguments() {
+        let args = command_arguments(Some(r#"'/path with spaces/tool' 'single quoted' "double quoted" escaped\ space '' pre"mid dle"post"#)).unwrap();
+        assert_eq!(args, ["/path with spaces/tool", "single quoted", "double quoted", "escaped space", "", "premid dlepost"]);
+        assert_eq!(command_label(Some("'/path with spaces/tool' '/another/path'")).unwrap(), "tool");
+        assert_eq!(command_arguments(Some("  ")).unwrap(), ["/bin/sh"]);
+    }
+
+    #[test]
+    fn invalid_shell_quotes_do_not_open_a_session() {
+        let (mut manager, _rx) = ShellManager::new();
+        for command in ["echo 'unfinished", "echo \"unfinished", "'' argument", "echo \0"] {
+            assert!(manager.open(80, 24, Some(command), "shell/test").is_err());
+        }
+        assert_eq!(manager.next_id, 0);
+        assert_eq!(manager.session_count(), 0);
+    }
+
+    #[test]
+    fn shell_hash_arguments_remain_literal_in_every_quote_context() {
+        assert_eq!(command_arguments(Some("#tool #channel tail")).unwrap(), ["#tool", "#channel", "tail"]);
+        assert_eq!(command_arguments(Some(r##"echo '#a b' "#c d" \#e \\#f "\#g""##)).unwrap(), ["echo", "#a b", "#c d", "#e", "\\#f", "\\#g"]);
+    }
+
+    #[tokio::test]
+    async fn quoted_executable_and_literal_arguments_reach_the_pty() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("echo tool");
+        std::os::unix::fs::symlink("/bin/echo", &executable).unwrap();
+        let command = format!("{} 'two words' escaped\\ space '' '$HOME' ';' '|' '*.txt' #channel", shell_words::quote(executable.to_str().unwrap()));
+        let (mut manager, mut rx) = ShellManager::new();
+        let (_, label) = manager.open(80, 24, Some(&command), "shell/test").unwrap();
+        assert_eq!(label, "echo tool");
+        let output = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut output = Vec::new();
+            while let Some(event) = rx.recv().await {
+                match event {
+                    ShellEvent::Output { bytes, .. } => output.extend(bytes),
+                    ShellEvent::Exited { .. } => break,
+                }
+            }
+            String::from_utf8(output).unwrap()
+        }).await;
+        manager.kill_all();
+        assert_eq!(output.unwrap().trim_end(), "two words escaped space  $HOME ; | *.txt #channel");
+    }
 
     #[test]
     fn shell_manager_new_has_no_sessions() {

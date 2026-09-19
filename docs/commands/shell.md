@@ -42,11 +42,24 @@ switches away from the shell.
 If the subcommand is not recognized, it is treated as a command to run
 (e.g. `/shell htop` is equivalent to `/shell cmd htop`).
 
+Commands support single and double quotes, backslash-escaped spaces, and empty
+quoted arguments. An unmatched quote or an empty executable is rejected before
+a session is opened. The buffer name comes from the executable, not its arguments.
+
+The executable is launched directly: variables, wildcards, pipes, redirections,
+and command substitutions are not evaluated. A `#` starts a literal argument,
+not a comment. For shell syntax, explicitly run a
+shell, for example `/shell cmd /bin/sh -c 'printf "%s\\n" "$HOME"'`.
+The default `$SHELL` value is treated as one executable path.
+
 ## Examples
 
     /shell
     /sh cmd htop
     /shell cmd vim /etc/hosts
+    /shell cmd vim "/path with spaces/notes.txt"
+    /shell "/path with spaces/tool" 'one argument' ''
+    /sh cmd echo escaped\ space
     /shell close
     /shell list
 
