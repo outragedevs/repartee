@@ -329,6 +329,7 @@ pub fn process_completed_batch(
                 for (buf_id, msgs) in by_buffer {
                     if server_owned && direction.is_none() && !state.buffers.contains_key(&buf_id)
                         && let Some((_, target)) = buf_id.split_once('/')
+                        && !state.connections.get(conn_id).is_some_and(|conn| conn.chathistory.was_closed(target))
                     {
                         let name = batch.params.first().filter(|name| name.eq_ignore_ascii_case(target))
                             .map_or(target, String::as_str);
@@ -1477,6 +1478,8 @@ mod tests {
             conn.origin_config.bouncer_network_id = Some("42".into());
             conn.chathistory.mark_in_flight("#test", direction, 200);
             state.remove_buffer(&buf_id);
+            state.connections.get_mut("test").unwrap().chathistory
+                .clear_stale(std::time::Duration::ZERO);
             let batch = BatchInfo {
                 batch_type: "CHATHISTORY".into(),
                 params: vec!["#test".into()],

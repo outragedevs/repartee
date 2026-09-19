@@ -158,6 +158,7 @@ pub struct HistoryState {
     /// same window, duplicating rows on servers without stable `@msgid`. Cleared
     /// by [`set_gapfill_cutoff`] so every (re)connection re-arms all targets.
     gapfilled_targets: HashSet<String>,
+    closed_targets: HashSet<String>,
     /// Per-target count of chained `AFTER` gap-fill pages this connection. A
     /// healthy chain terminates at `gapfill_cutoff_ms` (each page anchors at the
     /// newest row received and walks forward to "now"), but a server that floors
@@ -175,6 +176,14 @@ pub struct HistoryState {
 const MAX_GAPFILL_PAGES: usize = 10_000;
 
 impl HistoryState {
+    pub fn close_target(&mut self, target: &str) {
+        self.closed_targets.insert(target.to_ascii_lowercase());
+    }
+
+    pub fn was_closed(&self, target: &str) -> bool {
+        self.closed_targets.contains(&target.to_ascii_lowercase())
+    }
+
     pub fn reset_pagination(&mut self, target: &str) {
         let target = target.to_ascii_lowercase();
         self.before_exhausted.remove(&target);

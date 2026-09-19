@@ -82,6 +82,14 @@ fn memory_page(
 }
 
 impl App {
+    pub(crate) fn rekey_pending_history(&mut self, old_id: &str, new_id: &str) {
+        for page in &mut self.pending_history_pages {
+            if page.buffer_id == old_id {
+                new_id.clone_into(&mut page.buffer_id);
+            }
+        }
+    }
+
     pub(crate) fn release_web_history(&mut self, session_id: &str) {
         let Some(buffer_id) = self.state.web_history_buffers.remove(session_id) else {
             return;
@@ -143,6 +151,9 @@ impl App {
             self.state
                 .web_history_buffers
                 .insert(session_id.to_string(), buffer_id.to_string());
+            if let Some(buffer) = self.state.buffers.get_mut(buffer_id) {
+                buffer.pin_backlog = true;
+            }
         }
         let Some(buffer) = self.state.buffers.get(buffer_id) else {
             self.reply_server_history_page(&request);
@@ -422,6 +433,49 @@ mod tests {
             app.volatile_mentions[0].1.timestamp,
             (now - chrono::Duration::days(1)).timestamp()
         );
+    }
+
+    #[tokio::test]
+    async fn pending_history_and_readers_follow_buffer_renames() {
+        let mut app = app();
+        app.fetch_server_history_page("account/#test", 20, None, None, "browser");
+        app.state
+            .web_history_buffers
+            .insert("browser".into(), "account/#test".into());
+        let mut buffer = app.state.buffers.shift_remove("account/#test").unwrap();
+        buffer.id = "account/#renamed".into();
+        buffer.name = "#renamed".into();
+        app.state.buffers.insert(buffer.id.clone(), buffer);
+        app.state
+            .rekey_buffer_state("account/#test", "account/#renamed");
+        app.drain_pending_buffer_rekeys();
+        assert_eq!(app.state.web_history_buffers["browser"], "account/#renamed");
+        assert_eq!(app.pending_history_pages[0].buffer_id, "account/#renamed");
+        let mut web = app.web_broadcaster.subscribe();
+        app.flush_server_history_pages();
+        let WebEvent::Messages { buffer_id, .. } = web.try_recv().unwrap() else {
+            panic!("expected history response");
+        };
+        assert_eq!(buffer_id, "account/#renamed");
+    }
+
+    #[tokio::test]
+    async fn memory_only_web_pagination_pins_the_cursor_before_live_rows_arrive() {
+        let mut app = app();
+        app.state.scrollback_limit = 1;
+        let message = crate::state::events::tests::make_test_message(&mut app.state, "cursor");
+        app.state.add_message("account/#test", message);
+        app.fetch_server_history_page("account/#test", 20, Some(i64::MAX), None, "browser");
+        assert!(app.pending_history_pages.is_empty());
+        let message = crate::state::events::tests::make_test_message(&mut app.state, "new");
+        app.state.add_message("account/#test", message);
+        assert!(app.state.buffers["account/#test"].pin_backlog);
+        assert_eq!(
+            app.state.buffers["account/#test"].messages[0].text,
+            "cursor"
+        );
+        app.release_web_history("browser");
+        assert_eq!(app.state.buffers["account/#test"].messages.len(), 1);
     }
 
     #[tokio::test]

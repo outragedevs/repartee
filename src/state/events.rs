@@ -211,6 +211,7 @@ impl AppState {
         {
             conn.chathistory.reset_pagination(&buffer.name);
             conn.chathistory.clear_connect_gapfilled(&buffer.name);
+            conn.chathistory.close_target(&buffer.name);
         }
         self.activity_order.remove(id);
         self.web_history_buffers.retain(|_, buffer_id| buffer_id != id);
@@ -1099,6 +1100,11 @@ impl AppState {
             return;
         }
         self.rekey_activity(old_id, new_id);
+        for buffer_id in self.web_history_buffers.values_mut() {
+            if buffer_id == old_id {
+                new_id.clone_into(buffer_id);
+            }
+        }
         if let Some(queue) = self.translate_queues.remove(old_id) {
             // The new id may still hold its PREVIOUS occupant's queue — a
             // stale query under the very nick this conversation is renaming

@@ -2788,6 +2788,7 @@ impl crate::app::App {
         let rekeys = std::mem::take(&mut self.state.pending_buffer_rekeys);
         let mut followed = false;
         for (old_id, new_id) in rekeys {
+            self.rekey_pending_history(&old_id, &new_id);
             // A conversation the user never configured has nothing to follow.
             // Skipping it also bounds the list by the number of configured
             // buffers, so a peer flipping nicks cannot grow it.
