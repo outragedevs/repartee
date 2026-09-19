@@ -19,7 +19,7 @@ use std::io::{self, Write};
 
 use color_eyre::eyre::Result;
 use crossterm::{
-    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
+    event::{DisableBracketedPaste, DisableMouseCapture, DisableFocusChange, EnableBracketedPaste, EnableMouseCapture, EnableFocusChange},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -37,6 +37,7 @@ pub fn setup_terminal() -> Result<Tui> {
         stdout,
         EnterAlternateScreen,
         EnableMouseCapture,
+        EnableFocusChange,
         EnableBracketedPaste
     )?;
     let backend = glyph_backend::GlyphBackend::new(Box::new(stdout) as Box<dyn Write + Send>);
@@ -55,6 +56,7 @@ pub fn setup_socket_terminal(
         writer,
         EnterAlternateScreen,
         EnableMouseCapture,
+        EnableFocusChange,
         EnableBracketedPaste
     )?;
     let backend = glyph_backend::GlyphBackend::new(writer);
@@ -77,6 +79,7 @@ pub fn restore_terminal(terminal: &mut Tui) -> Result<()> {
         terminal.backend_mut(),
         LeaveAlternateScreen,
         DisableMouseCapture,
+        DisableFocusChange,
         DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
@@ -354,6 +357,7 @@ pub fn install_panic_hook() {
             io::stdout(),
             LeaveAlternateScreen,
             DisableMouseCapture,
+        DisableFocusChange,
             DisableBracketedPaste
         );
         original_hook(panic_info);

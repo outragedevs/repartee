@@ -234,7 +234,7 @@ pub enum WebCommand {
     /// Switch the session-local active buffer (does NOT affect terminal).
     SwitchBuffer { buffer_id: String },
     /// Mark messages as read up to a timestamp.
-    MarkRead { buffer_id: String, up_to: i64 },
+    MarkRead { buffer_id: String, up_to: i64, #[serde(default)] message_id: Option<u64> },
     /// Fetch message history with cursor-based pagination.
     FetchMessages {
         buffer_id: String,

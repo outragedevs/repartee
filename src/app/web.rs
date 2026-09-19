@@ -583,8 +583,8 @@ impl App {
                     self.force_broadcast_shell_screen(&shell_id);
                 }
             }
-            WebCommand::MarkRead { buffer_id, .. } => {
-                self.web_mark_read(&buffer_id);
+            WebCommand::MarkRead { buffer_id, message_id, .. } => {
+                self.web_mark_read(&buffer_id, message_id);
             }
             WebCommand::FetchMessages {
                 buffer_id,
@@ -820,7 +820,13 @@ impl App {
     }
 
     /// Mark a buffer as read from a web client.
-    fn web_mark_read(&mut self, buffer_id: &str) {
+    fn web_mark_read(&mut self, buffer_id: &str, message_id: Option<u64>) {
+        if self.state.buffer_uses_server_history(buffer_id) {
+            if let Some(message_id) = message_id {
+                self.mark_visible_message_read(buffer_id, message_id);
+            }
+            return;
+        }
         self.state.clear_activity(buffer_id);
         self.broadcast_web(crate::web::protocol::WebEvent::ActivityChanged {
             buffer_id: buffer_id.to_string(),
@@ -1036,13 +1042,13 @@ mod activity_read_tests {
         app.state.set_active_buffer("net/#current");
         app.state.set_activity("net/#old", ActivityLevel::Activity);
         app.state.set_activity("net/#new", ActivityLevel::Activity);
-        app.web_mark_read("net/#old");
+        app.web_mark_read("net/#old", None);
         assert_eq!(app.state.next_activity_buffer().as_deref(), Some("net/#new"));
         app.state.set_activity("net/#old", ActivityLevel::Activity);
         assert_eq!(app.state.next_activity_buffer().as_deref(), Some("net/#new"));
         app.set_active_buffer_silent("net/#new");
         assert_eq!(app.state.next_activity_buffer().as_deref(), Some("net/#old"));
-        app.web_mark_read("net/#old");
+        app.web_mark_read("net/#old", None);
         assert!(app.state.next_activity_buffer().is_none());
     }
 }

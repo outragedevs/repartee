@@ -100,6 +100,7 @@ pub async fn run_connected_shim(pid: u32, stream: UnixStream) -> Result<()> {
         stdout,
         crossterm::terminal::LeaveAlternateScreen,
         crossterm::event::DisableMouseCapture,
+        crossterm::event::DisableFocusChange,
         crossterm::event::DisableBracketedPaste,
         crossterm::cursor::Show
     );
@@ -239,6 +240,7 @@ pub async fn run_splash(sock_path: Option<&std::path::Path>) -> Result<()> {
         stdout,
         crossterm::terminal::LeaveAlternateScreen,
         crossterm::event::DisableMouseCapture,
+        crossterm::event::DisableFocusChange,
         crossterm::event::DisableBracketedPaste,
         crossterm::cursor::Show
     );

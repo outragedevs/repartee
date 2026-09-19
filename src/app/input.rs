@@ -41,6 +41,8 @@ impl App {
         let input_before = self.input.value.clone();
         let buffer_before = self.state.active_buffer_id.clone();
         match event {
+            Event::FocusGained => { self.terminal_focused = true; self.needs_full_redraw = true; }
+            Event::FocusLost => self.terminal_focused = false,
             Event::Key(key) => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Paste(text) => self.handle_paste(&text),
@@ -56,7 +58,7 @@ impl App {
                 self.refresh_emote_font_size();
                 self.resize_all_shells();
             }
-            _ => {}
+            Event::Resize(..) => {}
         }
         if self.input.value != input_before || self.state.active_buffer_id != buffer_before {
             self.on_input_changed();
@@ -2927,6 +2929,7 @@ pub mod submit_typing_tests {
             storage: None,
             pending_history_pages: Vec::new(),
             history_discovery: HashMap::new(),
+            read_markers: HashMap::new(),
             volatile_mentions: std::collections::VecDeque::new(),
             last_event_purge: Instant::now(),
             last_mention_purge: Instant::now(),
@@ -2974,6 +2977,7 @@ pub mod submit_typing_tests {
             socket_output: None,
             shim_event_rx: None,
             is_socket_attached: false,
+            terminal_focused: true,
             term_reader_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             term_rx: None,
             shim_output_handle: None,

@@ -38,6 +38,7 @@ impl AppState {
             message_counter: 0,
             activity_counter: 0,
             activity_order: std::collections::HashMap::new(),
+            read_activity: std::collections::HashMap::new(),
             flood_state: crate::irc::flood::FloodState::new(),
             netsplit_state: crate::irc::netsplit::NetsplitState::new(),
             flood_protection: true,
@@ -214,6 +215,7 @@ impl AppState {
             conn.chathistory.close_target(&buffer.name);
         }
         self.activity_order.remove(id);
+        self.read_activity.remove(id);
         self.web_history_buffers.retain(|_, buffer_id| buffer_id != id);
         self.typing.remove_buffer(id);
         // Clean up per-buffer flood tracking to prevent unbounded map growth.
@@ -1967,10 +1969,15 @@ impl AppState {
         message: Message,
         level: ActivityLevel,
     ) {
+        let read_markers = self.uses_read_markers(buffer_id);
+        let already_read = read_markers && self.message_already_read(buffer_id, &message);
+        if read_markers {
+            self.record_read_activity(buffer_id, &message, level);
+        }
         // Queue web events for broadcast.
         let wire =
             crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref());
-        if message.highlight {
+        if message.highlight && !already_read {
             self.pending_web_events
                 .push(crate::web::protocol::WebEvent::MentionAlert {
                     buffer_id: buffer_id.to_string(),
@@ -1982,7 +1989,7 @@ impl AppState {
                 buffer_id: buffer_id.to_string(),
                 message: wire,
             });
-        if self.active_buffer_id.as_deref() != Some(buffer_id) {
+        if !already_read && (read_markers || self.active_buffer_id.as_deref() != Some(buffer_id)) {
             self.record_activity(buffer_id, level);
         }
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
@@ -1991,7 +1998,7 @@ impl AppState {
             enforce_scrollback(buf, self.scrollback_limit);
             // Only escalate activity if this is not the active buffer
             let is_active = self.active_buffer_id.as_deref() == Some(buffer_id);
-            if !is_active && level > buf.activity {
+            if !read_markers && !is_active && level > buf.activity {
                 buf.activity = level;
                 buf.unread_count += 1;
                 self.pending_web_events
@@ -2001,6 +2008,9 @@ impl AppState {
                         unread_count: buf.unread_count,
                     });
             }
+        }
+        if read_markers {
+            self.refresh_read_activity(buffer_id);
         }
     }
 

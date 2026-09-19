@@ -93,7 +93,7 @@ def main():
                 })
                 run(["make", "test", "TEST_ARGS=pinned_bouncer_ -- --ignored"],
                     cwd=ROOT, env=environment)
-                print(f"{args.implementation}: binding, reconnect, discovery, generated child and 300-message server history passed")
+                print(f"{args.implementation}: binding, reconnect, discovery, generated child, 300-message server history and cross-client read markers passed")
             except Exception:
                 log.flush()
                 log.seek(0)

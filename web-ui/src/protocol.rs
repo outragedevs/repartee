@@ -196,6 +196,8 @@ pub enum WebCommand {
     MarkRead {
         buffer_id: String,
         up_to: i64,
+        #[serde(default)]
+        message_id: Option<u64>,
     },
     FetchMessages {
         buffer_id: String,
