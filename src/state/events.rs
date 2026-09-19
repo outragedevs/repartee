@@ -2116,7 +2116,15 @@ impl AppState {
     /// until a restart or log-browser reload. Each spliced row is assigned a
     /// fresh in-memory id; rows are inserted before the first existing message
     /// with a strictly greater timestamp so ordering is preserved.
+    #[cfg(test)]
     pub(crate) fn surface_history_rows(&mut self, buffer_id: &str, rows: Vec<Message>) {
+        self.surface_history_page(buffer_id, rows, false);
+    }
+
+    pub(crate) fn surface_history_page(&mut self, buffer_id: &str, mut rows: Vec<Message>, before: bool) {
+        if before {
+            rows.reverse();
+        }
         // Timestamps of rows actually spliced in — used to clear any matching
         // "[E2E: awaiting our own identity]" placeholder afterwards. The
         // placeholder is transient (no @msgid, deliberately un-dedupable so
@@ -2194,12 +2202,13 @@ impl AppState {
                 .push(crate::web::protocol::WebEvent::InsertMessage {
                     buffer_id: buffer_id.to_string(),
                     message: wire,
+                    before,
                 });
             if let Some(buf) = self.buffers.get_mut(buffer_id) {
                 let pos = buf
                     .messages
                     .iter()
-                    .position(|m| m.timestamp > msg.timestamp)
+                    .position(|m| m.timestamp > msg.timestamp || (before && m.timestamp == msg.timestamp))
                     .unwrap_or(buf.messages.len());
                 buf.messages.insert(pos, msg);
             }

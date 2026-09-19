@@ -176,6 +176,13 @@ pub struct HistoryState {
 const MAX_GAPFILL_PAGES: usize = 10_000;
 
 impl HistoryState {
+    pub fn request_started_at(&self, target: &str) -> Option<Instant> {
+        let target = target.to_ascii_lowercase();
+        self.in_flight.iter().find_map(|((name, _), (_, started))| {
+            (name == &target).then_some(*started)
+        })
+    }
+
     pub fn close_target(&mut self, target: &str) {
         self.closed_targets.insert(target.to_ascii_lowercase());
     }

@@ -69,6 +69,8 @@ pub enum WebEvent {
     InsertMessage {
         buffer_id: String,
         message: WireMessage,
+        #[serde(default)]
+        before: bool,
     },
     /// Remove already-delivered messages from a buffer, by in-memory `id`.
     /// Emitted when a transient E2E placeholder is swept after its decrypted
