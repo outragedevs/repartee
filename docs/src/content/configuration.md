@@ -403,3 +403,38 @@ The renderer uses the detected terminal graphics protocol, with Unicode half-blo
 images as the fallback. Inline graphics are preserved across unchanged frames, including clock ticks,
 single-line typing and emote animation. Changes to chat content or layout clear
 and rebuild the graphics to avoid stale pixels after scrolling or buffer changes.
+
+
+## Explicit bouncer network binding
+
+For a known Lurker or Soju network ID, set `bouncer_network_id` in that server's
+configuration. It is the positive numeric ID advertised by `BOUNCER LISTNETWORKS`,
+not the network's display name. Configure SASL authentication to the bouncer:
+
+```toml
+[servers.bouncer_libera]
+label = "Bouncer Libera"
+address = "bouncer.example.org"
+port = 6697
+tls = true
+channels = []
+sasl_user = "your-bouncer-account"
+sasl_mechanism = "PLAIN"
+bouncer_network_id = "42"
+```
+
+Store the password in `.env` as `BOUNCER_LIBERA_SASL_PASS`, as for other server
+credentials. Alternatively set the network ID with
+`/set servers.bouncer_libera.bouncer_network_id 42` and reconnect, or use
+`-bouncer-network=42` with `/server add`. Set the option to an empty string through
+`/set` to remove explicit binding.
+
+The client authenticates first, sends `BOUNCER BIND` before `CAP END`, and verifies
+that the server confirms the requested ID. Rejected or unconfirmed binding is a
+connection error. Configured autojoin channels are suppressed for explicit
+binding: the bouncer restores its joined channels. PASS-only logins can continue
+using the bouncer's username/network selector without this option; explicit ID
+binding currently requires SASL.
+
+Automatic network discovery and server-owned history are separate implementation
+stages. Explicit binding alone does not disable the existing local history policy.

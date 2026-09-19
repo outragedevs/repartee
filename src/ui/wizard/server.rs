@@ -304,6 +304,7 @@ pub fn build(w: &WizardState, servers: &HashMap<String, ServerConfig>) -> Result
         sasl_mechanism: mech_from_choice(w.choice_str("sasl_mechanism")),
         client_cert_path: opt(w.text("client_cert_path")),
         sasl_key_path: opt(w.text("sasl_key_path")),
+        bouncer_network_id: existing.and_then(|server| server.bouncer_network_id.clone()),
     };
 
     Ok(BuiltServer {
@@ -427,6 +428,7 @@ pub fn build_from_web(
         sasl_mechanism: mech_from_choice(&form.sasl_mechanism),
         client_cert_path: opt(&form.client_cert_path),
         sasl_key_path: opt(&form.sasl_key_path),
+        bouncer_network_id: existing.and_then(|server| server.bouncer_network_id.clone()),
     };
 
     Ok(BuiltServer {
@@ -488,6 +490,7 @@ mod tests {
             sasl_mechanism: None,
             client_cert_path: None,
             sasl_key_path: None,
+            bouncer_network_id: None,
         }
     }
 
@@ -688,7 +691,9 @@ mod tests {
             sasl_pass: None, // unchanged
             ..Default::default()
         };
+        servers.get_mut("libera_chat").unwrap().bouncer_network_id = Some("42".into());
         let built2 = build_from_web(&edit, &servers).unwrap();
+        assert_eq!(built2.config.bouncer_network_id.as_deref(), Some("42"));
         assert_eq!(built2.id, "libera_chat");
         assert!(matches!(built2.password, CredUpdate::Keep));
         assert_eq!(built2.config.password.as_deref(), Some("pw")); // preserved
@@ -735,6 +740,7 @@ mod tests {
             sasl_mechanism: Some("SCRAM-SHA-512".into()),
             client_cert_path: Some("/tmp/cert.pem".into()),
             sasl_key_path: Some("libera.pem".into()),
+            bouncer_network_id: Some("42".into()),
         };
         servers.insert("full".into(), s.clone());
 
@@ -742,6 +748,7 @@ mod tests {
         let built = build(&w, &servers).unwrap();
         let c = &built.config;
         assert_eq!(c.label, "Full Net");
+        assert_eq!(c.bouncer_network_id.as_deref(), Some("42"));
         assert_eq!(c.address, "irc.full.net");
         assert_eq!(c.port, 7000);
         assert!(c.tls);

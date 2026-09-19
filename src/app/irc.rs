@@ -49,7 +49,11 @@ impl App {
             reconnect_delay_secs: reconnect_delay,
             next_reconnect: None,
             should_reconnect: auto_reconnect,
-            joined_channels: server_config.channels.clone(),
+            joined_channels: if server_config.bouncer_network_id.is_some() {
+                Vec::new()
+            } else {
+                server_config.channels.clone()
+            },
             origin_config: server_config.clone(),
             local_ip: None,
             enabled_caps: HashSet::new(),
@@ -405,11 +409,14 @@ impl App {
                 }
 
                 // Config channels (used for eager buffer creation + rejoin filtering)
+                let explicit_binding = self.state.connections.get(&conn_id)
+                    .is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some());
                 let config_channels: Vec<String> = self
                     .config
                     .servers
                     .iter()
                     .find(|(id, cfg)| *id == &conn_id || cfg.label == conn_id)
+                    .filter(|_| !explicit_binding)
                     .map(|(_, cfg)| cfg.channels.clone())
                     .unwrap_or_default();
 
@@ -1131,4 +1138,22 @@ mod activity_rename_tests {
         app.state.set_active_buffer("libera/=alicia");
         assert_eq!(app.state.next_activity_buffer().as_deref(), Some("libera/#newer"));
     }
+
+    #[test]
+    fn explicit_bouncer_binding_does_not_rejoin_stale_or_configured_channels() {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let mut connection = crate::state::events::tests::make_test_connection();
+        connection.origin_config.bouncer_network_id = Some("42".into());
+        connection.origin_config.channels = vec!["#configured".into()];
+        connection.joined_channels = vec!["#stale".into()];
+        app.config.servers.insert("libera".into(), connection.origin_config.clone());
+        app.state.add_connection(connection);
+        app.state.add_buffer(Buffer::for_test("libera", BufferType::Channel, "#stale"));
+        let sender = crate::irc::IrcSender::capturing(0);
+        app.irc_handles.insert("libera".into(), crate::irc::IrcHandle::new("libera".into(), sender.clone(), None, None));
+        app.handle_irc_event(IrcEvent::Connected("libera".into(), HashSet::from([crate::irc::bouncer::NETWORKS_CAP.into()]), None));
+        assert!(!app.state.buffers.contains_key("libera/#configured"));
+        assert!(sender.captured().iter().all(|message| !matches!(message.command, ::irc::proto::Command::JOIN(..))));
+    }
+
 }

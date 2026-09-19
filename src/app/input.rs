@@ -2847,6 +2847,7 @@ pub mod submit_typing_tests {
                 sasl_mechanism: None,
                 client_cert_path: None,
                 sasl_key_path: None,
+                bouncer_network_id: None,
             },
             local_ip: None,
             enabled_caps: std::collections::HashSet::from(["message-tags".to_string()]),

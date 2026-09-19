@@ -1,4 +1,5 @@
 pub mod batch;
+pub mod bouncer;
 pub mod cap;
 pub mod chathistory;
 mod client_cert;
@@ -635,6 +636,12 @@ pub async fn connect_server(
     server_config: &crate::config::ServerConfig,
     general: &crate::config::GeneralConfig,
 ) -> Result<(IrcHandle, mpsc::Receiver<IrcEvent>)> {
+    let bouncer_network_id = server_config
+        .bouncer_network_id
+        .as_deref()
+        .map(bouncer::normalize_network_id)
+        .transpose()
+        .map_err(|error| eyre!(error))?;
     let nick = server_config.nick.as_deref().unwrap_or(&general.nick);
     let username = server_config
         .username
@@ -667,16 +674,19 @@ pub async fn connect_server(
     // Hoisted out of the `Config` literal because `CrateEcho` has to predict the
     // JOIN batch the crate will build from exactly these two values — see
     // `crate::irc::handle`. Two copies of this could drift; one cannot.
-    let autojoin_channels: Vec<String> = server_config
-        .channels
+    let channels = if bouncer_network_id.is_some() {
+        &[][..]
+    } else {
+        server_config.channels.as_slice()
+    };
+    let autojoin_channels: Vec<String> = channels
         .iter()
         .map(|e| {
             e.split_once(' ')
                 .map_or_else(|| e.clone(), |(c, _)| c.to_string())
         })
         .collect();
-    let autojoin_keys: std::collections::HashMap<String, String> = server_config
-        .channels
+    let autojoin_keys: std::collections::HashMap<String, String> = channels
         .iter()
         .filter_map(|e| {
             e.split_once(' ')
@@ -739,9 +749,32 @@ pub async fn connect_server(
         sasl_mechanism_override: server_config.sasl_mechanism.as_deref(),
         has_client_cert: server_config.client_cert_path.is_some(),
         sasl_key_path: server_config.sasl_key_path.as_deref(),
+        bouncer_network_id: bouncer_network_id.as_deref(),
     };
 
-    let neg = negotiate_caps(&sender, &mut stream, &reg_params).await?;
+    let negotiation = async {
+        let mut neg = negotiate_caps(&sender, &mut stream, &reg_params).await?;
+        if let Some(network_id) = bouncer_network_id.as_deref() {
+            bouncer::confirm_binding(&mut stream, network_id, &mut neg.early_messages).await?;
+        }
+        Ok::<_, color_eyre::Report>(neg)
+    };
+    let result = if bouncer_network_id.is_some() {
+        tokio::time::timeout(std::time::Duration::from_mins(1), negotiation)
+            .await
+            .unwrap_or_else(|_| Err(eyre!("Bouncer registration timed out")))
+    } else {
+        negotiation.await
+    };
+    let neg = match result {
+        Ok(neg) => neg,
+        Err(error) => {
+            if let Some(task) = outgoing_handle {
+                task.abort();
+            }
+            return Err(error);
+        }
+    };
 
     let (tx, rx) = mpsc::channel(4096);
     let id = conn_id.to_string();
@@ -857,6 +890,7 @@ struct RegistrationParams<'a> {
     /// key must surface as a SASL diagnostic on the connection, not as a
     /// startup failure.
     sasl_key_path: Option<&'a str>,
+    bouncer_network_id: Option<&'a str>,
 }
 
 /// The frames that open a connection, in order: `CAP LS 302`, optional `PASS`,
@@ -967,7 +1001,13 @@ async fn negotiate_caps(
         early_messages.push(msg);
     }
 
+    if params.bouncer_network_id.is_some()
+        && (!cap_supported || !server_caps.has(bouncer::NETWORKS_CAP))
+    {
+        return Err(eyre!("Server does not support bouncer network binding"));
+    }
     let mut enabled_caps: HashSet<String> = HashSet::new();
+    let mut authenticated = false;
 
     if cap_supported {
         // Determine whether we can authenticate via SASL
@@ -996,6 +1036,9 @@ async fn negotiate_caps(
 
         // Compute capabilities to request
         let mut caps_to_request = server_caps.negotiate(DESIRED_CAPS);
+        if params.bouncer_network_id.is_some() {
+            caps_to_request.push(bouncer::NETWORKS_CAP.to_string());
+        }
 
         if !want_sasl {
             caps_to_request.retain(|c| c != "sasl");
@@ -1089,6 +1132,7 @@ async fn negotiate_caps(
                 };
                 match result {
                     Ok(()) => {
+                        authenticated = true;
                         diag.push(format!("SASL: {mechanism} authentication successful"));
                     }
                     Err(e) => {
@@ -1110,6 +1154,19 @@ async fn negotiate_caps(
             diag.push("SASL: requested but server did not ACK".to_string());
         } else if !sasl_requested && have.password {
             diag.push("SASL: credentials available but server does not advertise sasl".to_string());
+        }
+
+        if let Some(network_id) = params.bouncer_network_id {
+            if !enabled_caps.contains(bouncer::NETWORKS_CAP) {
+                return Err(eyre!("Bouncer network capability was not acknowledged"));
+            }
+            if !authenticated {
+                return Err(eyre!("Bouncer network binding requires successful SASL authentication"));
+            }
+            sender.send(Command::Raw(
+                "BOUNCER".to_string(),
+                vec!["BIND".to_string(), network_id.to_string()],
+            ))?;
         }
 
         // Send CAP END to finish capability negotiation.
@@ -1344,6 +1401,7 @@ mod tests {
             sasl_mechanism_override: None,
             has_client_cert: false,
             sasl_key_path: None,
+            bouncer_network_id: None,
         }
     }
 
@@ -1966,6 +2024,7 @@ mod tests {
             sasl_mechanism: None,
             client_cert_path: None,
             sasl_key_path: None,
+            bouncer_network_id: None,
         }
     }
 
