@@ -516,37 +516,42 @@ mod tests {
 
     #[tokio::test]
     async fn same_scope_reconnect_preserves_read_threshold_before_server_reply() {
-        let mut app = sending_app();
-        let seen = server_message(&mut app, 1123);
-        app.mark_visible_message_read("account/peer", seen);
-        app.handle_read_marker(
-            "account",
-            &":bnc MARKREAD Peer timestamp=1970-01-01T00:00:01.123Z"
-                .parse()
-                .unwrap(),
-        );
-        app.handle_irc_event(crate::irc::IrcEvent::Connected(
-            "account".into(),
+        for caps in [
             std::collections::HashSet::from(["draft/read-marker".into()]),
-            None,
-        ));
-        app.state.pending_web_events.clear();
-        let mut delayed =
-            crate::state::events::tests::make_test_message(&mut app.state, "delayed mention");
-        delayed.timestamp = chrono::DateTime::from_timestamp_millis(1000).unwrap();
-        delayed.highlight = true;
-        app.state.add_transient_message_with_activity(
-            "account/peer",
-            delayed,
-            crate::state::buffer::ActivityLevel::Mention,
-        );
-        assert_eq!(app.state.buffers["account/peer"].unread_count, 0);
-        assert!(
-            !app.state
-                .pending_web_events
-                .iter()
-                .any(|event| matches!(event, crate::web::protocol::WebEvent::MentionAlert { .. }))
-        );
+            std::collections::HashSet::new(),
+        ] {
+            let mut app = sending_app();
+            let seen = server_message(&mut app, 1123);
+            app.mark_visible_message_read("account/peer", seen);
+            app.handle_read_marker(
+                "account",
+                &":bnc MARKREAD Peer timestamp=1970-01-01T00:00:01.123Z"
+                    .parse()
+                    .unwrap(),
+            );
+            app.handle_irc_event(crate::irc::IrcEvent::Connected(
+                "account".into(),
+                caps,
+                None,
+            ));
+            app.state.pending_web_events.clear();
+            let mut delayed =
+                crate::state::events::tests::make_test_message(&mut app.state, "delayed mention");
+            delayed.timestamp = chrono::DateTime::from_timestamp_millis(1000).unwrap();
+            delayed.highlight = true;
+            app.state.add_transient_message_with_activity(
+                "account/peer",
+                delayed,
+                crate::state::buffer::ActivityLevel::Mention,
+            );
+            assert_eq!(app.state.buffers["account/peer"].unread_count, 0);
+            assert!(
+                !app.state.pending_web_events.iter().any(|event| matches!(
+                    event,
+                    crate::web::protocol::WebEvent::MentionAlert { .. }
+                ))
+            );
+        }
     }
 
     #[tokio::test]
