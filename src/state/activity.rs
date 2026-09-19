@@ -22,6 +22,9 @@ impl AppState {
         if old_id == new_id {
             return;
         }
+        if let Some(state) = self.read_activity.remove(old_id) {
+            self.read_activity.insert(new_id.to_string(), state);
+        }
         if let Some(order) = self.activity_order.remove(old_id) {
             self.activity_order.insert(new_id.to_string(), order);
         } else if self
@@ -34,7 +37,11 @@ impl AppState {
     }
 
     pub fn clear_activity(&mut self, buffer_id: &str) {
+        if self.uses_read_markers(buffer_id) { return; }
         self.activity_order.remove(buffer_id);
+        if let Some(state) = self.read_activity.get_mut(buffer_id) {
+            state.unread.clear();
+        }
         if let Some(buffer) = self.buffers.get_mut(buffer_id) {
             buffer.activity = ActivityLevel::None;
             buffer.unread_count = 0;

@@ -620,7 +620,11 @@ pub fn handle_cap_new(
     let to_request: Vec<String> = new_caps
         .iter()
         .filter(|cap| {
-            DESIRED_CAPS.iter().any(|d| d.eq_ignore_ascii_case(cap))
+            (DESIRED_CAPS.iter().any(|d| d.eq_ignore_ascii_case(cap))
+                || (state.connections.get(conn_id).is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some() && !conn.origin_config.bouncer_control)
+                    && (cap.as_str() == "draft/read-marker" || (cap.as_str() == "soju.im/read"
+                        && !new_caps.iter().any(|cap| cap == "draft/read-marker")
+                        && enabled.is_none_or(|set| !set.contains("draft/read-marker"))))))
                 && enabled.is_none_or(|set| !set.contains(cap.as_str()))
         })
         .cloned()

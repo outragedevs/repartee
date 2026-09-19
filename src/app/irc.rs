@@ -363,6 +363,8 @@ impl App {
                 }
             }
             IrcEvent::Connected(conn_id, enabled_caps, multiline_limits) => {
+                self.reconnect_read_markers(&conn_id);
+                self.state.reset_connection_read_markers(&conn_id);
                 self.history_discovery.remove(&conn_id);
                 self.bouncer_networks.remove(&conn_id);
                 // Store negotiated caps on connection
@@ -537,6 +539,7 @@ impl App {
                 // limits/ref types and could be rejected for non-membership.
             }
             IrcEvent::Disconnected(conn_id, error) => {
+
                 self.history_discovery.remove(&conn_id);
                 self.suspend_bouncer_children(&conn_id);
                 if let Some(requested) = self.state.background_join_connections.get_mut(&conn_id) { requested.clear(); }
@@ -761,6 +764,9 @@ impl App {
                         tracker.add_message(*msg);
                     }
                 } else {
+                    if self.handle_read_marker(&conn_id, &msg) {
+                        return;
+                    }
                     // Normal message processing
 
                     // Extract channel from RPL_ENDOFNAMES (for auto-WHO/MODE batch).

@@ -294,10 +294,21 @@ impl AppState {
         crate::ws::send_command(&WebCommand::SwitchBuffer {
             buffer_id: buffer_id.to_string(),
         });
-        crate::ws::send_command(&WebCommand::MarkRead {
-            buffer_id: buffer_id.to_string(),
-            up_to: chrono::Utc::now().timestamp(),
-        });
+    }
+
+    pub fn mark_rendered_tail_read(&self) {
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else { return };
+        if document.hidden() || !document.has_focus().unwrap_or(false)
+            || !self.scroll_mode.get_untracked().is_following_tail()
+            || self.wizard_open.get_untracked() || self.emote_picker_open.get_untracked()
+            || self.emoji_picker_open.get_untracked() { return; }
+        let Some(buffer_id) = self.active_buffer.get_untracked() else { return };
+        let tail = self.messages.with_untracked(|messages| messages.get(&buffer_id)
+            .and_then(|messages| messages.iter().rev().find(|message| message.id != 0))
+            .map(|message| (message.id, message.timestamp)));
+        if let Some((message_id, up_to)) = tail {
+            crate::ws::send_command(&WebCommand::MarkRead { buffer_id, up_to, message_id: Some(message_id) });
+        }
     }
 
     /// Collapse a buffer's loaded backlog window after the user returns to the

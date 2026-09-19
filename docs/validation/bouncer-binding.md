@@ -90,3 +90,21 @@ always orders TARGETS descending and groups messages inside the requested window
 Soju selects the direction and tests the latest message per target. Both filter
 closed/detached targets after their store query. These cases remain explicit
 acceptance gaps for the full bouncer-support contract.
+
+## Read-marker validation
+
+The generated-child fixture also negotiates `draft/read-marker`, advances the
+query marker to the exact server timestamp of history row 149, and verifies the
+server acknowledgment. A second independently authenticated client on the same
+network must receive that update. A fresh query must return the stored marker.
+Both checks use disposable users and messages; the normal no-local-log assertions
+remain enabled.
+
+Native regressions cover focus loss/return, headless rendering, delayed messages,
+partial reads, precise millisecond timestamps, legacy `READ`, retransmission,
+and network-scope isolation. Browser read requests carry a displayed message ID;
+the server derives the IRC timestamp from the retained message's `time` tag.
+Focus, modal visibility and following the conversation tail gate browser requests.
+
+This stage is still under review. These tests do not establish completion of
+aggregate presence or the full bouncer feature matrix.
