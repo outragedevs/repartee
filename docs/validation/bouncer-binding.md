@@ -28,7 +28,8 @@ The wrapper verifies each upstream commit against the audited revision. Lurker
 uses its own bouncer test harness: the listener, authentication, binding and
 registration are real; its upstream IRC connection is simulated. Soju uses a
 real daemon with a disabled upstream network. These tests prove downstream
-binding, reconnect and initial discovery, not complete bouncer compatibility or
+binding, reconnect, initial discovery and automatically generated child connections
+through the App event loop, not complete bouncer compatibility or
 live upstream IRC.
 
 The normal TCP regression suite additionally exercises CAP rejection, failed
@@ -42,8 +43,13 @@ Scripted tests cover control registration without BIND or autojoin, rejection of
 a login that selects a network, atomic list replacement, partial updates, both
 attribute-removal encodings, deletion, malformed batches and abandoned batches.
 
-Automatic child-connection lifecycle, PASS-specific explicit binding,
-server-owned history and the remaining feature matrix are separate pending work.
+App regressions cover child creation from committed snapshots, identity isolation,
+rename without reconnect, deletion with stale events, parent suspension/reconnect,
+manual disconnect and reopening closed children. Native/web focus remains stable
+for background discovery, replayed joins and newly arriving DMs; explicit joins
+still activate their target. Web rename/resync tests preserve valid buffer IDs.
+PASS-specific explicit binding, server-owned history and the remaining feature
+matrix are separate pending work.
 
 Cancellation regression tests drop registration during CAP negotiation and
 network confirmation and verify peer EOF. A separate synthetic 16 MiB PASS write

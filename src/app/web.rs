@@ -217,7 +217,7 @@ impl App {
         let mut structural_change = false;
         for event in events {
             match &event {
-                crate::web::protocol::WebEvent::BufferCreated { buffer } => {
+                crate::web::protocol::WebEvent::BufferCreated { buffer, .. } => {
                     tracing::debug!(buffer_id = %buffer.id, "broadcasting BufferCreated");
                     structural_change = true;
                 }
@@ -271,7 +271,9 @@ impl App {
                         }
                     }
                 }
-                crate::web::protocol::WebEvent::ConnectionStatus { .. }
+                crate::web::protocol::WebEvent::ConnectionRemoved { .. }
+                | crate::web::protocol::WebEvent::BufferRenamed { .. }
+                | crate::web::protocol::WebEvent::ConnectionStatus { .. }
                 | crate::web::protocol::WebEvent::SettingsChanged { .. }
                 | crate::web::protocol::WebEvent::BufferE2eChanged { .. }
                 // Structural so the shared snapshot — the source of a

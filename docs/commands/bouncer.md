@@ -1,13 +1,13 @@
 ---
 category: Connection
-description: List and refresh the networks on a bouncer control connection
+description: Discover and connect to networks belonging to a bouncer account
 ---
 
 # /bouncer
 
 ## Syntax
 
-    /bouncer [list|refresh]
+    /bouncer [list|refresh|connect ID]
 
 ## Description
 
@@ -23,13 +23,23 @@ The server must support `soju.im/bouncer-networks` and `batch`.
 
 Soju and Lurker notify-capable connections receive subsequent network changes
 automatically. Otherwise, use `refresh` to request an updated list.
-This command currently lists networks; it does not automatically open their
-connections. Use a separate server entry with `bouncer_network_id` to bind one.
+Each discovered network opens a separate connection automatically, including
+networks whose upstream IRC connection is offline. Background discovery preserves
+the active conversation and draft. Labels include the account entry and network ID
+to distinguish equal names and avoid collisions with channel or query buffers.
+Their names and removal follow
+bouncer notifications. Disconnecting the control connection suspends its children;
+a new valid list after reconnect resumes them. Closing the disconnected control
+window removes its generated connections and buffers. Removing a network closes its
+buffers without deleting stored logs. A manually disconnected child remains off;
+use `/bouncer connect ID` on the control connection or one of its children to
+resume it. The account must support SASL authentication for explicit network binding.
 
 ## Examples
 
     /bouncer
     /bouncer refresh
+    /bouncer connect 42
 
 ## See Also
 

@@ -14,6 +14,7 @@ mod image;
 pub mod input;
 mod irc;
 pub mod bouncer;
+mod bouncer_children;
 mod connection_attempt;
 mod log_browser;
 mod maintenance;
@@ -382,6 +383,7 @@ pub struct App {
     pub chat_scroll_at_top: bool,
     pub ui_regions: Option<UiRegions>,
     pub irc_handles: HashMap<String, IrcHandle>,
+    pub(crate) bouncer_children: HashMap<String, bouncer_children::ChildNetwork>,
     pub(crate) bouncer_networks: HashMap<String, crate::irc::bouncer::NetworkRegistry>,
     pub(crate) connection_attempts: HashMap<String, u64>,
     pub(crate) forwarder_handles: HashMap<String, tokio::task::JoinHandle<()>>,
@@ -842,6 +844,7 @@ impl App {
             chat_scroll_at_top: false,
             ui_regions: None,
             irc_handles: HashMap::new(),
+            bouncer_children: HashMap::new(),
             bouncer_networks: HashMap::new(),
             connection_attempts: HashMap::new(),
             forwarder_handles: HashMap::new(),

@@ -51,6 +51,7 @@ impl AppState {
             log_exclude_types: Vec::new(),
             scrollback_limit: 2000,
             pending_web_events: Vec::new(),
+            background_join_connections: std::collections::HashMap::new(),
             pending_e2e_sends: Vec::new(),
             pending_e2e_gapfills: Vec::new(),
             pending_userhost_requests: Vec::new(),
@@ -92,6 +93,11 @@ impl AppState {
     // === Buffer management ===
 
     pub fn add_buffer(&mut self, buffer: Buffer) {
+        let activate = !self.background_join_connections.contains_key(&buffer.connection_id);
+        self.add_buffer_with_focus(buffer, activate);
+    }
+
+    pub(crate) fn add_buffer_with_focus(&mut self, buffer: Buffer, activate: bool) {
         let mut meta = crate::web::protocol::BufferMeta {
             id: buffer.id.clone(),
             connection_id: buffer.connection_id.clone(),
@@ -114,7 +120,7 @@ impl AppState {
             crate::state::buffer::BufferType::Channel | crate::state::buffer::BufferType::Query
         ) && self.e2e_enabled_for_target(&meta.connection_id, &meta.name);
         self.pending_web_events
-            .push(crate::web::protocol::WebEvent::BufferCreated { buffer: meta });
+            .push(crate::web::protocol::WebEvent::BufferCreated { buffer: meta, activate });
     }
 
     pub(crate) fn push_buffer_e2e_status(&mut self, buffer_id: &str) {
