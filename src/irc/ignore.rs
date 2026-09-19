@@ -91,10 +91,11 @@ pub fn should_ignore(
 
     for entry in ignores {
         // Level check: entry must include ALL or the specific level
-        if !entry
-            .levels
-            .iter()
-            .any(|l| matches!(l, IgnoreLevel::All) || l == level)
+        if !entry.levels.is_empty()
+            && !entry
+                .levels
+                .iter()
+                .any(|l| matches!(l, IgnoreLevel::All) || l == level)
         {
             continue;
         }
