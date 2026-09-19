@@ -131,10 +131,26 @@ impl App {
         self.nick_list_scroll = 0;
     }
 
+    fn switch_to_activity_buffer(&mut self) {
+        if let Some(id) = self.state.next_activity_buffer() {
+            self.state.set_active_buffer(&id);
+            self.scroll_offset = 0;
+            self.reset_sidepanel_scrolls();
+            self.update_shell_input_state();
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn handle_key(&mut self, key: event::KeyEvent) {
         // Shell input mode: forward most keys to the active shell PTY.
         if self.shell_input_active {
+            if matches!(key.code, KeyCode::Char('a' | 'A'))
+                && key.modifiers.contains(KeyModifiers::ALT)
+                && (key.modifiers - KeyModifiers::ALT - KeyModifiers::SHIFT).is_empty()
+            {
+                self.switch_to_activity_buffer();
+                return;
+            }
             // Ctrl+] exits shell input mode (telnet convention).
             if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char(']') {
                 self.shell_input_active = false;
@@ -197,6 +213,10 @@ impl App {
         // ESC+Left/Right → prev/next buffer (like Alt+Left/Right)
         if esc_active {
             match key.code {
+                KeyCode::Char('a' | 'A') if (key.modifiers - KeyModifiers::SHIFT).is_empty() => {
+                    self.switch_to_activity_buffer();
+                    return;
+                }
                 KeyCode::Char(c) if c.is_ascii_digit() && key.modifiers.is_empty() => {
                     let n = c.to_digit(10).unwrap_or(0) as usize;
                     self.switch_to_buffer_num(n);
@@ -221,6 +241,10 @@ impl App {
         }
 
         match (key.modifiers, key.code) {
+            (mods, KeyCode::Char('a' | 'A')) if mods.contains(KeyModifiers::ALT)
+                && (mods - KeyModifiers::ALT - KeyModifiers::SHIFT).is_empty() => {
+                self.switch_to_activity_buffer();
+            }
             // ESC — dismiss spell suggestions, image preview, or record for ESC+key combo
             (_, KeyCode::Esc) => {
                 if self.input.spell_state.is_some() {
@@ -2984,5 +3008,54 @@ pub mod submit_typing_tests {
             cli_bind_override: None,
             typing: crate::app::typing::TypingSender::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod activity_shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn alt_a_and_escape_a_follow_activity_without_changing_the_draft() {
+        let mut app = super::submit_typing_tests::test_app();
+        for name in ["#current", "#old", "#new"] {
+            app.state.add_buffer(Buffer::for_test("net", BufferType::Channel, name));
+        }
+        app.state.set_active_buffer("net/#current");
+        app.state.set_activity("net/#old", ActivityLevel::Activity);
+        app.state.set_activity("net/#new", ActivityLevel::Activity);
+        app.input.value = "draft".into();
+        app.input.cursor_pos = 5;
+        app.handle_event(Event::Key(event::KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT | KeyModifiers::CONTROL)));
+        assert_eq!(app.state.active_buffer_id.as_deref(), Some("net/#current"));
+        app.scroll_offset = 50;
+        app.buffer_list_scroll = 3;
+        app.nick_list_scroll = 4;
+        app.handle_event(Event::Key(event::KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT)));
+        assert_eq!(app.state.active_buffer_id.as_deref(), Some("net/#old"));
+        assert_eq!((app.scroll_offset, app.buffer_list_scroll, app.nick_list_scroll), (0, 0, 0));
+        app.handle_event(Event::Key(event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        app.handle_event(Event::Key(event::KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
+        assert_eq!(app.state.active_buffer_id.as_deref(), Some("net/#new"));
+        app.handle_event(Event::Key(event::KeyEvent::new(KeyCode::Char('A'), KeyModifiers::ALT | KeyModifiers::SHIFT)));
+        assert_eq!(app.state.active_buffer_id.as_deref(), Some("net/#new"));
+        assert_eq!(app.input.value, "draft");
+        assert_eq!(app.input.cursor_pos, 5);
+    }
+
+    #[test]
+    fn alt_a_leaves_shell_input_only_when_activity_exists() {
+        let mut app = super::submit_typing_tests::test_app();
+        app.state.add_buffer(Buffer::for_test("net", BufferType::Shell, "shell"));
+        app.state.add_buffer(Buffer::for_test("net", BufferType::Channel, "#chat"));
+        app.state.set_active_buffer("net/shell");
+        app.update_shell_input_state();
+        app.handle_event(Event::Key(event::KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT)));
+        assert!(app.shell_input_active);
+        assert_eq!(app.state.active_buffer_id.as_deref(), Some("net/shell"));
+        app.state.set_activity("net/#chat", ActivityLevel::Activity);
+        app.handle_event(Event::Key(event::KeyEvent::new(KeyCode::Char('A'), KeyModifiers::ALT | KeyModifiers::SHIFT)));
+        assert!(!app.shell_input_active);
+        assert_eq!(app.state.active_buffer_id.as_deref(), Some("net/#chat"));
     }
 }
