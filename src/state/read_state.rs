@@ -56,14 +56,36 @@ impl AppState {
             .insert(message.id, (message.timestamp.timestamp_millis(), level));
     }
 
+    pub(crate) fn activate_connection_read_markers(&mut self, conn_id: &str) {
+        let buffers: Vec<_> = self
+            .buffers
+            .values()
+            .filter(|buffer| buffer.connection_id == conn_id && self.uses_read_markers(&buffer.id))
+            .map(|buffer| buffer.id.clone())
+            .collect();
+        for id in buffers {
+            self.refresh_read_activity(&id);
+        }
+    }
+
+    pub(super) fn prune_read_activity(&mut self, buffer_id: &str) {
+        let Some(buffer) = self.buffers.get(buffer_id) else {
+            return;
+        };
+        let Some(state) = self.read_activity.get_mut(buffer_id) else {
+            return;
+        };
+        let ids: std::collections::HashSet<_> =
+            buffer.messages.iter().map(|message| message.id).collect();
+        state.unread.retain(|id, _| ids.contains(id));
+    }
+
     pub(super) fn refresh_read_activity(&mut self, buffer_id: &str) {
+        self.prune_read_activity(buffer_id);
         let Some(buffer) = self.buffers.get_mut(buffer_id) else {
             return;
         };
         let state = self.read_activity.entry(buffer_id.to_string()).or_default();
-        let ids: std::collections::HashSet<_> =
-            buffer.messages.iter().map(|message| message.id).collect();
-        state.unread.retain(|id, _| ids.contains(id));
         buffer.unread_count = u32::try_from(state.unread.len()).unwrap_or(u32::MAX);
         buffer.activity = state
             .unread
@@ -123,6 +145,52 @@ mod tests {
         message.timestamp = chrono::DateTime::from_timestamp_millis(time).unwrap();
         message.highlight = level == ActivityLevel::Mention;
         state.add_transient_message_with_activity("account/peer", message, level);
+    }
+
+    #[tokio::test]
+    async fn runtime_marker_activation_preserves_preexisting_unread_activity() {
+        let mut state = state();
+        state
+            .connections
+            .get_mut("account")
+            .unwrap()
+            .enabled_caps
+            .clear();
+        deliver(&mut state, 1000, ActivityLevel::Mention);
+        deliver(&mut state, 2000, ActivityLevel::Activity);
+        deliver(&mut state, 3000, ActivityLevel::Activity);
+        crate::irc::events::handle_cap_ack(&mut state, "account", Some("draft/read-marker"), None);
+        assert_eq!(state.buffers["account/peer"].unread_count, 3);
+        assert_eq!(
+            state.buffers["account/peer"].activity,
+            ActivityLevel::Mention
+        );
+        state.apply_server_read_marker("account/peer", 1000);
+        assert_eq!(state.buffers["account/peer"].unread_count, 2);
+        assert_eq!(
+            state.buffers["account/peer"].activity,
+            ActivityLevel::Activity
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_marker_activation_does_not_restore_locally_cleared_messages() {
+        let mut state = state();
+        state
+            .connections
+            .get_mut("account")
+            .unwrap()
+            .enabled_caps
+            .clear();
+        deliver(&mut state, 1000, ActivityLevel::Mention);
+        state.clear_activity("account/peer");
+        deliver(&mut state, 2000, ActivityLevel::Activity);
+        crate::irc::events::handle_cap_ack(&mut state, "account", Some("draft/read-marker"), None);
+        assert_eq!(state.buffers["account/peer"].unread_count, 1);
+        assert_eq!(
+            state.buffers["account/peer"].activity,
+            ActivityLevel::Activity
+        );
     }
 
     #[tokio::test]

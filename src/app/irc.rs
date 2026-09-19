@@ -364,7 +364,6 @@ impl App {
             }
             IrcEvent::Connected(conn_id, enabled_caps, multiline_limits) => {
                 self.reconnect_read_markers(&conn_id);
-                self.state.reset_connection_read_markers(&conn_id);
                 self.history_discovery.remove(&conn_id);
                 self.bouncer_networks.remove(&conn_id);
                 // Store negotiated caps on connection
