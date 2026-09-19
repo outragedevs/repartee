@@ -169,6 +169,12 @@ pub(crate) fn cmd_disconnect(app: &mut App, args: &[String]) {
         return;
     };
 
+    if let Some(child) = app.bouncer_children.get_mut(&conn_id) {
+        child.manually_disconnected = true;
+    }
+    app.suspend_bouncer_children(&conn_id);
+    app.bouncer_networks.remove(&conn_id);
+
     // Disable auto-reconnect when user explicitly disconnects
     if let Some(conn) = app.state.connections.get_mut(&conn_id) {
         conn.should_reconnect = false;
@@ -237,6 +243,8 @@ pub(crate) fn cmd_join(app: &mut App, args: &[String]) {
 
         if let Err(e) = result {
             add_local_event(app, &format!("Failed to join {channel}: {e}"));
+        } else {
+            app.request_bouncer_join_focus(&channel);
         }
         i += 1;
     }
@@ -940,6 +948,8 @@ pub(crate) fn cmd_cycle(app: &mut App, args: &[String]) {
     );
     if let Err(e) = join_result {
         add_local_event(app, &format!("Failed to rejoin {channel}: {e}"));
+    } else {
+        app.request_bouncer_join_focus(&channel);
     }
 }
 

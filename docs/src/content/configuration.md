@@ -449,9 +449,12 @@ errors, or `/bouncer refresh` to request a fresh list.
 configure this mode. Reconnect after changing the setting. Both terminal and web
 command input support `/bouncer`.
 
-Automatic connections to discovered networks and server-owned history are
-separate implementation stages. Neither explicit binding nor control mode alone
-disables the existing local history policy.
+Control connections automatically open their discovered networks using separate,
+SASL-authenticated bound connections. Names and removals follow bouncer updates;
+manual child disconnects remain off until `/bouncer connect ID`. Disconnecting the
+control connection suspends all children until a new valid network list arrives.
+Server-owned history is a separate implementation stage. Neither explicit binding
+nor control mode alone disables the existing local history policy.
 
 ## Bouncer network identity
 

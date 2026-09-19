@@ -87,6 +87,7 @@ async fn handle_socket(
                         if is_targeted_to_other(&web_event, &session_id) {
                             continue;
                         }
+                        track_buffer_rename(&mut active_buffer_id, &web_event);
                         if send_json(&mut ws_tx, &web_event).await.is_err() {
                             break;
                         }
@@ -158,6 +159,23 @@ async fn handle_socket(
     tracing::info!(session_id = %session_id, "web client disconnected");
 }
 
+fn track_buffer_rename(active: &mut Option<String>, event: &WebEvent) {
+    match event {
+        WebEvent::BufferRenamed { old_id, new_id, .. } if active.as_ref() == Some(old_id) => {
+            *active = Some(new_id.clone());
+        }
+        WebEvent::BufferClosed { buffer_id } if active.as_ref() == Some(buffer_id) => {
+            *active = None;
+        }
+        _ => {}
+    }
+}
+
+fn valid_buffer_selection(preferred: Option<String>, fallback: Option<String>, buffers: &[crate::web::protocol::BufferMeta]) -> Option<String> {
+    preferred.into_iter().chain(fallback).find(|id| buffers.iter().any(|buffer| &buffer.id == id))
+        .or_else(|| buffers.first().map(|buffer| buffer.id.clone()))
+}
+
 /// Build a `SyncInit` from the shared state snapshot.
 fn build_sync_init_from_snapshot(state: &AppHandle, active_buffer_id: Option<String>) -> WebEvent {
     if let Some(ref snapshot) = state.web_state_snapshot {
@@ -166,7 +184,7 @@ fn build_sync_init_from_snapshot(state: &AppHandle, active_buffer_id: Option<Str
             buffers: snap.buffers.clone(),
             connections: snap.connections.clone(),
             mention_count: snap.mention_count,
-            active_buffer_id,
+            active_buffer_id: valid_buffer_selection(active_buffer_id, snap.active_buffer_id.clone(), &snap.buffers),
             timestamp_format: snap.timestamp_format.clone(),
             emotes_enabled: snap.emotes_enabled,
             typing: snap.typing.clone(),
@@ -241,6 +259,19 @@ async fn send_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renamed_or_missed_buffers_never_resync_to_a_removed_id() {
+        let mut selected = Some("child/Old".into());
+        track_buffer_rename(&mut selected, &WebEvent::BufferRenamed {
+            old_id: "child/Old".into(), new_id: "child/New".into(), name: "New".into(),
+        });
+        assert_eq!(selected.as_deref(), Some("child/New"));
+        let buffers: Vec<crate::web::protocol::BufferMeta> = serde_json::from_str(r#"[{"id":"child/New","connection_id":"child","name":"New","buffer_type":"server","topic":null,"unread_count":0,"activity":0,"nick_count":0,"modes":null}]"#).unwrap();
+        assert_eq!(valid_buffer_selection(selected, None, &buffers).as_deref(), Some("child/New"));
+        assert_eq!(valid_buffer_selection(Some("child/Old".into()), Some("also-removed".into()), &buffers).as_deref(), Some("child/New"));
+        assert!(valid_buffer_selection(Some("child/Old".into()), None, &[]).is_none());
+    }
 
     #[test]
     fn shell_screen_is_filtered_for_other_sessions() {

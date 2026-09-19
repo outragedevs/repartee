@@ -2911,6 +2911,7 @@ pub mod submit_typing_tests {
             chat_scroll_at_top: false,
             ui_regions: None,
             irc_handles: HashMap::new(),
+            bouncer_children: HashMap::new(),
             bouncer_networks: HashMap::new(),
             connection_attempts: HashMap::new(),
             forwarder_handles: HashMap::new(),
