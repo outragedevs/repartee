@@ -14,6 +14,8 @@ static SUPPORTED_DETECTOR: LazyLock<whatlang::Detector> = LazyLock::new(|| {
         whatlang::Lang::Eng,
         whatlang::Lang::Fra,
         whatlang::Lang::Spa,
+        whatlang::Lang::Ita,
+        whatlang::Lang::Fin,
         whatlang::Lang::Cmn,
     ])
 });
@@ -117,6 +119,8 @@ impl SupportedLanguage {
                 | whatlang::Lang::Eng
                 | whatlang::Lang::Fra
                 | whatlang::Lang::Spa
+                | whatlang::Lang::Ita
+                | whatlang::Lang::Fin
                 | whatlang::Lang::Cmn
         ) {
             return None;
@@ -300,10 +304,12 @@ mod tests {
     #[test]
     fn resolves_iso_codes_and_regional_tags_supported_by_the_detector() {
         assert_eq!(
-            ["es", "spa", "fr-FR", "fra", "zh-CN", "zho"]
-                .map(SupportedLanguage::from_code)
-                .map(|language| language.is_some()),
-            [true; 6]
+            [
+                "es", "spa", "fr-FR", "fra", "it", "ita", "fi-FI", "fin", "zh-CN", "zho"
+            ]
+            .map(SupportedLanguage::from_code)
+            .map(|language| language.is_some()),
+            [true; 10]
         );
     }
 

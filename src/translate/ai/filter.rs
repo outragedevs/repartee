@@ -223,6 +223,14 @@ mod tests {
                 "spa",
                 "Mañana iremos juntos al mercado porque quiero comprar verduras y también hablar con nuestros amigos",
             ),
+            (
+                "it",
+                "Domani andremo insieme al mercato perché voglio comprare verdura",
+            ),
+            (
+                "fi-FI",
+                "Huomenna menemme yhdessä markkinoille koska haluan ostaa vihanneksia",
+            ),
             ("zh_CN", "我认为这个决定对我们的共同未来非常重要"),
         ] {
             let mut req = request(Direction::Outgoing, text);
