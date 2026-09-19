@@ -47,9 +47,10 @@ impl ReadMarkers {
 
     fn receive(&mut self, target: &str, marker: Option<i64>) -> bool {
         let target = target.to_ascii_lowercase();
-        if let Some(position) = self.pending.iter().position(|(name, _)| name == &target) {
-            self.pending.remove(position);
-        }
+        self.pending.retain(|(name, requested)| {
+            name != &target
+                || requested.is_some_and(|requested| marker.is_none_or(|time| requested > time))
+        });
         self.rejected.remove(&target);
         self.rejected_queries.remove(&target);
         self.failures.remove(&target);
@@ -480,6 +481,113 @@ mod tests {
             crate::state::buffer::ActivityLevel::Activity,
         );
         id
+    }
+
+    #[tokio::test]
+    async fn one_confirmation_retires_all_satisfied_retransmissions() {
+        let mut app = sending_app();
+        let seen = server_message(&mut app, 1123);
+        app.mark_visible_message_read("account/peer", seen);
+        app.read_markers
+            .get_mut("account")
+            .unwrap()
+            .sent
+            .get_mut("peer")
+            .unwrap()
+            .1 = Instant::now().checked_sub(Duration::from_secs(6)).unwrap();
+        app.tick_read_markers();
+        assert_eq!(app.read_markers["account"].pending.len(), 2);
+        app.handle_read_marker(
+            "account",
+            &":bnc MARKREAD Peer timestamp=1970-01-01T00:00:01.123Z"
+                .parse()
+                .unwrap(),
+        );
+        assert!(app.read_markers["account"].pending.is_empty());
+        let next = server_message(&mut app, 2456);
+        app.mark_visible_message_read("account/peer", next);
+        assert_eq!(app.irc_handles["account"].sender().captured().len(), 3);
+        app.handle_read_marker(
+            "account",
+            &":bnc MARKREAD Peer timestamp=1970-01-01T00:00:01.123Z"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(app.read_markers["account"].pending.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn network_scope_change_discards_previous_unread_rows() {
+        let mut app = sending_app();
+        server_message(&mut app, 1000);
+        server_message(&mut app, 2000);
+        app.handle_read_marker(
+            "account",
+            &":bnc MARKREAD Peer timestamp=1970-01-01T00:00:01.000Z"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 1);
+        app.state
+            .connections
+            .get_mut("account")
+            .unwrap()
+            .network_scope = Some("different-network".into());
+        app.reconnect_read_markers("account");
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 0);
+        assert_eq!(
+            app.state.buffers["account/peer"].activity,
+            crate::state::buffer::ActivityLevel::None
+        );
+        app.handle_read_marker(
+            "account",
+            &":bnc MARKREAD Peer timestamp=1970-01-01T00:00:00.500Z"
+                .parse()
+                .unwrap(),
+        );
+        server_message(&mut app, 750);
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 1);
+    }
+
+    #[tokio::test]
+    async fn returning_to_a_previous_nick_restores_its_own_read_threshold() {
+        let mut app = sending_app();
+        app.handle_read_marker(
+            "account",
+            &":bnc MARKREAD Peer timestamp=1970-01-01T00:00:02.000Z"
+                .parse()
+                .unwrap(),
+        );
+        crate::irc::events::rename_query_buffers_for_test(
+            &mut app.state,
+            "account",
+            "Peer",
+            "Renamed",
+            &["account/peer".into()],
+        );
+        app.handle_read_marker(
+            "account",
+            &":bnc MARKREAD Renamed timestamp=1970-01-01T00:00:00.500Z"
+                .parse()
+                .unwrap(),
+        );
+        crate::irc::events::rename_query_buffers_for_test(
+            &mut app.state,
+            "account",
+            "Renamed",
+            "Peer",
+            &["account/renamed".into()],
+        );
+        app.drain_pending_buffer_rekeys();
+        app.tick_read_markers();
+        server_message(&mut app, 1500);
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 0);
+        assert_eq!(
+            app.state.buffers["account/peer"]
+                .last_read
+                .timestamp_millis(),
+            2000
+        );
     }
 
     #[tokio::test]
