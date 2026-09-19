@@ -162,3 +162,11 @@ large to review, retaining the acceptance rows and dependencies.
   tests cover capability negotiation and network confirmation. This is a
   prerequisite for deleting a discovered network while it is still connecting,
   not yet the automatic child lifecycle itself.
+
+- Bouncer network identity is separate from display names. Bound/control scopes
+  isolate configured account entries, endpoints, login selectors and numeric
+  network IDs. Storage reads/writes, native/web backlog, search and E2E paths
+  use the scope. Renaming a display label preserves it; legacy E2E rows are not
+  automatically borrowed by bouncer scopes. Regression tests cover equal names,
+  equal network IDs on two accounts, rename, password rotation and legacy-key
+  isolation. Automatic child lifecycle and server-owned history remain pending.

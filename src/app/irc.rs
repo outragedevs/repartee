@@ -32,6 +32,8 @@ impl App {
         self.state.add_connection(Connection {
             id: conn_id.to_string(),
             label: server_config.label.clone(),
+            network_scope: (server_config.bouncer_network_id.is_some() || server_config.bouncer_control)
+                .then(|| config::network_scope::network_scope(conn_id, server_config, &self.config.general.username)),
             status: ConnectionStatus::Connecting,
             own_handle: None,
             nick: server_config
@@ -54,7 +56,13 @@ impl App {
             } else {
                 server_config.channels.clone()
             },
-            origin_config: server_config.clone(),
+            origin_config: {
+                let mut origin = server_config.clone();
+                if (origin.bouncer_control || origin.bouncer_network_id.is_some()) && origin.username.is_none() {
+                    origin.username = Some(self.config.general.username.clone());
+                }
+                origin
+            },
             local_ip: None,
             enabled_caps: HashSet::new(),
             chathistory: crate::irc::chathistory::HistoryState::new(),
@@ -147,8 +155,8 @@ impl App {
         let labels: HashSet<String> = self
             .config
             .servers
-            .values()
-            .map(|s| s.label.clone())
+            .iter()
+            .map(|(id, server)| config::network_scope::network_scope(id, server, &self.config.general.username))
             .chain(
                 self.state
                     .connections
@@ -158,7 +166,7 @@ impl App {
                             && c.id != Self::SHELL_CONN_ID
                             && !c.id.starts_with(Self::LOG_CONN_PREFIX)
                     })
-                    .map(|c| c.label.clone()),
+                    .map(|c| c.network_key().to_string()),
             )
             .collect();
         mgr.keyring().set_configured_networks(labels);

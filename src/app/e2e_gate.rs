@@ -27,12 +27,14 @@ pub enum E2eRefusal {
     /// Encryption itself failed on an already-enabled context — refuse rather
     /// than fall back to cleartext.
     EncryptFailed,
+    BouncerScopeChanged,
 }
 
 impl E2eRefusal {
     /// The themed `[E2E]` line shown to the user when a send is refused.
     pub fn user_message(&self) -> String {
         let body = match self {
+            Self::BouncerScopeChanged => "bouncer identity changed — message NOT sent; verify this network and use /e2e on or /e2e off",
             Self::NoPeerHandle => {
                 "cannot encrypt PM without peer handle — wait for a message from them first"
             }
@@ -122,6 +124,52 @@ pub fn translatable_outgoing_body(wire_text: &str) -> Option<&str> {
 }
 
 impl AppState {
+    fn bouncer_e2e_needs_confirmation(
+        &self,
+        conn_id: &str,
+        target: &str,
+    ) -> crate::e2e::error::Result<bool> {
+        let Some(conn) = self.connections.get(conn_id).filter(|conn| conn.origin_config.bouncer_network_id.is_some() || conn.origin_config.bouncer_control) else {
+            return Ok(false);
+        };
+        let Some(manager) = self.e2e_manager.as_ref() else { return Ok(false) };
+        let keyring = manager.keyring();
+        let mut wires = Vec::new();
+        if !crate::e2e::is_channel_target(target) {
+            let buffer = make_buffer_id(conn_id, target);
+            for handle in [
+                self.buffers.get(&buffer).and_then(|buffer| buffer.peer_handle.clone()),
+                keyring.cached_dm_handle(target, conn.network_key())?,
+                keyring.cached_dm_handle(target, &conn.origin_config.label)?,
+                keyring.cached_dm_handle(target, &conn.label)?,
+                keyring.legacy_handle_for_nick(target)?,
+            ].into_iter().flatten().chain(keyring.previous_handles_for_nick(target)?) {
+                let wire = crate::e2e::context_key(target, &handle);
+                if !wires.contains(&wire) { wires.push(wire); }
+            }
+        }
+        wires.push(target.to_string());
+        let scoped = crate::e2e::scoped_context(conn.network_key(), &wires[0]);
+        let scoped = keyring.canonical_channel_context(&scoped)?.unwrap_or(scoped);
+        if keyring.get_channel_config(&scoped)?.is_some() {
+            return Ok(false);
+        }
+        for wire in wires {
+            if keyring.has_enabled_previous_context(&wire)? { return Ok(true); }
+            for candidate in [
+                crate::e2e::scoped_context(&conn.origin_config.label, &wire),
+                crate::e2e::scoped_context(&conn.label, &wire),
+                wire,
+            ] {
+                let candidate = keyring.canonical_channel_context(&candidate)?.unwrap_or(candidate);
+                if keyring.get_channel_config(&candidate)?.is_some_and(|config| config.enabled) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Resolve a Query buffer's E2E peer handle: the live server-stamped
     /// `peer_handle` if the peer has spoken this session, otherwise the
     /// keyring's network-scoped cached handle for the nick — the SAME
@@ -166,7 +214,7 @@ impl AppState {
             });
         let Some(net) = conn_id
             .and_then(|c| self.connections.get(&c))
-            .map(|c| c.label.clone())
+            .map(|c| c.network_key().to_string())
         else {
             return Ok(None);
         };
@@ -212,6 +260,16 @@ impl AppState {
             ))
         };
 
+        if matches!(buffer_type, BufferType::Channel | BufferType::Query)
+            && let Some((conn_id, _)) = buffer_id.split_once('/')
+        {
+            match self.bouncer_e2e_needs_confirmation(conn_id, buffer_name) {
+                Ok(true) => return Err(E2eRefusal::BouncerScopeChanged),
+                Err(_) => return Err(E2eRefusal::KeyringRead),
+                Ok(false) => {}
+            }
+        }
+
         if matches!(buffer_type, BufferType::Channel)
             && text.starts_with(['.', '!'])
             && !text.contains('\n')
@@ -237,6 +295,7 @@ impl AppState {
         let Some(mgr) = self.e2e_manager.clone() else {
             return plain_passthrough();
         };
+
 
         // Derive the keyring context from the conversation. Channels pass
         // through unchanged; PMs require a server-stamped peer handle we
@@ -265,7 +324,7 @@ impl AppState {
                     .map(|(conn_id, _)| conn_id.to_string())
             })
             .and_then(|c| self.connections.get(&c))
-            .map(|c| c.label.clone());
+            .map(|c| c.network_key().to_string());
         let scope = |wire: &str| -> String {
             network.as_deref().map_or_else(
                 || wire.to_string(),
@@ -395,7 +454,8 @@ impl AppState {
             // the peer's next message drive a scoped migration + handshake,
             // exactly like NoPeerHandle. (Single-network never reaches here —
             // its fallback makes the scoped lookup find the unscoped row.)
-            if let Some(wire) = &dm_peer_wire {
+            if let Some(wire) = &dm_peer_wire
+                && !crate::config::network_scope::is_bouncer_scope(&context) {
                 let legacy_enabled = match mgr.keyring().get_channel_config(wire) {
                     Ok(cfg) => cfg.is_some_and(|c| c.enabled),
                     Err(e) => {
@@ -538,7 +598,7 @@ impl AppState {
         let network = self
             .connections
             .get(conn_id)
-            .map(|c| c.label.clone())
+            .map(|c| c.network_key().to_string())
             .unwrap_or_default();
         let context = if crate::e2e::is_channel_target(target) {
             // Same case canonicalization as the gate proper — the advisory
@@ -584,13 +644,16 @@ impl AppState {
     /// advisory `e2e_enabled_for_target` returns `false` for exactly the states
     /// the gate still refuses on, which would leak the URL before the refusal.
     pub(crate) fn e2e_possible_for_target(&self, conn_id: &str, target: &str) -> bool {
+        if self.bouncer_e2e_needs_confirmation(conn_id, target).unwrap_or(true) {
+            return true;
+        }
         let Some(mgr) = self.e2e_manager.as_ref() else {
             return false;
         };
         let network = self
             .connections
             .get(conn_id)
-            .map(|c| c.label.clone())
+            .map(|c| c.network_key().to_string())
             .unwrap_or_default();
         if crate::e2e::is_channel_target(target) {
             let base = crate::e2e::scoped_context(&network, target);
@@ -625,7 +688,7 @@ impl AppState {
         // upgrade — see the gate's guard). Any read error → cannot rule out.
         let wire = crate::e2e::context_key(target, &handle);
         let scoped = crate::e2e::scoped_context(&network, &wire);
-        for ctx in [scoped, wire] {
+        for ctx in [Some(scoped), (!crate::config::network_scope::is_bouncer_scope(&network)).then_some(wire)].into_iter().flatten() {
             match mgr.keyring().get_channel_config(&ctx) {
                 Ok(Some(c)) if c.enabled => return true,
                 Ok(_) => {}
@@ -1050,6 +1113,7 @@ mod tests {
         state.add_connection(crate::state::connection::Connection {
             id: "test".to_string(),
             label: "TestServer".to_string(),
+            network_scope: None,
             status: crate::state::connection::ConnectionStatus::Connected,
             own_handle: None,
             nick: "me".to_string(),

@@ -1424,7 +1424,7 @@ fn log_search(app: &mut App, query: &str) {
                         .state
                         .connections
                         .get(conn_id)
-                        .map_or_else(|| conn_id.to_string(), |c| c.label.clone());
+                        .map_or_else(|| conn_id.to_string(), |c| c.network_key().to_string());
                     (Some(net), Some(buf_name.to_string()))
                 } else {
                     (None, None)

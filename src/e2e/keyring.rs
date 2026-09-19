@@ -993,7 +993,8 @@ impl Keyring {
                     .configured_networks
                     .read()
                     .expect("configured networks lock poisoned");
-                if !configured.is_empty() && !configured.contains(&healed_net) {
+                if !configured.is_empty() && !configured.contains(&healed_net)
+                    && !crate::config::network_scope::is_bouncer_scope(&healed_net) {
                     tracing::warn!(
                         "e2e: config for {channel} healed from a renamed network's row — \
                          re-run /e2e on to migrate it to the current label"
@@ -1080,8 +1081,8 @@ impl Keyring {
                 Self::attribute_legacy_context(&conn, &wire, &configured)?
             };
             match owner {
-                Some(network) => Self::migrate_legacy_context(&conn, &wire, &network)?,
-                None => unattributed.push(wire),
+                Some(network) if !crate::config::network_scope::is_bouncer_scope(&network) => Self::migrate_legacy_context(&conn, &wire, &network)?,
+                _ => unattributed.push(wire),
             }
         }
         Ok(unattributed)
@@ -1170,6 +1171,34 @@ impl Keyring {
         tx.commit()?;
         tracing::info!("e2e: migrated legacy context '{wire}' to network '{network}'");
         Ok(())
+    }
+
+    pub fn has_enabled_previous_context(&self, wire: &str) -> Result<bool> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let mut statement = conn.prepare(
+            "SELECT DISTINCT substr(channel, 1, instr(channel, char(31)) - 1)
+             FROM e2e_channel_config WHERE enabled = 1 AND instr(channel, char(31)) > 0
+             AND substr(channel, instr(channel, char(31)) + 1) = ?1 COLLATE NOCASE",
+        )?;
+        let networks = statement.query_map(params![wire], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(statement);
+        drop(conn);
+        let configured = self.configured_networks.read().expect("configured networks lock poisoned");
+        Ok(networks.iter().any(|network| !crate::config::network_scope::is_bouncer_scope(network) || !configured.contains(network)))
+    }
+
+    pub fn previous_handles_for_nick(&self, nick: &str) -> Result<Vec<String>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let mut statement = conn.prepare(
+            "SELECT network, handle FROM e2e_dm_handle_cache WHERE nick = ?1 COLLATE NOCASE",
+        )?;
+        let rows = statement.query_map(params![nick], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(statement);
+        drop(conn);
+        let configured = self.configured_networks.read().expect("configured networks lock poisoned");
+        Ok(rows.into_iter().filter(|(network, _)| !crate::config::network_scope::is_bouncer_scope(network) || !configured.contains(network)).map(|(_, handle)| handle).collect())
     }
 
     /// The single scoped `e2e_channel_config` row whose wire part equals
@@ -1482,7 +1511,7 @@ impl Keyring {
     ///    network-scoped cache via `cache_dm_handle`).
     pub fn last_handle_for_nick(&self, nick: &str, network: &str) -> Result<Option<String>> {
         let cached = self.cached_dm_handle(nick, network)?;
-        if cached.is_some() {
+        if cached.is_some() || crate::config::network_scope::is_bouncer_scope(network) {
             return Ok(cached);
         }
         self.legacy_handle_for_nick(nick)
@@ -1677,6 +1706,9 @@ impl Keyring {
 /// under; `None` for already-unscoped contexts. See `get_channel_config`
 /// for the fallback rule (scoped row wins, legacy fills the gap).
 fn legacy_wire_fallback(channel: &str) -> Option<&str> {
+    if crate::config::network_scope::is_bouncer_scope(channel) {
+        return None;
+    }
     let wire = crate::e2e::wire_context(channel);
     (wire != channel).then_some(wire)
 }
@@ -2329,4 +2361,41 @@ mod tests {
         assert!(all[1].enabled);
         assert_eq!(all[1].mode, ChannelMode::AutoAccept);
     }
+    #[test]
+    fn bouncer_scopes_never_adopt_legacy_or_renamed_network_keys() {
+        let kr = open_mem();
+        let bouncer = "bouncer:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:42";
+        let scoped = crate::e2e::scoped_context(bouncer, "#secret");
+        kr.set_channel_config(&ChannelConfig {
+            channel: "#secret".into(), enabled: true, mode: ChannelMode::Normal,
+        }).unwrap();
+        kr.set_configured_networks([bouncer.to_string()]);
+        assert_eq!(kr.adopt_legacy_contexts().unwrap(), vec!["#secret"]);
+        assert!(kr.get_channel_config(&scoped).unwrap().is_none());
+        let old = crate::e2e::scoped_context("Old label", "#secret");
+        kr.set_channel_config(&ChannelConfig {
+            channel: old, enabled: true, mode: ChannelMode::Normal,
+        }).unwrap();
+        assert!(kr.get_channel_config(&scoped).unwrap().is_none());
+        kr.set_channel_config(&ChannelConfig {
+            channel: scoped.clone(), enabled: true, mode: ChannelMode::Quiet,
+        }).unwrap();
+        assert_eq!(kr.get_channel_config(&scoped).unwrap().unwrap().mode, ChannelMode::Quiet);
+        kr.cache_dm_handle(bouncer, "bob", "~bob@one").unwrap();
+        assert_eq!(kr.last_handle_for_nick("bob", bouncer).unwrap().as_deref(), Some("~bob@one"));
+        assert!(kr.last_handle_for_nick("bob", "bouncer:v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:42").unwrap().is_none());
+    }
+
+    #[test]
+    fn bouncer_like_direct_label_keeps_legacy_migration() {
+        let kr = open_mem();
+        let label = "bouncer:v1:MyNetwork";
+        kr.set_channel_config(&ChannelConfig {
+            channel: "#secret".into(), enabled: true, mode: ChannelMode::Normal,
+        }).unwrap();
+        kr.set_configured_networks([label.to_string()]);
+        assert!(kr.adopt_legacy_contexts().unwrap().is_empty());
+        assert!(kr.get_channel_config(&crate::e2e::scoped_context(label, "#secret")).unwrap().unwrap().enabled);
+    }
+
 }

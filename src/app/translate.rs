@@ -1911,7 +1911,7 @@ impl crate::app::App {
                 || (String::new(), "rfc1459".to_string()),
                 |connection| {
                     (
-                        connection.label.clone(),
+                        connection.network_key().to_string(),
                         connection.isupport_parsed.casemapping().to_string(),
                     )
                 },

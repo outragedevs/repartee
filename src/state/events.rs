@@ -1632,7 +1632,7 @@ impl AppState {
                 || (String::new(), "rfc1459".to_string()),
                 |connection| {
                     (
-                        connection.label.clone(),
+                        connection.network_key().to_string(),
                         connection.isupport_parsed.casemapping().to_string(),
                     )
                 },
@@ -1993,7 +1993,7 @@ impl AppState {
         let network = self
             .connections
             .get(conn_id)
-            .map_or_else(|| conn_id.to_string(), |c| c.label.clone());
+            .map_or_else(|| conn_id.to_string(), |c| c.network_key().to_string());
 
         let is_ref = message.log_ref_id.is_some();
         let tags_json = message
@@ -2091,7 +2091,7 @@ impl AppState {
             let network = self
                 .connections
                 .get(conn_id)
-                .map_or_else(|| conn_id.to_string(), |c| c.label.clone());
+                .map_or_else(|| conn_id.to_string(), |c| c.network_key().to_string());
             (network, buf_name.to_string())
         });
         // Our nick on this connection, so a replay of something WE sent can be
@@ -2591,6 +2591,7 @@ pub mod tests {
         Connection {
             id: "libera".to_string(),
             label: "Libera".to_string(),
+            network_scope: None,
             status: ConnectionStatus::Connected,
             own_handle: None,
             nick: "testuser".to_string(),

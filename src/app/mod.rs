@@ -684,7 +684,7 @@ impl App {
             let keyring = crate::e2e::keyring::Keyring::new_encrypted(storage_ref.db.clone())?;
             // Gates the renamed-label read heal and the legacy fallback —
             // see Keyring::get_channel_config / Keyring::legacy_fallback.
-            keyring.set_configured_networks(config.servers.values().map(|s| s.label.clone()));
+            keyring.set_configured_networks(config.servers.iter().map(|(id, server)| config::network_scope::network_scope(id, server, &config.general.username)));
             // Move pre-scoping rows to their owning network while ownership
             // is still determinable; unattributable leftovers are surfaced
             // by warn_orphaned_e2e_networks once buffers exist.
@@ -1120,8 +1120,8 @@ impl App {
         let configured: std::collections::HashSet<String> = self
             .config
             .servers
-            .values()
-            .map(|s| s.label.clone())
+            .iter()
+            .map(|(id, server)| config::network_scope::network_scope(id, server, &self.config.general.username))
             .collect();
         for network in scoped_networks {
             if configured.contains(&network) {
@@ -1148,8 +1148,8 @@ impl App {
         let distinct_networks = self
             .config
             .servers
-            .values()
-            .map(|s| s.label.as_str())
+            .iter()
+            .map(|(id, server)| config::network_scope::network_scope(id, server, &self.config.general.username))
             .collect::<std::collections::HashSet<_>>()
             .len();
         if distinct_networks > 1 {
@@ -1209,6 +1209,7 @@ impl App {
         state.add_connection(Connection {
             id: Self::DEFAULT_CONN_ID.to_string(),
             label: "Status".to_string(),
+            network_scope: None,
             status: ConnectionStatus::Disconnected,
             own_handle: None,
             nick: String::new(),
