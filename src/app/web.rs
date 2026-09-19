@@ -768,10 +768,7 @@ impl App {
             return;
         }
         self.state.active_buffer_id = Some(buffer_id.to_string());
-        if let Some(buf) = self.state.buffers.get_mut(buffer_id) {
-            buf.activity = crate::state::buffer::ActivityLevel::None;
-            buf.unread_count = 0;
-        }
+        self.state.clear_activity(buffer_id);
     }
 
     /// Send a message from a web client to IRC. Returns whether it reached the wire.
@@ -781,10 +778,7 @@ impl App {
 
     /// Mark a buffer as read from a web client.
     fn web_mark_read(&mut self, buffer_id: &str) {
-        if let Some(buf) = self.state.buffers.get_mut(buffer_id) {
-            buf.unread_count = 0;
-            buf.activity = crate::state::buffer::ActivityLevel::None;
-        }
+        self.state.clear_activity(buffer_id);
         self.broadcast_web(crate::web::protocol::WebEvent::ActivityChanged {
             buffer_id: buffer_id.to_string(),
             activity: 0,
@@ -980,5 +974,29 @@ impl App {
                 session_id: Some(session_id.to_string()),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod activity_read_tests {
+    use crate::state::buffer::{ActivityLevel, Buffer, BufferType};
+
+    #[test]
+    fn web_reads_and_silent_switches_remove_shortcut_candidates() {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        for name in ["#current", "#old", "#new"] {
+            app.state.add_buffer(Buffer::for_test("net", BufferType::Channel, name));
+        }
+        app.state.set_active_buffer("net/#current");
+        app.state.set_activity("net/#old", ActivityLevel::Activity);
+        app.state.set_activity("net/#new", ActivityLevel::Activity);
+        app.web_mark_read("net/#old");
+        assert_eq!(app.state.next_activity_buffer().as_deref(), Some("net/#new"));
+        app.state.set_activity("net/#old", ActivityLevel::Activity);
+        assert_eq!(app.state.next_activity_buffer().as_deref(), Some("net/#new"));
+        app.set_active_buffer_silent("net/#new");
+        assert_eq!(app.state.next_activity_buffer().as_deref(), Some("net/#old"));
+        app.web_mark_read("net/#old");
+        assert!(app.state.next_activity_buffer().is_none());
     }
 }

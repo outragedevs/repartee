@@ -4498,6 +4498,7 @@ fn update_label_from_network(state: &mut AppState, conn_id: &str, network_name: 
         buf.id.clone_from(&new_buf_id);
         buf.name = network_name.to_string();
         state.buffers.insert(new_buf_id.clone(), buf);
+        state.rekey_activity(&old_buf_id, &new_buf_id);
 
         // Update active buffer reference if it pointed to the old id
         if state.active_buffer_id.as_deref() == Some(&old_buf_id) {
@@ -11743,5 +11744,26 @@ mod tests {
             typing_script_params(&state, "test", &tagmsg("alice", "&local", "+typing", "active"))
                 .expect("scriptable");
         assert_eq!(params["target"], "&local");
+    }
+}
+
+#[cfg(test)]
+mod activity_label_tests {
+    use super::*;
+
+    #[test]
+    fn server_label_change_preserves_activity_order() {
+        let mut state = crate::state::AppState::new();
+        let mut connection = crate::state::events::tests::make_test_connection();
+        connection.label = "irc.example.invalid".into();
+        state.add_connection(connection);
+        state.add_buffer(Buffer::for_test("libera", BufferType::Server, "irc.example.invalid"));
+        state.add_buffer(Buffer::for_test("libera", BufferType::Channel, "#newer"));
+        state.set_activity("libera/irc.example.invalid", ActivityLevel::Events);
+        state.set_activity("libera/#newer", ActivityLevel::Events);
+        update_label_from_network(&mut state, "libera", "Network");
+        assert_eq!(state.next_activity_buffer().as_deref(), Some("libera/network"));
+        state.set_active_buffer("libera/network");
+        assert_eq!(state.next_activity_buffer().as_deref(), Some("libera/#newer"));
     }
 }

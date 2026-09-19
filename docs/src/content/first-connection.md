@@ -56,6 +56,7 @@ To refresh your presence in a channel (part + rejoin), use:
 
 - **Esc + 1–9** — switch between buffers (windows)
 - **Ctrl+N / Ctrl+P** — next / previous buffer
+- **Alt+A** (or **Esc**, then **A** in IRC input) — visit the buffer with the highest pending activity; within the same level, visit the oldest first. Messages take priority over channel events. Repeated activity at the same level keeps its place; a higher level starts a new position. Opening a buffer marks it read. The shortcut preserves your draft and also works from shell input.
 - **Click** on buffer list or nick list entries
 - **Mouse wheel** — scroll chat history
 - **Tab** — nick completion

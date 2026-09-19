@@ -24,6 +24,8 @@ impl AppState {
             active_buffer_id: None,
             previous_buffer_id: None,
             message_counter: 0,
+            activity_counter: 0,
+            activity_order: std::collections::HashMap::new(),
             flood_state: crate::irc::flood::FloodState::new(),
             netsplit_state: crate::irc::netsplit::NetsplitState::new(),
             flood_protection: true,
@@ -102,6 +104,10 @@ impl AppState {
             modes: buffer.modes.clone(),
             e2e_enabled: false,
         };
+        self.activity_order.remove(&buffer.id);
+        if buffer.activity != ActivityLevel::None {
+            self.register_activity(&buffer.id);
+        }
         self.buffers.insert(buffer.id.clone(), buffer);
         meta.e2e_enabled = matches!(
             self.buffers[&meta.id].buffer_type,
@@ -181,6 +187,7 @@ impl AppState {
                 buffer_id: id.to_string(),
             });
         self.buffers.shift_remove(id);
+        self.activity_order.remove(id);
         self.typing.remove_buffer(id);
         // Clean up per-buffer flood tracking to prevent unbounded map growth.
         self.flood_state.remove_buffer(id);
@@ -190,16 +197,20 @@ impl AppState {
 
         if was_active {
             // Try to fall back to previous buffer
-            if let Some(prev_id) = &self.previous_buffer_id
+            if let Some(prev_id) = self.previous_buffer_id.clone()
                 && self.buffers.contains_key(prev_id.as_str())
             {
-                self.active_buffer_id = Some(prev_id.clone());
+                self.clear_activity(&prev_id);
+                self.active_buffer_id = Some(prev_id);
                 self.previous_buffer_id = None;
                 return;
             }
             // Fall back to first buffer in sorted order
             let sorted = self.sorted_buffer_ids();
             self.active_buffer_id = sorted.into_iter().next();
+            if let Some(id) = self.active_buffer_id.clone() {
+                self.clear_activity(&id);
+            }
             self.previous_buffer_id = None;
         }
     }
@@ -242,10 +253,7 @@ impl AppState {
         self.active_buffer_id = Some(id.to_string());
 
         // Reset activity on the newly active buffer
-        if let Some(buf) = self.buffers.get_mut(id) {
-            buf.activity = ActivityLevel::None;
-            buf.unread_count = 0;
-        }
+        self.clear_activity(id);
 
         // Broadcast to web clients so TUI ↔ Web stay in sync.
         if changed {
@@ -443,6 +451,9 @@ impl AppState {
                 buffer_id: buffer_id.to_string(),
                 message: wire,
             });
+        if self.active_buffer_id.as_deref() != Some(buffer_id) {
+            self.record_activity(buffer_id, ActivityLevel::Mention);
+        }
         let Some(buf) = self.buffers.get_mut(buffer_id) else {
             return;
         };
@@ -1053,6 +1064,7 @@ impl AppState {
         if old_id == new_id {
             return;
         }
+        self.rekey_activity(old_id, new_id);
         if let Some(queue) = self.translate_queues.remove(old_id) {
             // The new id may still hold its PREVIOUS occupant's queue — a
             // stale query under the very nick this conversation is renaming
@@ -1930,6 +1942,9 @@ impl AppState {
                 buffer_id: buffer_id.to_string(),
                 message: wire,
             });
+        if self.active_buffer_id.as_deref() != Some(buffer_id) {
+            self.record_activity(buffer_id, level);
+        }
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
             track_speaker(buf, &message);
             buf.messages.push_back(message);
@@ -2206,6 +2221,7 @@ impl AppState {
 
     #[allow(dead_code, reason = "reserved for scripting API; used in tests")]
     pub fn set_activity(&mut self, buffer_id: &str, level: ActivityLevel) {
+        self.record_activity(buffer_id, level);
         if let Some(buf) = self.buffers.get_mut(buffer_id)
             && level > buf.activity
         {

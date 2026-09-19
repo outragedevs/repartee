@@ -1038,6 +1038,7 @@ impl App {
                                 buf.id.clone_from(&new_buf_id);
                                 buf.name = format!("={new_nick}");
                                 self.state.buffers.insert(new_buf_id.clone(), buf);
+                                self.state.rekey_activity(&old_buf_id, &new_buf_id);
 
                                 // Keep active selection consistent.
                                 if self.state.active_buffer_id.as_deref() == Some(&old_buf_id) {
@@ -1100,5 +1101,34 @@ impl App {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod activity_rename_tests {
+    use super::*;
+
+    #[test]
+    fn dcc_nick_change_keeps_older_unread_chat_first() {
+        use crate::dcc::types::{DccRecord, DccState, DccType};
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        app.state.add_connection(crate::state::events::tests::make_test_connection());
+        app.state.add_buffer(Buffer::for_test("libera", BufferType::DccChat, "=alice"));
+        app.state.add_buffer(Buffer::for_test("libera", BufferType::Channel, "#newer"));
+        app.state.set_activity("libera/=alice", ActivityLevel::Activity);
+        app.state.set_activity("libera/#newer", ActivityLevel::Activity);
+        app.dcc.records.insert("alice".into(), DccRecord {
+            id: "alice".into(), dcc_type: DccType::Chat, nick: "alice".into(),
+            conn_id: "libera".into(), addr: "127.0.0.1".parse().unwrap(), port: 12345,
+            state: DccState::Connected, passive_token: None,
+            created: std::time::Instant::now(), started: None, bytes_transferred: 0,
+            mirc_ctcp: true, ident: "user".into(), host: "example.invalid".into(),
+        });
+        let message = ":alice!user@example.invalid NICK alicia".parse().unwrap();
+        app.handle_irc_event(IrcEvent::Message("libera".into(), Box::new(message)));
+        assert!(!app.state.buffers.contains_key("libera/=alice"));
+        assert_eq!(app.state.next_activity_buffer().as_deref(), Some("libera/=alicia"));
+        app.state.set_active_buffer("libera/=alicia");
+        assert_eq!(app.state.next_activity_buffer().as_deref(), Some("libera/#newer"));
     }
 }
