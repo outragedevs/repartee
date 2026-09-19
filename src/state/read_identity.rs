@@ -17,6 +17,10 @@ pub(super) struct ReadIdentity {
 }
 
 impl AppState {
+    pub(crate) fn reset_read_identity(&mut self, conn_id: &str) {
+        self.read_identities.remove(conn_id);
+    }
+
     pub(crate) fn record_read_account(&mut self, conn_id: &str, nick: &str, account: Option<&str>) {
         if self
             .connections
