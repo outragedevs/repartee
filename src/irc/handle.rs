@@ -29,7 +29,7 @@
 //! 2. **The crate itself.** `client.sender()` hands us a *clone* of
 //!    `tx_outgoing`; the crate keeps its own clone inside `ClientState` and
 //!    emits frames from `ClientState::handle_message` on every inbound message
-//!    — CTCP auto-replies, the autojoin JOIN batch at `ENDOFMOTD`, NICK retries
+//!    — the autojoin JOIN batch at `ENDOFMOTD`, NICK retries
 //!    on `ERR_NICKNAMEINUSE`. Those never pass through [`IrcSender`], but they
 //!    DO charge the real counter. [`CrateEcho`] predicts them from the inbound
 //!    message that triggers them and [`IrcSender::charge`] books them, so the
@@ -406,10 +406,6 @@ impl CrateEcho {
     /// `inbound`. Empty for the overwhelming majority of messages.
     pub(crate) fn frames_for(&mut self, inbound: &Message) -> Vec<Message> {
         match &inbound.command {
-            Command::PRIVMSG(target, body) => self
-                .ctcp_reply(inbound, target, body)
-                .into_iter()
-                .collect(),
             Command::Response(Response::RPL_ENDOFMOTD | Response::ERR_NOMOTD, _) => {
                 self.autojoin_frames()
             }
@@ -420,9 +416,22 @@ impl CrateEcho {
         }
     }
 
-    /// The NOTICE the crate's `handle_ctcp` auto-answers an inbound CTCP query
-    /// with — `None` if it will stay quiet.
-    fn ctcp_reply(&self, inbound: &Message, target: &str, body: &str) -> Option<Message> {
+    pub(crate) fn handle_inbound(&mut self, inbound: &Message, sender: &IrcSender, now: Instant) -> irc::error::Result<()> {
+        for frame in self.frames_for(inbound) {
+            sender.charge(&frame, now);
+        }
+        for frame in self.ctcp_frames(inbound) {
+            sender.send_at(frame, now)?;
+        }
+        Ok(())
+    }
+
+    fn ctcp_frames(&self, inbound: &Message) -> Vec<Message> {
+        self.ctcp_reply(inbound).into_iter().collect()
+    }
+
+    fn ctcp_reply(&self, inbound: &Message) -> Option<Message> {
+        let Command::PRIVMSG(_, body) = &inbound.command else { return None; };
         if !body.starts_with('\u{001}') {
             return None;
         }
@@ -434,14 +443,7 @@ impl CrateEcho {
         };
         let tokens: Vec<&str> = body.get(1..end)?.split(' ').collect();
 
-        // The crate keys the reply target off a literal '#', not the full
-        // channel-prefix set, and falls back to the sender's nick otherwise.
-        // Mirror what it does, not what it arguably should do.
-        let resp = if target.starts_with('#') {
-            target
-        } else {
-            inbound.source_nickname()?
-        };
+        let resp = inbound.source_nickname()?;
 
         let reply = self.ctcp_answer(&tokens)?;
         Some(Command::NOTICE(resp.to_string(), format!("\u{001}{reply}\u{001}")).into())
@@ -914,40 +916,26 @@ mod tests {
 
     #[test]
     fn an_inbound_ctcp_version_charges_the_connection_budget() {
-        // The bypass this closes: the crate answers VERSION with a NOTICE from
-        // its own clone of `tx_outgoing`. That frame never passes through
-        // `IrcSender`, but it DOES charge the real penalty counter — so a mirror
-        // that ignored it would read 0 while the connection was already loaded.
         let now = Instant::now();
         let sender = IrcSender::capturing(u64::from(FLOOD_PENALTY_THRESHOLD_MS));
         let mut echo = CrateEcho::new(echo_config());
         assert_eq!(sender.penalty_ms(), 0);
 
-        for frame in echo.frames_for(&inbound_ctcp("bob", "VERSION")) {
-            sender.charge(&frame, now);
-        }
+        echo.handle_inbound(&inbound_ctcp("bob", "VERSION"), &sender, now).unwrap();
 
-        // NOTICE (2000) + the length step (1000): the reply is well under 100b.
         assert_eq!(sender.penalty_ms(), 3000);
-        // And nothing was *sent* — the crate already wrote it to the socket.
-        assert!(sender.captured().is_empty());
+        assert_eq!(sender.captured().len(), 1);
     }
 
     #[test]
     fn a_burst_of_inbound_ctcp_pings_closes_the_typing_headroom() {
-        // The reported failure, verbatim: a peer sends 6 CTCP PINGs in a second,
-        // the crate auto-replies to all 6, the real counter is ~18_000ms — over
-        // the 10_000ms threshold, so `Outgoing` is already buffering. Before this
-        // fix the mirror read 0 and we kept feeding it a TAGMSG every 3s.
         let now = Instant::now();
         let sender = IrcSender::capturing(u64::from(FLOOD_PENALTY_THRESHOLD_MS));
         let mut echo = CrateEcho::new(echo_config());
         assert!(sender.has_typing_headroom_at(now));
 
         for _ in 0..6 {
-            for frame in echo.frames_for(&inbound_ctcp("bob", "PING 1234567890")) {
-                sender.charge(&frame, now);
-            }
+            echo.handle_inbound(&inbound_ctcp("bob", "PING 1234567890"), &sender, now).unwrap();
         }
 
         assert_eq!(sender.penalty_ms(), 6 * 3000);
@@ -958,11 +946,8 @@ mod tests {
     }
 
     #[test]
-    fn the_ctcp_queries_the_crate_answers_are_exactly_these() {
-        // Pinned against `handle_ctcp`. A query the crate ignores must charge
-        // nothing (over-charging every inbound PRIVMSG would mute typing on any
-        // busy channel), and one it answers must charge.
-        let mut echo = CrateEcho::new(echo_config());
+    fn the_supported_ctcp_queries_are_exactly_these() {
+        let echo = CrateEcho::new(echo_config());
         for query in [
             "VERSION",
             "SOURCE",
@@ -970,61 +955,52 @@ mod tests {
             "TIME",
             "FINGER",
             "USERINFO",
-            // Case-insensitive, like the crate's `eq_ignore_ascii_case`.
             "version",
             "uSeRiNfO",
         ] {
             assert_eq!(
-                echo.frames_for(&inbound_ctcp("bob", query)).len(),
+                echo.ctcp_frames(&inbound_ctcp("bob", query)).len(),
                 1,
-                "the crate auto-answers {query}"
+                "the application answers {query}"
             );
         }
         for query in [
             "ACTION waves",
             "DCC CHAT chat 1 2",
             "CLIENTINFO",
-            // PING with no token: the crate requires `tokens.len() > 1`.
             "PING",
             "",
         ] {
             assert!(
-                echo.frames_for(&inbound_ctcp("bob", query)).is_empty(),
-                "the crate stays quiet for {query:?}"
+                echo.ctcp_frames(&inbound_ctcp("bob", query)).is_empty(),
+                "the application stays quiet for {query:?}"
             );
         }
-        // And an ordinary, non-CTCP PRIVMSG is free.
         assert!(
-            echo.frames_for(&Command::PRIVMSG("#rust".into(), "hello".into()).into())
+            echo.ctcp_frames(&Command::PRIVMSG("#rust".into(), "hello".into()).into())
                 .is_empty()
         );
     }
 
     #[test]
     fn a_ctcp_ping_echo_is_measured_not_assumed() {
-        // The echoed token is peer-controlled. A ~400-byte one costs four extra
-        // length steps, and assuming the 1000ms floor would under-read by 4000.
-        let mut echo = CrateEcho::new(echo_config());
-        let frames = echo.frames_for(&inbound_ctcp("bob", &format!("PING {}", "x".repeat(400))));
+        let echo = CrateEcho::new(echo_config());
+        let frames = echo.ctcp_frames(&inbound_ctcp("bob", &format!("PING {}", "x".repeat(400))));
         assert_eq!(frames.len(), 1);
-        // `NOTICE bob :\x01PING <400 x's>\x01\r\n` → 425 bytes → 5 length steps.
         assert_eq!(message_cost(&frames[0]), 2000 + 5000);
     }
 
     #[test]
-    fn a_channel_ctcp_is_answered_to_the_channel_not_the_sender() {
-        // The crate keys the reply target off a literal '#'. Mirroring it wrongly
-        // would only change the target's length, but the whole point of this file
-        // is that it mirrors what the crate does, not what we assume.
-        let mut echo = CrateEcho::new(echo_config());
-        let frames = echo.frames_for(&inbound_ctcp("#rust", "VERSION"));
+    fn channel_and_private_ctcp_replies_target_the_sender() {
+        let echo = CrateEcho::new(echo_config());
+        let frames = echo.ctcp_frames(&inbound_ctcp("#rust", "VERSION"));
         assert_eq!(frames.len(), 1);
         assert_eq!(
             frames[0].to_string(),
-            "NOTICE #rust :\u{001}VERSION repartee 1.2.3\u{001}\r\n"
+            "NOTICE carol :\u{001}VERSION repartee 1.2.3\u{001}\r\n"
         );
 
-        let frames = echo.frames_for(&inbound_ctcp("bob", "VERSION"));
+        let frames = echo.ctcp_frames(&inbound_ctcp("bob", "VERSION"));
         assert_eq!(
             frames[0].to_string(),
             "NOTICE carol :\u{001}VERSION repartee 1.2.3\u{001}\r\n"
@@ -1123,9 +1099,7 @@ mod tests {
         let reader_task_copy = sender.clone();
 
         let mut echo = CrateEcho::new(echo_config());
-        for frame in echo.frames_for(&inbound_ctcp("bob", "VERSION")) {
-            reader_task_copy.charge(&frame, now);
-        }
+        echo.handle_inbound(&inbound_ctcp("bob", "VERSION"), &reader_task_copy, now).unwrap();
 
         // The handle is built from the ORIGINAL, and must see the charge.
         let handle = IrcHandle::new("net".to_string(), sender, None, None);
@@ -1141,9 +1115,7 @@ mod tests {
         let now = Instant::now();
         let sender = IrcSender::capturing(0);
         let mut echo = CrateEcho::new(echo_config());
-        for frame in echo.frames_for(&inbound_ctcp("bob", "VERSION")) {
-            sender.charge(&frame, now);
-        }
+        echo.handle_inbound(&inbound_ctcp("bob", "VERSION"), &sender, now).unwrap();
         assert_eq!(sender.penalty_ms(), 0);
         assert!(sender.has_typing_headroom_at(now));
     }
@@ -1164,4 +1136,62 @@ mod tests {
         }
         assert!(sender.has_typing_headroom_at(now));
     }
+    #[tokio::test]
+    async fn real_client_sends_one_private_reply_per_ctcp_request() {
+        use futures::StreamExt;
+        use std::fmt::Write as _;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::TcpListener;
+        use tokio::time::{Duration, timeout};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let targets = ["#channel", "&local", "+modeless", "!safe", "@#channel", "bob"];
+        let queries = ["VERSION", "FINGER", "TIME", "SOURCE", "PING token", "USERINFO"];
+        let mut requests = String::new();
+        for target in targets {
+            for query in queries {
+                write!(requests, ":carol!u@host PRIVMSG {target} :\x01{query}\x01\r\n").unwrap();
+            }
+        }
+        requests.push_str(":carol!u@host NOTICE bob :\x01VERSION\x01\r\n");
+        requests.push_str(":server.example PRIVMSG #channel :\x01VERSION\x01\r\n");
+        requests.push_str(":carol!u@host PRIVMSG #channel :\x01ACTION waves\x01\r\n");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(requests.as_bytes()).await.unwrap();
+            let mut reader = BufReader::new(socket);
+            for _ in targets {
+                for query in queries {
+                    let mut line = String::new();
+                    timeout(Duration::from_secs(2), reader.read_line(&mut line)).await.unwrap().unwrap();
+                    let command = query.split_whitespace().next().unwrap();
+                    assert!(line.starts_with(&format!("NOTICE carol :\x01{command} ")), "{line:?}");
+                    assert!(line.ends_with("\x01\r\n"), "{line:?}");
+                }
+            }
+            let mut extra = String::new();
+            assert!(timeout(Duration::from_millis(100), reader.read_line(&mut extra)).await.is_err(), "unexpected duplicate reply: {extra:?}");
+        });
+        let mut client = irc::client::Client::from_config(irc::client::data::Config {
+            nickname: Some("bob".into()),
+            server: Some("127.0.0.1".into()),
+            port: Some(port),
+            use_tls: Some(false),
+            flood_penalty_threshold: Some(0),
+            ..Default::default()
+        }).await.unwrap();
+        let sender = IrcSender::new(client.sender(), 0);
+        let mut stream = client.stream().unwrap();
+        let mut replies = CrateEcho::new(echo_config());
+        for _ in 0..targets.len() * queries.len() + 3 {
+            let message = timeout(Duration::from_secs(2), stream.next()).await.unwrap().unwrap().unwrap();
+            replies.handle_inbound(&message, &sender, Instant::now()).unwrap();
+        }
+        server.await.unwrap();
+        if let Some(handle) = client.outgoing_handle.take() {
+            handle.abort();
+        }
+    }
+
 }
