@@ -483,6 +483,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unknown_initial_focus_preserves_unread_until_keyboard_input() {
+        let mut app = sending_app();
+        app.terminal =
+            Some(crate::ui::setup_socket_terminal(Box::new(std::io::sink()), 120, 40).unwrap());
+        app.terminal_focused = false;
+        app.state.set_active_buffer("account/peer");
+        server_message(&mut app, 1123);
+        assert!(app.render_terminal_frame());
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 1);
+        app.handle_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new_with_kind(
+                crossterm::event::KeyCode::Char('x'),
+                crossterm::event::KeyModifiers::NONE,
+                crossterm::event::KeyEventKind::Release,
+            ),
+        ));
+        assert!(!app.terminal_focused);
+        app.handle_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('x'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+        assert!(app.terminal_focused);
+        assert!(app.render_terminal_frame());
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 0);
+    }
+
+    #[tokio::test]
+    async fn background_reattach_waits_for_focus_confirmation() {
+        let mut app = sending_app();
+        app.state.set_active_buffer("account/peer");
+        server_message(&mut app, 1123);
+        let (mut shim, daemon) = tokio::net::UnixStream::pair().unwrap();
+        crate::session::protocol::write_message(
+            &mut shim,
+            &crate::session::protocol::TerminalEnv {
+                cols: 120,
+                rows: 40,
+                font_size: None,
+                env_vars: HashMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        app.handle_shim_connect(daemon).await.unwrap();
+        assert!(!app.terminal_focused);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !app.render_terminal_frame() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(app.state.buffers["account/peer"].unread_count > 0);
+        assert!(app.irc_handles["account"].sender().captured().is_empty());
+        app.handle_event(crossterm::event::Event::FocusGained);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !app.render_terminal_frame() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 0);
+        app.disconnect_shim();
+    }
+
+    #[tokio::test]
     async fn unscoped_marker_failure_affects_only_the_first_pending_request() {
         let mut app = sending_app();
         app.state.add_buffer_with_focus(

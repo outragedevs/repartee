@@ -162,7 +162,7 @@ impl App {
         self.shim_input_handle = Some(input_handle);
         self.detached = false;
         self.is_socket_attached = true;
-        self.terminal_focused = true;
+        self.terminal_focused = false;
         self.needs_full_redraw = true;
         self.cached_term_cols = cols;
         self.cached_term_rows = rows;
