@@ -175,6 +175,13 @@ pub struct HistoryState {
 const MAX_GAPFILL_PAGES: usize = 10_000;
 
 impl HistoryState {
+    pub fn reset_pagination(&mut self, target: &str) {
+        let target = target.to_ascii_lowercase();
+        self.before_exhausted.remove(&target);
+        self.oldest_fetched.remove(&target);
+        self.oldest_ingested.remove(&target);
+    }
+
     #[must_use]
     pub fn new() -> Self {
         Self::default()

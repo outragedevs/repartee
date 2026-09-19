@@ -377,6 +377,15 @@ impl App {
                         let _ = handle.sender().send(::irc::proto::Command::Raw("BOUNCER".into(), vec!["LISTNETWORKS".into()]));
                     }
                 }
+                if let Some(conn) = self.state.connections.get(&conn_id)
+                    && conn.server_owns_history()
+                    && !conn.origin_config.bouncer_control
+                    && !conn.enabled_caps.contains("draft/chathistory")
+                {
+                    let buffer_id = crate::state::buffer::make_buffer_id(&conn_id, &conn.label);
+                    crate::irc::events::emit(&mut self.state, &buffer_id,
+                        "Bouncer history stays on the server. This connection does not support CHATHISTORY; only live messages and server replay are available.");
+                }
                 // Collect channels to rejoin before handle_connected resets state
                 let rejoin_channels = crate::irc::events::channels_to_rejoin(&self.state, &conn_id);
                 crate::irc::events::handle_connected(&mut self.state, &conn_id);

@@ -248,13 +248,12 @@ pub struct Buffer {
 }
 
 impl Buffer {
-    /// A bare buffer of `buffer_type`, for tests.
-    ///
-    /// Every test module that needs one was hand-rolling the same 20-field
-    /// literal; sharing it here keeps a new field from having to be added
-    /// in a dozen places.
     #[cfg(test)]
     pub(crate) fn for_test(conn_id: &str, buffer_type: BufferType, name: &str) -> Self {
+        Self::empty(conn_id, buffer_type, name)
+    }
+
+    pub(crate) fn empty(conn_id: &str, buffer_type: BufferType, name: &str) -> Self {
         Self {
             id: make_buffer_id(conn_id, name),
             connection_id: conn_id.to_string(),

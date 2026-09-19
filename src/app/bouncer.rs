@@ -204,11 +204,11 @@ mod tests {
         assert!(app.state.e2e_enabled_for_target("one", "#secret"));
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         app.state.log_tx = Some(tx);
-        for (account, expected) in [("one", one), ("two", two)] {
+        for account in ["one", "two"] {
             let message = crate::state::events::tests::make_test_message(&mut app.state, "hello");
             app.state
                 .add_message(&format!("{account}/#secret"), message);
-            assert_eq!(rx.try_recv().unwrap().network, expected);
+            assert!(rx.try_recv().is_err());
         }
         let snapshot = crate::web::snapshot::build_sync_init(
             &app.state,
@@ -361,13 +361,14 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn persisted_mentions_remain_with_their_original_bouncer_identity() {
+    async fn volatile_mentions_remain_with_their_original_bouncer_identity() {
         let mut app = crate::app::input::submit_typing_tests::test_app();
         app.storage = Some(crate::storage::Storage::in_memory());
         let mut server: crate::config::ServerConfig = toml::from_str(
             "label = 'Bouncer'\naddress = 'bnc.example.org'\nport = 6697\ntls = true\nchannels = []\nbouncer_network_id = '42'",
         ).unwrap();
         app.setup_connection("account", &server);
+        app.state.add_buffer(crate::state::buffer::Buffer::for_test("account", crate::state::buffer::BufferType::Channel, "#room"));
         let old_scope = app.state.connections["account"].network_key().to_string();
         let message = crate::state::events::tests::make_test_message(&mut app.state, "hello");
         let wire = crate::web::snapshot::message_to_wire(&message, None);
@@ -380,9 +381,10 @@ mod tests {
             let db = app.storage.as_ref().unwrap().db.lock().unwrap();
             crate::storage::query::get_unread_mentions(&db).unwrap()
         };
-        assert_eq!(rows.len(), 2);
-        assert!(rows.iter().any(|row| row.network == old_scope));
-        assert!(rows.iter().any(|row| row.network == new_scope));
+        assert!(rows.is_empty());
+        assert_eq!(app.volatile_mentions.len(), 2);
+        assert_eq!(app.volatile_mentions[0].0, old_scope);
+        assert_eq!(app.volatile_mentions[1].0, new_scope);
         assert!(app.mention_target(&old_scope).is_none());
         assert!(app.mention_target("account").is_none());
         assert_eq!(

@@ -79,6 +79,10 @@ pub(crate) fn backlog_seed_plan(messages: &VecDeque<Message>) -> SeedPlan {
 }
 
 impl App {
+    pub(crate) fn server_owns_buffer_history(&self, buffer_id: &str) -> bool {
+        self.state.buffer_uses_server_history(buffer_id)
+    }
+
     /// Load recent chat history from the log database into a newly created buffer.
     ///
     /// Messages are **prepended** before any messages already in the buffer
@@ -90,7 +94,16 @@ impl App {
         if limit == 0 {
             return;
         }
-
+        if self.server_owns_buffer_history(buffer_id) {
+            if let Some(buf) = self.state.buffers.get(buffer_id)
+                && matches!(buf.buffer_type, BufferType::Query)
+            {
+                let conn_id = buf.connection_id.clone();
+                let target = buf.name.clone();
+                self.request_connect_gapfill(&conn_id, &target);
+            }
+            return;
+        }
         let Some(storage) = self.storage.as_ref() else {
             return;
         };
@@ -304,7 +317,7 @@ impl App {
         if !self.chat_scroll_at_top {
             return;
         }
-        if buf.history_exhausted {
+        if self.server_owns_buffer_history(&active_id) || buf.history_exhausted {
             // Local SQLite is drained for this buffer (often just a few recent
             // lines loaded at startup), but the server may still hold older
             // history. Ask via `draft/chathistory` BEFORE — the batch ingests
@@ -446,7 +459,7 @@ impl App {
     /// when chathistory can't help (cap absent, server history exhausted, no
     /// anchor, or no connection handle), so the caller marks the buffer
     /// exhausted as before.
-    fn fetch_older_via_chathistory(&mut self, buffer_id: &str) -> bool {
+    pub(crate) fn fetch_older_via_chathistory(&mut self, buffer_id: &str) -> bool {
         use crate::irc::chathistory::Direction;
 
         let Some(buf) = self.state.buffers.get(buffer_id) else {
@@ -484,7 +497,8 @@ impl App {
         // the live buffer. With logging/storage unavailable (disabled or failed
         // to initialize) those rows would be silently dropped and scrollback
         // could keep issuing requests without ever growing — so don't ask.
-        if self.state.log_tx.is_none() {
+        let server_owned = self.server_owns_buffer_history(buffer_id);
+        if !server_owned && self.state.log_tx.is_none() {
             return false;
         }
         if in_flight {
@@ -516,7 +530,7 @@ impl App {
         let anchor: (Option<String>, i64) = if let Some((ms, msgid)) = watermark {
             (msgid, ms)
         } else {
-            let sqlite_anchor = self.storage.as_ref().and_then(|storage| {
+            let sqlite_anchor = self.storage.as_ref().filter(|_| !server_owned).and_then(|storage| {
                 storage.db.lock().ok().and_then(|db| {
                     crate::storage::query::oldest_anchor(&db, &network, &target)
                         .ok()
@@ -530,6 +544,9 @@ impl App {
             resolved
         };
 
+        if server_owned && let Some(buf) = self.state.buffers.get_mut(buffer_id) {
+            buf.pin_backlog = true;
+        }
         self.request_chathistory(&conn_id, &target, Direction::Before, Some(anchor))
     }
 
@@ -549,6 +566,17 @@ impl App {
         dir: crate::irc::chathistory::Direction,
         anchor: Option<(Option<String>, i64)>,
     ) -> bool {
+        self.request_chathistory_with_limit(conn_id, target, dir, anchor, CHAT_BACKLOG_PAGE)
+    }
+
+    pub(crate) fn request_chathistory_with_limit(
+        &mut self,
+        conn_id: &str,
+        target: &str,
+        dir: crate::irc::chathistory::Direction,
+        anchor: Option<(Option<String>, i64)>,
+        requested_limit: usize,
+    ) -> bool {
         use crate::irc::chathistory::{self, HistoryRef, RefKind};
 
         let (limit, history_ref) = {
@@ -560,7 +588,7 @@ impl App {
                 return false;
             }
             let limit = chathistory::clamp_limit(
-                CHAT_BACKLOG_PAGE,
+                requested_limit,
                 conn.isupport_parsed.chathistory_max(),
             );
             let history_ref = match anchor {
@@ -609,6 +637,15 @@ impl App {
     /// non-membership by servers that gate history on channel membership, with no
     /// retry. A query needs no membership, so MOTD timing is correct for it.
     pub(crate) fn gapfill_active_buffer_on_connect(&mut self, conn_id: &str) {
+        if self.state.connections.get(conn_id).is_some_and(crate::state::connection::Connection::server_owns_history) {
+            let targets: Vec<_> = self.state.buffers.values()
+                .filter(|buffer| buffer.connection_id == conn_id && matches!(buffer.buffer_type, BufferType::Query))
+                .map(|buffer| buffer.name.clone()).collect();
+            for target in targets {
+                self.request_connect_gapfill(conn_id, &target);
+            }
+            return;
+        }
         let Some(active_id) = self.state.active_buffer_id.clone() else {
             return;
         };
@@ -705,6 +742,13 @@ impl App {
     /// only sent to members — so a membership-gated `CHATHISTORY` is not rejected.
     /// Other channels fill lazily when focused (follow-up).
     pub(crate) fn gapfill_active_channel_on_join(&mut self, conn_id: &str, channel: &str) {
+        let buffer_id = crate::state::buffer::make_buffer_id(conn_id, channel);
+        if self.server_owns_buffer_history(&buffer_id) {
+            if self.state.buffers.get(&buffer_id).is_some_and(|buffer| matches!(buffer.buffer_type, BufferType::Channel)) {
+                self.request_connect_gapfill(conn_id, channel);
+            }
+            return;
+        }
         let Some(active_id) = self.state.active_buffer_id.clone() else {
             return;
         };
@@ -742,7 +786,9 @@ impl App {
             if !conn.enabled_caps.contains("draft/chathistory") {
                 return false;
             }
-            if conn.chathistory.is_connect_gapfilled(target) {
+            if conn.chathistory.is_connect_gapfilled(target)
+                || (conn.server_owns_history() && self.config.display.backlog_lines == 0)
+            {
                 return false;
             }
             // Exclude reconnect-time rows (JOIN echo, traffic logged during a slow
@@ -753,12 +799,21 @@ impl App {
 
         // Newest stored row (older than the reconnect cutoff) → AFTER anchor; if
         // the buffer has no such row, ask for the LATEST page instead.
-        let anchor = self.storage.as_ref().and_then(|storage| {
-            let db = storage.db.lock().ok()?;
-            crate::storage::query::newest_anchor(&db, &network, target, cutoff)
-                .ok()
-                .flatten()
-        });
+        let server_owned = self.state.connections.get(conn_id)
+            .is_some_and(crate::state::connection::Connection::server_owns_history);
+        let anchor = if server_owned {
+            self.state.buffers.get(&crate::state::buffer::make_buffer_id(conn_id, target))
+                .and_then(|buf| buf.messages.iter().rev().find(|msg| {
+                    !is_synthetic_row(msg) && cutoff.is_none_or(|cutoff| msg.timestamp.timestamp_millis() < cutoff)
+                }))
+                .map(|msg| (msg.timestamp.timestamp_millis(), msg.tags.as_ref().and_then(|tags| tags.get("msgid")).cloned()))
+        } else {
+            self.storage.as_ref().and_then(|storage| {
+                let db = storage.db.lock().ok()?;
+                crate::storage::query::newest_anchor(&db, &network, target, cutoff)
+                    .ok().flatten()
+            })
+        };
 
         let issued = match anchor {
             Some((anchor_ms, anchor_msgid)) => {
@@ -776,7 +831,8 @@ impl App {
                     Some((anchor_msgid, anchor_ms)),
                 )
             }
-            None => self.request_chathistory(conn_id, target, Direction::Latest, None),
+            None => self.request_chathistory_with_limit(conn_id, target, Direction::Latest, None,
+                if server_owned { self.config.display.backlog_lines } else { CHAT_BACKLOG_PAGE }),
         };
 
         // Claim the one-shot ONLY now that the request actually went out. If it was

@@ -205,6 +205,8 @@ pub enum WebCommand {
         /// `(before_ms, before_id)` keyset cursor so same-second (including
         /// CHATHISTORY-backfilled) rows aren't dropped.
         before_id: Option<i64>,
+        #[serde(default)]
+        before_message_id: Option<u64>,
     },
     FetchNickList {
         buffer_id: String,

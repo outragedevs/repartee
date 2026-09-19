@@ -493,8 +493,14 @@ command input support <code>/bouncer</code>.</p>
 SASL-authenticated bound connections. Names and removals follow bouncer updates;
 manual child disconnects remain off until <code>/bouncer connect ID</code>. Disconnecting the
 control connection suspends all children until a new valid network list arrives.
-Server-owned history is a separate implementation stage. Neither explicit binding
-nor control mode alone disables the existing local history policy.</p>
+Explicit binding and control mode use server-owned history for channels and
+private IRC conversations. Their messages and mentions remain in memory; they
+are not written to the local chat database or text logs. Peer-to-peer DCC chats
+keep local history because the bouncer cannot retrieve them.
+Terminal and web scrollback request older pages from the bouncer. A bouncer that
+does not advertise CHATHISTORY provides only live traffic and its automatic
+replay; the connection displays that limitation. Existing local logs are not
+deleted and remain available in the explicit log browser.</p>
 <h2>Bouncer network identity</h2>
 <p>For explicit network binding and control connections, local data uses a stable
 scope separate from the display label. It combines the configured server ID,
@@ -519,9 +525,10 @@ the content. For DMs whose peer has not spoken since reconnecting, the explicit
 decision may use a unique previous cached handle; ambiguous handles require a
 fresh message from the peer. No previous encryption keys are copied. Direct IRC connections retain
 their existing label-based storage and migration behavior.</p>
-<p>This identity change does not yet implement server-owned history. That separate
-stage will prevent new bouncer chat history from being persisted locally and
-serve scrolling from the bouncer.</p>
+<p>History pages use the stable network scope for request isolation. Reconnect
+anchors come from messages still in memory, never from old local chat rows.
+Read markers, TARGETS discovery and server-side search are separate stages;
+these features are not implied by basic history pagination support.</p>
 
 
         <!-- Prev / Next navigation -->
