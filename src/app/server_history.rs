@@ -399,7 +399,7 @@ mod tests {
         app.load_backlog("account/#test");
         assert!(app.state.buffers["account/#test"].messages.is_empty());
         let mut web = app.web_broadcaster.subscribe();
-        app.fetch_server_history_page("account/#test", 100, None, None, "browser");
+        app.handle_web_command(crate::web::protocol::WebCommand::FetchMessages { buffer_id: "account/#test".into(), limit: 100, before: None, before_id: None, before_message_id: None }, "browser");
         let WebEvent::Messages {
             messages, has_more, ..
         } = web.try_recv().unwrap()

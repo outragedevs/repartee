@@ -192,20 +192,31 @@ impl App {
             };
             let markers = self.read_markers.entry(conn_id.clone()).or_default();
             markers.prepare_scope(conn.network_key());
-            for buffer in self.state.buffers.values().filter(|buffer| {
-                buffer.connection_id == *conn_id
-                    && matches!(
-                        buffer.buffer_type,
-                        crate::state::buffer::BufferType::Channel
-                            | crate::state::buffer::BufferType::Query
-                    )
-            }) {
+            let mut targets: std::collections::BTreeMap<String, String> = self
+                .state
+                .buffers
+                .values()
+                .filter(|buffer| {
+                    buffer.connection_id == *conn_id
+                        && matches!(
+                            buffer.buffer_type,
+                            crate::state::buffer::BufferType::Channel
+                                | crate::state::buffer::BufferType::Query
+                        )
+                })
+                .map(|buffer| (buffer.name.to_ascii_lowercase(), buffer.name.clone()))
+                .collect();
+            for target in markers.desired.keys() {
+                targets
+                    .entry(target.clone())
+                    .or_insert_with(|| target.clone());
+            }
+            for (target, name) in targets {
                 if budget == 0 {
                     return;
                 }
-                let target = buffer.name.to_ascii_lowercase();
                 let desired = markers.desired.get(&target).copied();
-                let mut params = vec![buffer.name.clone()];
+                let mut params = vec![name];
                 if let Some(millis) = desired {
                     if markers.sent.get(&target).is_some_and(|(previous, sent)| {
                         now.duration_since(*sent)
@@ -536,6 +547,57 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, crate::web::protocol::WebEvent::MentionAlert { .. }))
         );
+    }
+
+    #[tokio::test]
+    async fn query_rename_keeps_retrying_the_original_server_target() {
+        let mut app = sending_app();
+        let seen = server_message(&mut app, 1123);
+        app.mark_visible_message_read("account/peer", seen);
+        crate::irc::events::rename_query_buffers_for_test(
+            &mut app.state,
+            "account",
+            "Peer",
+            "Renamed",
+            &["account/peer".into()],
+        );
+        app.drain_pending_buffer_rekeys();
+        app.read_markers
+            .get_mut("account")
+            .unwrap()
+            .sent
+            .get_mut("peer")
+            .unwrap()
+            .1 = Instant::now().checked_sub(Duration::from_secs(6)).unwrap();
+        app.tick_read_markers();
+        let captured = app.irc_handles["account"].sender().captured();
+        let writes: Vec<_> = captured
+            .iter()
+            .filter_map(|message| {
+                if let irc::proto::Command::Raw(command, params) = &message.command
+                    && command == "MARKREAD"
+                    && params.len() == 2
+                {
+                    Some(params)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(writes.len(), 2);
+        assert!(
+            writes
+                .iter()
+                .all(|params| params[0].eq_ignore_ascii_case("peer"))
+        );
+        assert!(app.state.buffers.contains_key("account/renamed"));
+        app.handle_read_marker(
+            "account",
+            &":bnc MARKREAD peer timestamp=1970-01-01T00:00:01.123Z"
+                .parse()
+                .unwrap(),
+        );
+        assert!(!app.read_markers["account"].desired.contains_key("peer"));
     }
 
     #[test]
