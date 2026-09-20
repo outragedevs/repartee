@@ -6,10 +6,11 @@ from pathlib import Path
 
 
 class PresenceServer:
-    def __init__(self, events, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, upstream_auth=False, account_registration=False, channel_context=False):
+    def __init__(self, events, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, upstream_auth=False, account_registration=False, channel_context=False, network_icon=False):
         self.account_registration = account_registration
         self.accounts = {}
         self.upstream_auth = upstream_auth or account_registration
+        self.network_icon = network_icon
         self.channel_context = channel_context
         self.redaction = redaction
         self.setname = setname
@@ -238,6 +239,8 @@ class PresenceServer:
                     self.record(connection, nick, None)
                     send(f':fixture.local 001 {nick} :Welcome to the disposable presence fixture')
                     send(f':fixture.local 005 {nick} CASEMAPPING=ascii CHANTYPES=# PREFIX=(ov)@+ {"MONITOR=100" if monitor_available else ""} :supported')
+                    if self.network_icon:
+                        send(f':fixture.local 005 {nick} draft/ICON=https://example.org/icon/{{size}}.png :supported tokens')
                     send(f':fixture.local 376 {nick} :End of MOTD')
                 await writer.drain()
         finally:
@@ -254,12 +257,13 @@ async def main():
     parser.add_argument('--monitor-unavailable', action='store_true')
     parser.add_argument('--invites', action='store_true')
     parser.add_argument('--names', action='store_true')
+    parser.add_argument('--network-icon', action='store_true')
     parser.add_argument('--channel-context', action='store_true')
     parser.add_argument('--redaction', action='store_true')
     parser.add_argument('--upstream-auth', action='store_true')
     parser.add_argument('--account-registration', action='store_true')
     args = parser.parse_args()
-    fixture = PresenceServer(args.events, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.upstream_auth, args.account_registration, args.channel_context)
+    fixture = PresenceServer(args.events, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.upstream_auth, args.account_registration, args.channel_context, args.network_icon)
     server = await asyncio.start_server(fixture.client, '127.0.0.1', 0)
     args.ready.write_text(json.dumps({'port': server.sockets[0].getsockname()[1]}))
     async with server:

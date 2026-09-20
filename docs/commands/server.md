@@ -7,7 +7,7 @@ description: Manage server configurations
 
 ## Syntax
 
-    /server [list|add|remove] [args...]
+    /server [list|add|remove|icon] [args...]
 
 ## Description
 
@@ -67,6 +67,20 @@ use `/wizard server`.
 Remove a server and disconnect if connected.
 
     /server remove <id>
+
+### icon
+
+Show the current network icon URL advertised through IRCv3 `draft/ICON`.
+Without a connection ID, use the active buffer's connection. Bouncer child
+connections are supported independently of saved server configurations.
+
+    /server icon [connection-id]
+
+The optional `{size}` URL template requests 128 pixels. HTTP and HTTPS URLs
+are accepted; credentials, local-file and executable URL schemes are rejected.
+This command does not fetch images automatically. Open the link or use the
+existing `/preview <url>` command for image formats supported by the terminal
+preview. Updates, removals and disconnection follow the current ISUPPORT state.
 
 ## Examples
 

@@ -476,3 +476,12 @@ and Lurker fixtures pass live delivery and channel history retrieval with no
 local log writes. See `docs/validation/bouncer-channel-context.md` for scope,
 provider differences and reproducible commands. SAFERATE publication, ICON and
 the complete acceptance matrix remain open.
+
+## Network icon discovery and terminal command
+
+`/server icon [connection-id]` exposes `draft/ICON` for the active or selected
+connection, including bouncer child networks. Template URLs, updates and removal
+use the current ISUPPORT state. Real pinned Soju and Lurker fixtures confirm
+upstream icon forwarding and command output. See
+`docs/validation/bouncer-network-icon.md`. Web sidebar image rendering and its
+fetch/cache pipeline remain a required follow-up, not completed by this command.

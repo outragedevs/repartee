@@ -58,6 +58,25 @@ impl Isupport {
         }
     }
 
+    #[must_use]
+    #[allow(clippy::literal_string_with_formatting_args, reason = "IRCv3 literal URL template") ]
+    pub fn network_icon(&self, size: u16) -> Option<String> {
+        let value = self.get("draft/ICON")?;
+        if value.is_empty() || value.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
+            return None;
+        }
+        let value = value.replace("{size}", &size.clamp(1, 512).to_string());
+        let url = reqwest::Url::parse(&value).ok()?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return None;
+        }
+        Some(url.to_string())
+    }
+
     /// Parse `PREFIX=(modes)prefixes` into a vec of `(mode_char, prefix_char)`
     /// in rank order (highest privilege first).
     ///
@@ -691,5 +710,32 @@ mod tests {
         let mut isupport = Isupport::new();
         isupport.parse_tokens(&["STATUSMSG=@+"]);
         assert_eq!(isupport.statusmsg(), "@+");
+    }
+}
+
+#[cfg(test)]
+mod network_icon_tests {
+    use super::Isupport;
+
+    #[test]
+    fn icon_templates_preserve_escapes_and_follow_updates() {
+        let mut support = Isupport::new();
+        support.parse_tokens(&["draft/ICON=https://example.org/icon/{size}.png?name=100%25"]);
+        assert_eq!(support.network_icon(128).as_deref(), Some("https://example.org/icon/128.png?name=100%25"));
+        support.parse_tokens(&["NICKLEN=30"]);
+        assert!(support.network_icon(32).unwrap().contains("/32.png"));
+        support.parse_tokens(&["draft/ICON=http://example.org/new.svg"]);
+        assert_eq!(support.network_icon(32).as_deref(), Some("http://example.org/new.svg"));
+        support.parse_tokens(&["-draft/ICON"]);
+        assert_eq!(support.network_icon(32), None);
+    }
+
+    #[test]
+    fn invalid_icons_do_not_become_actionable_urls() {
+        for value in ["", "javascript:alert(1)", "file:///tmp/icon", "data:image/png;base64,AAAA", "//example.org/icon", "https://user:pass@example.org/icon", "https://example.org/icon\n", "https://example.org/a b"] {
+            let mut support = Isupport::new();
+            support.parse_tokens(&[&format!("draft/ICON={value}")]);
+            assert_eq!(support.network_icon(32), None, "{value:?}");
+        }
     }
 }

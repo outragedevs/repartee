@@ -205,3 +205,19 @@ async fn isupport_label_collision_preserves_query_and_web_selection() {
     }
     assert!(renamed);
 }
+
+#[tokio::test]
+async fn network_icon_command_uses_atomic_connection_scoped_state() {
+    let mut app = app();
+    app.state.set_active_buffer("fixture/fixture");
+    receive(&mut app, ":s 005 me draft/ICON=https://example.org/{size}.png?x=100%25 :supported tokens");
+    app.handle_submit("/server icon");
+    assert!(app.state.buffers["fixture/fixture"].messages.back().unwrap().text.contains("https://example.org/128.png?x=100%%25"));
+    receive(&mut app, ":s BATCH +icon draft/isupport");
+    receive(&mut app, "@batch=icon :s 005 me -draft/ICON :supported tokens");
+    assert!(app.state.connections["fixture"].isupport_parsed.network_icon(32).is_some());
+    receive(&mut app, ":s BATCH -icon");
+    app.handle_submit("/server icon");
+    assert!(app.state.buffers["fixture/fixture"].messages.back().unwrap().text.contains("has not advertised"));
+    assert_eq!(app.state.connections["other"].isupport_parsed.network_icon(32), None);
+}
