@@ -180,3 +180,47 @@ name. Neither pinned TARGETS endpoint exposes a secondary cursor within one
 timestamp. The warning deliberately says conversations *may* be missing: exactly
 one full timestamp group can also be complete. Filtered-empty pages and complete
 automatic discovery remain unresolved; they are not marked complete by this PR.
+
+## Filtered-empty TARGETS pages: verified on both providers
+
+Reproduce with the pinned built checkouts:
+
+```sh
+python3 scripts/audit_bouncer_history_targets.py /path/to/soju --filtered
+python3 scripts/audit_bouncer_history_targets.py /path/to/lurker --provider lurker --filtered
+```
+
+A separate disposable protocol probe reproduced the second source-level gap on
+both pinned providers on 2026-09-20. It seeded 1000 hidden conversations with a
+latest message at `2024-01-01T00:00:00.000Z`, and one visible `older-visible`
+conversation at `2023-01-01T00:00:00.000Z`. The probes used each provider's actual
+socket endpoint, with batch/server-time/chathistory negotiated; Lurker also
+negotiated `soju.im/bouncer-networks` for network identity reporting.
+
+For Soju, the hidden targets were channel rows with `Channel.detached = 1`;
+the provider was restarted after seeding so its in-memory registry matched the
+database. For Lurker, messages were inserted through `insertMessage`, and the
+corresponding buffer rows were closed through `buffers.close` before starting
+the harness. Both probes asserted that all 1000 rows were hidden and that the
+known visible target was returned by the older-window query.
+
+| Exclusive upper bound (lower bound: Unix epoch) | Limit | Soju rows | Lurker rows |
+| --- | --- | --- | --- |
+| `2025-01-01T00:00:00.000Z` | 1000 | 0 | 0 |
+| `2024-01-01T00:00:00.001Z` | 1000 | 0 | 0 |
+| `2024-01-01T00:00:00.000Z` | 1000 | 1 | 1 |
+
+The last response contains exactly `older-visible`. Thus an empty response does
+not prove that no older visible conversation exists. The first two responses
+contain neither a target nor a timestamp from which a client can derive the
+third window. The probe knows that boundary only because it seeded the fixture;
+it does not establish a general client-side enumeration strategy.
+
+The source cause is confirmed: Soju's `downstream.go` calls `store.ListTargets`
+with the requested limit and then skips detached channels; Lurker's
+`handleChatHistoryTargets` limits `listActiveTargetsInWindow` before filtering
+closed buffers. Providers need to apply visibility filtering before limiting
+results, or expose a continuation cursor independent of returned visible rows.
+The separate timestamp-tie gap additionally needs a cursor/tie-breaker within
+one timestamp. These probes reproduce provider limitations, not passing complete
+Repartee discovery. No upstream source or personal account was modified.
