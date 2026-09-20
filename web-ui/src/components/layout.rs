@@ -263,6 +263,7 @@ fn ResponsiveLayout() -> impl IntoView {
                 <div class="bar-tools desktop-tools">
                     <ThemePicker />
                     <AppearanceButton />
+                    <crate::push::PushButton />
                 </div>
             </div>
 
@@ -285,6 +286,7 @@ fn ResponsiveLayout() -> impl IntoView {
                 <div class="bar-tools">
                     <ThemePicker />
                     <AppearanceButton />
+                    <crate::push::PushButton />
                 </div>
             </aside>
 

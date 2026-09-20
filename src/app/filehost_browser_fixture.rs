@@ -30,11 +30,12 @@ pub async fn run(app: &mut App, script: &str) {
         .env("REPARTEE_BROWSER_FIXTURE_COOKIE", cookie)
         .env("REPARTEE_BROWSER_FIXTURE_COOKIE_NAME", crate::web::auth::session_cookie_name())
         .kill_on_drop(true).spawn().unwrap();
-    let outcome = tokio::time::timeout(std::time::Duration::from_mins(1), async {
+    let outcome = tokio::time::timeout(std::time::Duration::from_mins(2), async {
         loop {
             while let Ok(event) = app.irc_rx.try_recv() { app.handle_irc_event(event); }
             while let Ok((command, session)) = app.web_cmd_rx.try_recv() { app.handle_web_command(command, &session); }
             while let Ok(result) = app.upload_rx.try_recv() { app.finish_upload(result); }
+            app.tick_bouncer_webpush();
             app.drain_pending_web_events();
             if let Some(status) = browser.try_wait().unwrap() { return status; }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;

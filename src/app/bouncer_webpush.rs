@@ -40,12 +40,30 @@ impl super::App {
         let _ = self.web_broadcaster.send(WebEvent::WebPush {
             connection_id: id.into(), request_id: request_id.into(), session_id: session_id.into(), status,
             scope: configuration.as_ref().map(|(scope, _)| scope.clone()),
+            context: configuration.as_ref().and_then(|_| self.state.connections.get(id)).map(|conn| webpush::BrowserContext {
+                label: conn.label.clone(), nick: conn.nick.clone(),
+                chantypes: conn.isupport_parsed.chan_types().to_string(),
+                statusmsg: conn.isupport_parsed.statusmsg().to_string(),
+                casemapping: conn.isupport_parsed.casemapping().to_string(),
+            }),
             vapid: configuration.map(|(_, vapid)| vapid),
         });
     }
 
     pub(crate) fn handle_webpush_request(&mut self, request: &WebRequest, session_id: &str) {
-        let id = &request.connection_id;
+        let expected_scope = match &request.action {
+            Action::Get => None,
+            Action::Lookup { scope } | Action::Register { scope, .. } | Action::Unregister { scope, .. } => Some(scope),
+        };
+        let resolved = if request.connection_id.is_empty() || matches!(request.action, Action::Lookup { .. }) {
+            let mut candidates = self.state.connections.keys().filter(|id| self.webpush_configuration(id)
+                .is_some_and(|(scope, _)| expected_scope == Some(&scope)));
+            let first = candidates.next().cloned();
+            if candidates.next().is_none() { first } else { None }
+        } else { Some(request.connection_id.clone()) };
+        let Some(id) = resolved.as_ref() else {
+            self.webpush_response("", &request.request_id, session_id, Status::Unavailable); return;
+        };
         let request_id = &request.request_id;
         if uuid::Uuid::parse_str(request_id).is_err() {
             self.webpush_response(id, request_id, session_id, Status::Invalid); return;
@@ -53,7 +71,7 @@ impl super::App {
         let Some((scope, vapid)) = self.webpush_configuration(id) else {
             self.webpush_response(id, request_id, session_id, Status::Unavailable); return;
         };
-        if matches!(request.action, Action::Get) {
+        if matches!(request.action, Action::Get | Action::Lookup { .. }) {
             self.webpush_response(id, request_id, session_id, Status::Ready); return;
         }
         if self.bouncer_webpush.contains_key(id) {
@@ -67,7 +85,7 @@ impl super::App {
             Action::Register { .. } | Action::Unregister { .. } => {
                 self.webpush_response(id, request_id, session_id, Status::Unavailable); return;
             }
-            Action::Get => unreachable!(),
+            Action::Get | Action::Lookup { .. } => unreachable!(),
         };
         let Ok(command) = command else { self.webpush_response(id, request_id, session_id, Status::Invalid); return; };
         let sender = self.irc_handles[id].sender();

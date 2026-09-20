@@ -403,3 +403,19 @@ repeat operations and expired endpoints are covered. Clippy has no project warni
 See `docs/validation/bouncer-webpush.md`. Browser permission UI, service workers,
 notification display/clicks, renewal and real browser delivery remain required;
 this backend does not complete WebPush or the overall acceptance matrix.
+
+### Browser WebPush receiver (clean review completed)
+
+The web notification panel now supports explicit permission, per-account/network
+subscriptions, renewal, reconnect, offline disable and deferred endpoint cleanup.
+Service workers show Soju notifications, route clicks to matching buffers, and
+close notifications on MARKREAD, including channel-context messages. Authentication
+revocation suppresses delivery without treating a temporary connection loss as
+logout. Browser storage retains subscription state and read markers, not message
+history. See `docs/validation/bouncer-webpush-browser.md` for Chromium, WebKit,
+pinned-Soju and compiled-WASM test evidence. This does not close the remaining
+ISUPPORT/identity, channel-context live/history routing, or full acceptance audit.
+
+Full Sol medium review round 13 is clean. Six payload tests, Chromium settings
+and worker regressions, and the final actual Soju/WASM/browser-push run pass;
+Clippy and 2657 native/145 web tests cover the native bridge.

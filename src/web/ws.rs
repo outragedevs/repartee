@@ -335,7 +335,7 @@ mod webpush_privacy_tests {
         let event = super::WebEvent::WebPush {
             connection_id: "fixture".into(), request_id: "request".into(),
             session_id: "owner".into(), status: crate::irc::webpush::Status::Ready,
-            scope: Some("opaque-scope".into()), vapid: None,
+            scope: Some("opaque-scope".into()), vapid: None, context: None,
         };
         assert!(!super::is_targeted_to_other(&event, "owner"));
         assert!(super::is_targeted_to_other(&event, "other-browser"));

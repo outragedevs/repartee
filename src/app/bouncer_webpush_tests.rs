@@ -168,3 +168,21 @@ async fn webpush_control_sessions_cannot_register_undeliverable_subscriptions() 
         assert!(app.irc_handles["test"].sender().captured().is_empty());
     }
 }
+
+#[tokio::test]
+async fn browser_lookup_resolves_network_scope_and_rejects_wrong_account() {
+    let mut app = app();
+    let scope = app.webpush_configuration("test").unwrap().0;
+    let mut web = app.web_broadcaster.subscribe();
+    let mut request = WebRequest { connection_id: "old-transient-id".into(), request_id: uuid::Uuid::new_v4().to_string(), action: Action::Lookup { scope } };
+    app.handle_webpush_request(&request, "browser");
+    assert!(matches!(web.try_recv().unwrap(), WebEvent::WebPush { connection_id, status: Status::Ready, context: Some(_), .. } if connection_id == "test"));
+    request.connection_id = "test".into();
+    request.action = Action::Lookup { scope: "different-account".into() };
+    app.handle_webpush_request(&request, "browser");
+    assert!(matches!(web.try_recv().unwrap(), WebEvent::WebPush { status: Status::Unavailable, context: None, .. }));
+    let mut request = unregister(&app);
+    request.connection_id.clear();
+    app.handle_webpush_request(&request, "browser");
+    assert!(app.bouncer_webpush.contains_key("test"));
+}

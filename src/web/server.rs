@@ -147,6 +147,20 @@ async fn login_info_handler(State(state): State<Arc<AppHandle>>) -> Response {
     Json(serde_json::json!({ "username": state.username })).into_response()
 }
 
+async fn session_handler(
+    jar: axum_extra::extract::cookie::CookieJar,
+    State(state): State<Arc<AppHandle>>,
+) -> Response {
+    let valid = match jar.get(&session_cookie_name()) {
+        Some(token) => state.session_store.lock().await.validate(token.value()).is_some(),
+        None => false,
+    };
+    (
+        if valid { StatusCode::NO_CONTENT } else { StatusCode::UNAUTHORIZED },
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+    ).into_response()
+}
+
 /// POST /api/logout — revoke the current session and clear the cookie.
 async fn logout_handler(
     jar: axum_extra::extract::cookie::CookieJar,
@@ -229,7 +243,9 @@ fn serve_embedded(path: &str) -> Response {
             // Trunk-generated hashed filenames are content-addressed and
             // safe to cache aggressively; unhashed paths (fonts/, etc.)
             // get a short-lived cache so updates propagate within an hour.
-            let cache_control = if is_hashed_asset(path) {
+            let cache_control = if !is_hashed_asset(path) && std::path::Path::new(path).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("js")) {
+                "no-cache"
+            } else if is_hashed_asset(path) {
                 "public, max-age=31536000, immutable"
             } else {
                 "public, max-age=3600"
@@ -302,8 +318,10 @@ pub fn build_router(handle: Arc<AppHandle>) -> Router {
         .route("/api/login", post(login_handler))
         .route("/api/login_info", get(login_info_handler))
         .route("/api/logout", post(logout_handler))
+        .route("/api/session", get(session_handler))
         .route("/api/health", get(health_handler))
         .route("/api/upload", post(super::upload::handler))
+        .route("/api/webpush", post(super::push::handler))
         .route("/api/preview", get(super::preview::preview_handler))
         .route("/ws", get(super::ws::ws_handler))
         .route("/favicon.ico", get(favicon_handler))
@@ -468,6 +486,35 @@ mod tests {
 
         let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn session_status_distinguishes_revocation_and_never_caches() {
+        let handle = make_test_handle();
+        let token = handle.session_store.lock().await.create("push test");
+        let cookie = format!("{}={token}", session_cookie_name());
+        let app = test_app(Arc::clone(&handle));
+        for (revoked, expected) in [(false, StatusCode::NO_CONTENT), (true, StatusCode::UNAUTHORIZED)] {
+            if revoked { handle.session_store.lock().await.revoke(&token); }
+            let request = axum::http::Request::builder().uri("/api/session")
+                .header("Cookie", &cookie).body(axum::body::Body::empty()).unwrap();
+            let response = tower::ServiceExt::oneshot(app.clone(), request).await.unwrap();
+            assert_eq!(response.status(), expected);
+            assert_eq!(response.headers()[axum::http::header::CACHE_CONTROL], "no-store");
+        }
+    }
+
+    #[test]
+    fn push_modules_always_revalidate_after_deployment() {
+        for path in WebAssets::iter().filter(|path| path.starts_with("snippets/")) {
+            let response = serve_embedded(&path);
+            assert_eq!(response.headers()[axum::http::header::CACHE_CONTROL], "no-cache");
+        }
+        for path in ["push/api.js", "push/payload.js", "push/worker.js", "push/client.js"] {
+            let response = serve_embedded(path);
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[axum::http::header::CACHE_CONTROL], "no-cache");
+        }
     }
 
     #[test]

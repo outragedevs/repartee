@@ -9,6 +9,7 @@ use crate::state::AppState;
 pub fn App() -> impl IntoView {
     let state = AppState::new();
     provide_context(state);
+    crate::push::install(state);
 
     if let Some(document) = web_sys::window().and_then(|window| window.document()) {
         document.set_title(crate::constants::APP_NAME);

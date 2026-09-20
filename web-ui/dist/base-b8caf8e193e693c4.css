@@ -1412,3 +1412,28 @@ textarea {
 *::-webkit-scrollbar-thumb:active {
     background-color: var(--fg-dim);
 }
+
+.push-settings {
+  margin: auto;
+  background: var(--bg, #181818);
+  color: var(--fg, #ddd);
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  padding: 24px;
+  width: min(440px, calc(100vw - 32px));
+  max-height: 85vh;
+  overflow: auto;
+}
+.push-settings::backdrop { background: rgba(0, 0, 0, .6); }
+.push-settings section { margin: 18px 0; padding-top: 12px; border-top: 1px solid currentColor; }
+.push-settings button {
+  margin: 6px 10px 4px 0;
+  padding: 6px 12px;
+  color: var(--fg);
+  background: var(--bg-alt);
+  border: 1px solid var(--fg-muted);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.push-settings button:disabled { opacity: .5; cursor: default; }
+.push-settings button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
