@@ -37,15 +37,6 @@ fn populated(app: &App) -> bool {
 }
 
 async fn labeled_names(app: &mut App) {
-    app.irc_handles["fixture"]
-        .sender()
-        .send(irc::proto::Command::CAP(
-            None,
-            irc::proto::command::CapSubCommand::REQ,
-            None,
-            Some("labeled-response".into()),
-        ))
-        .unwrap();
     until(app, "labeled-response ACK", |app| {
         app.state.connections["fixture"]
             .enabled_caps
@@ -84,6 +75,40 @@ async fn labeled_names(app: &mut App) {
     }).await.expect("labeled NAMES did not run the App completion hooks");
 }
 
+async fn labeled_whois(app: &mut App) {
+    let other =
+        toml::from_str("label='other'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]")
+            .unwrap();
+    app.setup_connection("other", &other);
+    app.state.set_active_buffer("fixture/#one");
+    let (tx, mut log_rx) = tokio::sync::mpsc::channel(64);
+    app.state.log_tx = Some(tx);
+    app.web_broadcaster = std::sync::Arc::new(crate::web::broadcast::WebBroadcaster::new(128));
+    let mut web_rx = app.web_broadcaster.subscribe();
+    app.execute_command(&crate::commands::parser::parse_command("/whois Alice").unwrap());
+    assert_eq!(app.labeled_requests["fixture"].pending_count(), 1);
+    app.state.set_active_buffer("other/other");
+    until(app, "labeled WHOIS origin", |app| {
+        app.state.buffers["fixture/#one"]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("fixture-labeled-whois"))
+    })
+    .await;
+    assert_eq!(app.state.active_buffer_id.as_deref(), Some("other/other"));
+    assert_eq!(app.labeled_requests["fixture"].pending_count(), 0);
+    assert!(
+        !app.state.buffers["other/other"]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("fixture-labeled-whois"))
+    );
+    let events: Vec<_> = std::iter::from_fn(|| web_rx.try_recv().ok()).collect();
+    assert!(events.iter().any(|event| matches!(event, crate::web::protocol::WebEvent::NewMessage { buffer_id, message } if buffer_id == "fixture/#one" && message.text.contains("fixture-labeled-whois"))));
+    assert!(log_rx.try_recv().is_err());
+    app.state.log_tx = None;
+}
+
 #[tokio::test]
 #[ignore = "requires a disposable pinned bouncer fixture"]
 async fn pinned_bouncer_names() {
@@ -118,6 +143,7 @@ async fn pinned_bouncer_names() {
     until(&mut app, "channel population", populated).await;
     if soju {
         labeled_names(&mut app).await;
+        labeled_whois(&mut app).await;
     }
     app.irc_handles["fixture"]
         .sender()

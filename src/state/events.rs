@@ -35,6 +35,7 @@ impl AppState {
             web_history_buffers: std::collections::HashMap::new(),
             active_buffer_id: None,
             previous_buffer_id: None,
+            irc_reply_buffer: None,
             message_counter: 0,
             activity_counter: 0,
             activity_order: std::collections::HashMap::new(),
@@ -2052,6 +2053,9 @@ impl AppState {
         };
 
         if self.buffer_uses_server_history(buffer_id) {
+            return false;
+        }
+        if self.irc_reply_buffer.is_some() && self.connections.get(conn_id).is_some_and(crate::state::connection::Connection::server_owns_history) {
             return false;
         }
 

@@ -41,8 +41,10 @@ class PresenceServer:
         try:
             while raw := await reader.readline():
                 line = raw.decode().rstrip('\r\n')
+                request_label = None
                 if line.startswith('@'):
-                    line = line.split(' ', 1)[1]
+                    tags, line = line.split(' ', 1)
+                    request_label = dict(tag.partition('=')[::2] for tag in tags[1:].split(';')).get('label')
                 head, separator, trailing = line.partition(' :')
                 parts = head.split()
                 if separator:
@@ -70,6 +72,16 @@ class PresenceServer:
                     with self.events.open('a') as output:
                         output.write(json.dumps({'connection': connection, 'realname': params[0]}) + '\n')
                     send(f':{nick}!fixture@localhost SETNAME :{params[0]}')
+                elif command == 'WHOIS' and registered and self.names and params:
+                    target = params[-1]
+                    prefix = ''
+                    if request_label:
+                        send(f'@label={request_label} :fixture.local BATCH +whois-reply labeled-response')
+                        prefix = '@batch=whois-reply '
+                    send(f'{prefix}:fixture.local 311 {nick} {target} user fixture.local * :fixture-labeled-whois')
+                    send(f'{prefix}:fixture.local 318 {nick} {target} :End of WHOIS')
+                    if request_label:
+                        send(':fixture.local BATCH -whois-reply')
                 elif command == 'PRIVMSG' and registered and (self.monitor or self.invites) and len(params) == 2 and params[0].lower() == 'fixturecontrol':
                     with self.events.open('a') as output:
                         output.write(json.dumps({'control': params[1]}) + '\n')

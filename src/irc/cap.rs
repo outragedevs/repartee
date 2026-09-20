@@ -19,6 +19,7 @@ pub const DESIRED_CAPS: &[&str] = &[
     "echo-message",
     "invite-notify",
     "batch",
+    "labeled-response",
     "userhost-in-names",
     "no-implicit-names",
     "draft/no-implicit-names",
@@ -264,7 +265,7 @@ mod tests {
         let caps = ServerCaps::parse(
             "multi-prefix extended-join ircnet.com/extended-join server-time \
              account-tag cap-notify away-notify account-notify chghost setname extended-monitor draft/extended-monitor \
-             echo-message invite-notify batch userhost-in-names no-implicit-names draft/no-implicit-names soju.im/no-implicit-names message-tags \
+             echo-message invite-notify batch labeled-response userhost-in-names no-implicit-names draft/no-implicit-names soju.im/no-implicit-names message-tags \
              draft/multiline draft/chathistory draft/event-playback \
              sasl=PLAIN,EXTERNAL",
         );
