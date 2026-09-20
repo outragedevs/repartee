@@ -1257,6 +1257,16 @@ async fn negotiate_caps(
             }
         }
 
+        if (params.bouncer_control || params.bouncer_network_id.is_some())
+            && !authenticated
+            && params.password.is_some_and(|password| !password.is_empty())
+            && (params.sasl_user.is_some() || params.sasl_pass.is_some()
+                || params.sasl_key_path.is_some() || params.has_client_cert
+                || params.sasl_mechanism_override.is_some())
+        {
+            return Err(eyre!("Bouncer SASL authentication did not succeed; remove SASL settings to use PASS-only authentication"));
+        }
+
         if params.bouncer_control && (!enabled_caps.contains(bouncer::NETWORKS_CAP) || !enabled_caps.contains("batch")) {
             return Err(eyre!("Bouncer control mode requires acknowledged network and batch capabilities"));
         }
@@ -1264,8 +1274,8 @@ async fn negotiate_caps(
             if !enabled_caps.contains(bouncer::NETWORKS_CAP) {
                 return Err(eyre!("Bouncer network capability was not acknowledged"));
             }
-            if !authenticated {
-                return Err(eyre!("Bouncer network binding requires successful SASL authentication"));
+            if !authenticated && params.password.is_none_or(str::is_empty) {
+                return Err(eyre!("Bouncer network binding requires successful SASL authentication or a supported PASS login"));
             }
             sender.send(Command::Raw(
                 "BOUNCER".to_string(),

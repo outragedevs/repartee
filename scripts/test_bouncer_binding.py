@@ -38,8 +38,11 @@ def main():
     parser.add_argument("source", type=Path)
     parser.add_argument("--test-filter", default="pinned_bouncer_")
     parser.add_argument("--daemon-image", help="Run the real daemon/browser lifecycle fixture using this container image")
+    parser.add_argument("--pass-auth", nargs="?", const="user", choices=("user", "combined"))
     parser.add_argument("--target-tie", action="store_true", help="Seed 1001 conversations sharing a timestamp")
     args = parser.parse_args()
+    if args.pass_auth and (args.implementation != "lurker" or args.test_filter != "pinned_bouncer_persistent_history" or args.daemon_image or args.target_tie):
+        parser.error("--pass-auth requires Lurker and --test-filter pinned_bouncer_persistent_history")
     source = args.source.resolve()
     head = run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True).stdout.strip()
     if head != PINS[args.implementation]:
@@ -102,10 +105,11 @@ def main():
                     "REPARTEE_BOUNCER_TEST_NETID": str(settings["network"]),
                     "REPARTEE_BOUNCER_TEST_USER": settings["user"],
                     "REPARTEE_BOUNCER_TEST_PROVIDER": args.implementation,
+                    "REPARTEE_BOUNCER_TEST_PASS": args.pass_auth or "0",
                 })
                 test_args = f"{args.test_filter} -- --ignored"
                 if args.test_filter == "pinned_bouncer_":
-                    test_args += " --skip pinned_bouncer_discovery_limit --skip pinned_bouncer_presence --skip pinned_bouncer_network_management --skip pinned_bouncer_setname --skip pinned_bouncer_monitor --skip pinned_bouncer_no_monitor --skip pinned_bouncer_invites --skip pinned_bouncer_names --skip pinned_bouncer_channel_context --skip pinned_bouncer_network_icon"
+                    test_args += " --skip pinned_bouncer_discovery_limit --skip pinned_bouncer_service --skip pinned_bouncer_presence --skip pinned_bouncer_network_management --skip pinned_bouncer_setname --skip pinned_bouncer_monitor --skip pinned_bouncer_no_monitor --skip pinned_bouncer_invites --skip pinned_bouncer_names --skip pinned_bouncer_channel_context --skip pinned_bouncer_network_icon"
                 if args.daemon_image:
                     run(["python3", str(ROOT / "scripts/test_bouncer_daemon_history.py"), args.daemon_image],
                         cwd=ROOT, env=environment)

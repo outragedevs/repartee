@@ -39,8 +39,18 @@ fn prepare(path: &Path, seed: bool) -> App {
         .unwrap()
         .parse()
         .unwrap();
-    config.sasl_user = Some(std::env::var("REPARTEE_BOUNCER_TEST_USER").unwrap());
-    config.sasl_pass = Some("fixture-password".into());
+    let user = std::env::var("REPARTEE_BOUNCER_TEST_USER").unwrap();
+    let pass_mode = std::env::var("REPARTEE_BOUNCER_TEST_PASS");
+    if pass_mode.as_deref() == Ok("combined") {
+        config.password = Some(format!("{user}:fixture-password"));
+        config.username = Some("ignored".into());
+    } else if pass_mode.as_deref() == Ok("user") {
+        config.username = Some(user);
+        config.password = Some("fixture-password".into());
+    } else {
+        config.sasl_user = Some(user);
+        config.sasl_pass = Some("fixture-password".into());
+    }
     config.bouncer_network_id = Some(std::env::var("REPARTEE_BOUNCER_TEST_NETID").unwrap());
     app.setup_connection("fixture", &config);
     if seed {
