@@ -62,8 +62,13 @@ def main():
     parser.add_argument("--history-range", action="store_true", help="Probe BETWEEN against the real provider")
     parser.add_argument("--tls-case", choices=("valid", "untrusted", "wrong-host"))
     parser.add_argument("--pass-auth", nargs="?", const="user", choices=("user", "combined"))
+    parser.add_argument("--account-matrix", action="store_true", help="Exercise concurrent history across two accounts and four networks")
     parser.add_argument("--target-tie", action="store_true", help="Seed 1001 conversations sharing a timestamp")
     args = parser.parse_args()
+    if args.account_matrix:
+        if any((args.partial_history, args.history_stall, args.history_range, args.tls_case, args.pass_auth, args.daemon_image, args.target_tie)) or args.test_filter != "pinned_bouncer_":
+            parser.error("--account-matrix is a standalone scenario")
+        args.test_filter = "pinned_bouncer_account_matrix"
     if args.partial_history or args.history_stall:
         if (args.partial_history and args.history_stall) or args.history_range or args.tls_case or args.pass_auth or args.daemon_image or args.target_tie or args.test_filter != "pinned_bouncer_":
             parser.error("--partial-history is a standalone partial-batch scenario")
@@ -93,7 +98,8 @@ def main():
                         "node", str(source / "node_modules/tsx/dist/cli.mjs"),
                         str(ROOT / "scripts/fixtures/lurker-binding.mts"), str(source), str(ready),
                     ], cwd=source, stdout=log, stderr=log,
-                        env=dict(os.environ, REPARTEE_BOUNCER_DAEMON_FIXTURE="1" if args.daemon_image else "0",
+                        env=dict(os.environ, REPARTEE_BOUNCER_ACCOUNT_MATRIX="1" if args.account_matrix else "0",
+                                 REPARTEE_BOUNCER_DAEMON_FIXTURE="1" if args.daemon_image else "0",
                                  REPARTEE_BOUNCER_TARGET_TIE="1" if args.target_tie else "0",
                                  REPARTEE_BOUNCER_TLS_FIXTURE="1" if args.tls_case else "0",
                                  LURKER_BOUNCER_TLS_CERT=str(temporary / "server-cert.pem") if args.tls_case else "",
@@ -114,6 +120,9 @@ def main():
                     )
                     run([str(source / "sojudb"), "-config", str(config), "create-user", "fixture"],
                         input="fixture-password\n", capture_output=True)
+                    if args.account_matrix:
+                        run([str(source / "sojudb"), "-config", str(config), "create-user", "other"],
+                            input="fixture-password\n", capture_output=True)
                     process = subprocess.Popen([str(source / "soju"), "-config", str(config)],
                                                stdout=log, stderr=log)
                     wait_ready(process, admin.exists)
@@ -131,6 +140,9 @@ def main():
                                 raw = f"@time={timestamp} :history-peer!user@fixture.local PRIVMSG {recipient} :{body}"
                                 database.execute("INSERT INTO Message(target, raw, time, sender, text) VALUES (?, ?, ?, ?, ?)",
                                                  (target_id, raw, timestamp, "history-peer", body))
+                    if args.account_matrix:
+                        from bouncer_account_matrix import seed_soju
+                        matrix_accounts = seed_soju(source, config, temporary / "main.db")
                     if args.target_tie:
                         from audit_bouncer_history_targets import seed
                         with sqlite3.connect(temporary / "main.db") as database:
@@ -139,6 +151,29 @@ def main():
                         seed(temporary / "main.db")
                     settings = {"port": port, "network": 1, "user": "fixture"}
                 environment = os.environ.copy()
+                if args.account_matrix:
+                    control = temporary / "matrix-control.json"
+                    environment["REPARTEE_BOUNCER_MATRIX_CONTROL"] = str(control)
+                    if args.implementation == "soju":
+                        from bouncer_account_matrix import SojuController
+                        faults.enter_context(SojuController(source, config, temporary / "main.db", control, matrix_accounts))
+                    environment["REPARTEE_BOUNCER_MATRIX_ACCOUNTS"] = json.dumps(settings["accounts"] if args.implementation == "lurker" else matrix_accounts)
+                    def restart_provider():
+                        nonlocal process
+                        process.terminate()
+                        process.wait(timeout=10)
+                        if args.implementation == "lurker":
+                            process = subprocess.Popen([
+                                "node", str(source / "node_modules/tsx/dist/cli.mjs"),
+                                str(ROOT / "scripts/fixtures/lurker-matrix-resume.mts"), str(source), str(ready),
+                            ], cwd=source, stdout=log, stderr=log)
+                            wait_ready(process, (temporary / "resume-ready.json").exists)
+                        else:
+                            admin.unlink(missing_ok=True)
+                            process = subprocess.Popen([str(source / "soju"), "-config", str(config)], stdout=log, stderr=log)
+                            wait_ready(process, admin.exists)
+                    from bouncer_account_matrix import restart_controller
+                    faults.enter_context(restart_controller(control.with_suffix(".restart"), restart_provider))
                 if args.partial_history or args.history_stall:
                     from bouncer_partial_batch_proxy import PartialBatchProxy
                     fault = faults.enter_context(PartialBatchProxy(settings["port"], stall=bool(args.history_stall)))
@@ -159,7 +194,7 @@ def main():
                     environment["REPARTEE_OAUTH_TEST_CA"] = str(temporary / f"{authority}-ca.pem")
                 test_args = f"{args.test_filter} -- --ignored"
                 if args.test_filter == "pinned_bouncer_":
-                    test_args += " --skip pinned_bouncer_stalled_history --skip pinned_bouncer_partial_history --skip pinned_bouncer_bounded_history --skip pinned_bouncer_tls_validation --skip pinned_bouncer_discovery_limit --skip pinned_bouncer_service --skip pinned_bouncer_presence --skip pinned_bouncer_network_management --skip pinned_bouncer_setname --skip pinned_bouncer_monitor --skip pinned_bouncer_no_monitor --skip pinned_bouncer_invites --skip pinned_bouncer_names --skip pinned_bouncer_channel_context --skip pinned_bouncer_network_icon"
+                    test_args += " --skip pinned_bouncer_account_matrix --skip pinned_bouncer_stalled_history --skip pinned_bouncer_partial_history --skip pinned_bouncer_bounded_history --skip pinned_bouncer_tls_validation --skip pinned_bouncer_discovery_limit --skip pinned_bouncer_service --skip pinned_bouncer_presence --skip pinned_bouncer_network_management --skip pinned_bouncer_setname --skip pinned_bouncer_monitor --skip pinned_bouncer_no_monitor --skip pinned_bouncer_invites --skip pinned_bouncer_names --skip pinned_bouncer_channel_context --skip pinned_bouncer_network_icon"
                 if args.history_range:
                     from probe_bouncer_history_ranges import probe
                     print(json.dumps(probe(settings, args.implementation), indent=2))
