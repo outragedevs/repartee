@@ -418,3 +418,17 @@ async fn metadata_filtering_counts_only_visible_search_results() {
     receive(&mut app, "first", ":server BATCH -empty");
     assert!(app.state.buffers["first/*search*"].messages.iter().any(|row| row.text.contains("0 search results")));
 }
+
+#[tokio::test]
+async fn private_channel_context_search_results_match_only_the_requested_channel() {
+    for context in ["#room", "#other"] {
+        let (mut app, _) = app();
+        search(&mut app);
+        receive(&mut app, "first", ":server BATCH +result soju.im/search");
+        receive(&mut app, "first", &format!("@batch=result;+draft/channel-context={context};time=2024-01-01T00:00:00Z :Alice!u@h NOTICE me :context result"));
+        receive(&mut app, "first", ":server BATCH -result");
+        let rows = &app.state.buffers["first/*search*"].messages;
+        assert_eq!(rows.iter().any(|row| row.text == "context result"), context == "#room");
+        assert!(app.state.buffers["first/#room"].messages.is_empty());
+    }
+}

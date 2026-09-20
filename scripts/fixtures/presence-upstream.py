@@ -6,10 +6,11 @@ from pathlib import Path
 
 
 class PresenceServer:
-    def __init__(self, events, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, upstream_auth=False, account_registration=False):
+    def __init__(self, events, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, upstream_auth=False, account_registration=False, channel_context=False):
         self.account_registration = account_registration
         self.accounts = {}
         self.upstream_auth = upstream_auth or account_registration
+        self.channel_context = channel_context
         self.redaction = redaction
         self.setname = setname
         self.invites = invites
@@ -125,6 +126,8 @@ class PresenceServer:
                     have_user = True
                 elif command == 'PING':
                     send(f':fixture.local PONG fixture.local :{params[-1]}')
+                elif command == 'PRIVMSG' and registered and self.channel_context and params == ['FixtureControl', 'channel-context']:
+                    send(f'@+draft/channel-context=#context :Alice!peer@fixture.local NOTICE {nick} :context live notice')
                 elif command == 'PRIVMSG' and registered and self.redaction and params == ['FixtureControl', 'search-private']:
                     send(f'@msgid=search-incoming :Alice!peer@fixture.local PRIVMSG {nick} :private needle incoming')
                     send(f'@msgid=search-outgoing :{nick}!fixture@localhost PRIVMSG Alice :private needle outgoing')
@@ -251,11 +254,12 @@ async def main():
     parser.add_argument('--monitor-unavailable', action='store_true')
     parser.add_argument('--invites', action='store_true')
     parser.add_argument('--names', action='store_true')
+    parser.add_argument('--channel-context', action='store_true')
     parser.add_argument('--redaction', action='store_true')
     parser.add_argument('--upstream-auth', action='store_true')
     parser.add_argument('--account-registration', action='store_true')
     args = parser.parse_args()
-    fixture = PresenceServer(args.events, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.upstream_auth, args.account_registration)
+    fixture = PresenceServer(args.events, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.upstream_auth, args.account_registration, args.channel_context)
     server = await asyncio.start_server(fixture.client, '127.0.0.1', 0)
     args.ready.write_text(json.dumps({'port': server.sockets[0].getsockname()[1]}))
     async with server:
