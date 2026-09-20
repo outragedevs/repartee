@@ -117,6 +117,9 @@ impl MonitorState {
             return;
         }
         self.support = support;
+        if supported {
+            self.request_status = true;
+        }
         self.snapshot = None;
         self.submitted = None;
         self.retry = None;
@@ -158,6 +161,7 @@ impl MonitorState {
     }
 
     pub fn reset_transport(&mut self) {
+        self.request_status = true;
         self.submitted = None;
         self.confirmed = None;
         self.snapshot = None;
@@ -659,6 +663,9 @@ mod tests {
             receive(state, &format!(":server 732 me :{names}"));
         }
         receive(state, ":server 733 me :End of MONITOR list");
+        if state.next_command() == Some(Command::MONITOR("S".into(), None)) {
+            send(state, "S", None);
+        }
     }
 
     #[test]
@@ -685,6 +692,7 @@ mod tests {
         assert!(state.next_command().is_none());
         receive(&mut state, ":server 732 me :Bob");
         receive(&mut state, ":server 733 me :End");
+        send(&mut state, "S", None);
         assert!(state.next_command().is_none());
         state.change(Change::Remove(vec!["ALICE".into()])).unwrap();
         assert!(
@@ -775,6 +783,21 @@ mod tests {
         assert!(state.next_command().is_none());
         assert_eq!(state.rows().len(), 1);
         assert!(state.rows()[0].starts_with("Alice:"));
+    }
+
+    #[test]
+    fn restored_support_refreshes_presence_for_retained_server_targets() {
+        let mut state = state();
+        snapshot(&mut state, "Alice");
+        receive(&mut state, ":server 730 me :Alice!u@h");
+        state.set_supported(false);
+        state.set_supported(true);
+        send(&mut state, "L", None);
+        receive(&mut state, ":server 732 me :Alice");
+        receive(&mut state, ":server 733 me :End");
+        send(&mut state, "S", None);
+        receive(&mut state, ":server 730 me :Alice!u@h");
+        assert_eq!(state.peers["alice"].online, Some(true));
     }
 
     #[test]

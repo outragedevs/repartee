@@ -235,7 +235,14 @@ Stage 8 SETNAME merged in https://github.com/outragedevs/repartee/pull/73 after
 a clean second Sol medium review. Own/peer real-name updates, initial WHO/WHOX,
 incremental JOIN and web tooltips are covered in `docs/validation/bouncer-setname.md`.
 
-The next increment is MONITOR and extended-monitor capability aliases on
-`feat/irc-monitor`. Remaining increments must still cover other dynamic capability
+MONITOR and extended-monitor aliases merged in
+https://github.com/outragedevs/repartee/pull/74 after a clean third Sol medium
+review. Per-client isolation, notifications, rejection and reconnect have pinned
+bouncer evidence in `docs/validation/bouncer-monitor.md`. Compiled WASM command
+routing and event rendering were checked separately with controlled WebSocket data.
+
+The next increment on `fix/monitor-capability-transitions` exercises dynamic
+MONITOR/notification support and initially unsupported upstreams. Remaining
+increments must still cover other dynamic capability
 behavior, labeled replies, redaction, invitations, ISUPPORT/names and upstream
 account operations; no remaining row is dropped.

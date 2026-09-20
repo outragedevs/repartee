@@ -1,6 +1,7 @@
 # MONITOR validation plan
 
-Status: implementation in progress on `feat/irc-monitor`; not reviewed or merged.
+Status: core implementation merged in https://github.com/outragedevs/repartee/pull/74
+after a clean third Sol medium review. Dynamic real-upstream acceptance passed on the follow-up branch; its review is pending.
 
 ## Scope
 
@@ -63,11 +64,39 @@ channels. Both negotiate an extended-monitor alias. Soju additionally delivers
 the monitored user's real-name notification. Lurker's SETNAME limitation remains
 as documented in the SETNAME validation.
 
-## Outstanding acceptance evidence
+## Dynamic follow-up acceptance
 
-Extend the real-bouncer scenarios to unsupported upstreams and dynamic capability changes. Verify rendered web output.
-Review/fix rounds and PR merge are pending. The passing integration scenario
-covers the behavior listed above; it does not prove these remaining cases.
+`fix/monitor-capability-transitions` fixes missing status refresh when MONITOR is
+restored but the bouncer retains its per-client list. The client now requests
+MONITOR S after synchronization on initial support, restored support and transport
+reconnect. Without that query, the real Soju fixture left accepted targets at
+unknown availability indefinitely. The state regression reproduces retained
+server targets and proves the status query is issued.
+
+Both providers passed dynamic account-notify withdrawal/re-advertisement; stale
+account data is cleared and the capability is negotiated again. Soju additionally
+passed MONITOR withdrawal and restoration with refreshed online/offline states.
+Results: `/tmp/repartee-monitor-dynamic-soju6.log` and
+`/tmp/repartee-monitor-dynamic-lurker6.log`.
+
+The pinned Lurker does not expose dynamic MONITOR withdrawal: `bouncer.ts`
+RELAY_DROP includes numeric 005 (lines 212–222, applied at line 471), and
+`ircConnection.ts` lines 1829–1831 never clear useMonitor after initial support.
+The fixture sends an ordered NOTICE after its ISUPPORT update, waits for both
+clients to receive that marker, and confirms MONITOR remains advertised. This is
+an upstream limitation, not a client claim that hidden withdrawal was handled.
+The fixture restores upstream support before proceeding. Repartee cannot infer an
+upstream state change that the bouncer does not report.
+
+Both pinned bouncers also passed `--monitor-unavailable`: no MONITOR advertised
+on connection, add remains queued without optimistic peer availability, and a raw
+list probe gets the bouncer's unsupported-command response visibly handled.
+Results: `/tmp/repartee-monitor-unavailable-soju1.log` and
+`/tmp/repartee-monitor-unavailable-lurker1.log`.
+
+`make clippy` then `make test` passed in
+`/tmp/repartee-monitor-dynamic-check7`: zero project warnings, 2484 native tests,
+142 web host tests and 8 ignored fixture tests. Follow-up review is pending.
 
 ## Review round 1
 
@@ -91,4 +120,35 @@ cache. A regression withdraws support during a partially received list, supplies
 late status/list/identity messages, restores support and verifies reconciliation.
 The real-bouncer test now explicitly waits for matching desired/confirmed lists
 and no in-flight operation; absence of a next command alone is insufficient.
-Round 3 is pending.
+Round 3 completed with no actionable findings.
+
+## Compiled web client
+
+`/tmp/repartee-browser-qa/monitor.cjs` passed against the committed WASM in WebKit.
+It verifies command emission for the selected server buffer and rendered event
+rows for subscribed/pending states and rejection, with literal percent and markup
+characters. `/tmp/repartee-monitor-browser1.log` records the result; the screenshot
+`/tmp/repartee-monitor-web.png` was inspected. Controlled WebSocket messages supply
+these UI payloads; actual App/bouncer behavior is tested separately above.
+
+## Follow-up review round 1: metadata refresh claim
+
+The reviewer proposed MONITOR S on metadata-capability restoration to hydrate
+account/away/host/real-name fields. Source verification contradicts that mechanism:
+Soju `downstream.go`'s MONITOR S branch and Lurker `bouncer.ts`'s S branch send only
+730/731 with the nickname. Neither returns those metadata fields or forwards S
+upstream. The IRCv3 extended-monitor specification
+(https://ircv3.net/specs/extensions/extended-monitor) promises change notifications,
+not an initial metadata snapshot or refresh command. Unknown after invalidation
+is therefore intentional until a new notification arrives, not evidence that the
+subscription is broken. Automatic WHO/WHOIS metadata hydration would be a separate
+feature, not something MONITOR S can provide.
+
+The integration sequence now injects a new ACCOUNT notification after CAP ACK,
+before any MONITOR transition, and requires the watched peer to update while the
+other client's list stays isolated. This directly checks the claimed failure
+path without relying on a subsequent MONITOR toggle.
+
+The strengthened post-CAP-ACK ACCOUNT scenario passed on both pinned servers in
+`/tmp/repartee-monitor-dynamic-soju6.log` and
+`/tmp/repartee-monitor-dynamic-lurker6.log`; follow-up review round 2 is pending.

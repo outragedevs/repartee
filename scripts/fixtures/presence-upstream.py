@@ -5,9 +5,10 @@ from pathlib import Path
 
 
 class PresenceServer:
-    def __init__(self, events, setname=False, monitor=False):
+    def __init__(self, events, setname=False, monitor=False, monitor_unavailable=False):
         self.setname = setname
         self.monitor = monitor
+        self.monitor_unavailable = monitor_unavailable
         self.events = events
         self.next_connection = 0
 
@@ -23,6 +24,7 @@ class PresenceServer:
         negotiating = False
         registered = False
         monitored = set()
+        monitor_available = self.monitor and not self.monitor_unavailable
         capabilities = {"setname"} if self.setname else set()
         if self.monitor:
             capabilities.update(["account-notify", "away-notify", "chghost", "setname", "extended-monitor"])
@@ -62,7 +64,29 @@ class PresenceServer:
                     with self.events.open('a') as output:
                         output.write(json.dumps({'connection': connection, 'realname': params[0]}) + '\n')
                     send(f':{nick}!fixture@localhost SETNAME :{params[0]}')
+                elif command == 'PRIVMSG' and registered and self.monitor and len(params) == 2 and params[0].lower() == 'fixturecontrol':
+                    with self.events.open('a') as output:
+                        output.write(json.dumps({'control': params[1]}) + '\n')
+                    if params[1] == 'monitor-off':
+                        monitor_available = False
+                        send(f':fixture.local 005 {nick} -MONITOR :supported')
+                    elif params[1] == 'monitor-on':
+                        monitor_available = True
+                        send(f':fixture.local 005 {nick} MONITOR=100 :supported')
+                    elif params[1] == 'account-off':
+                        capabilities.discard('account-notify')
+                        send(f':fixture.local CAP {nick} DEL :account-notify')
+                    elif params[1] == 'account-change':
+                        send(':Alice!changed@changed.example ACCOUNT restored-account')
+                    elif params[1] == 'account-on':
+                        capabilities.add('account-notify')
+                        send(f':fixture.local CAP {nick} NEW :account-notify')
+                    send(f':FixtureControl!control@fixture.local NOTICE {nick} :control-complete {params[1]}')
                 elif command == 'MONITOR' and registered and self.monitor and params:
+                    if not monitor_available:
+                        send(f':fixture.local 421 {nick} MONITOR :Unknown command')
+                        await writer.drain()
+                        continue
                     operation = params[0].upper()
                     names = params[1].split(',') if len(params) > 1 else []
                     if operation == '+':
@@ -105,7 +129,7 @@ class PresenceServer:
                     registered = True
                     self.record(connection, nick, None)
                     send(f':fixture.local 001 {nick} :Welcome to the disposable presence fixture')
-                    send(f':fixture.local 005 {nick} CASEMAPPING=ascii CHANTYPES=# PREFIX=(ov)@+ {"MONITOR=100" if self.monitor else ""} :supported')
+                    send(f':fixture.local 005 {nick} CASEMAPPING=ascii CHANTYPES=# PREFIX=(ov)@+ {"MONITOR=100" if monitor_available else ""} :supported')
                     send(f':fixture.local 376 {nick} :End of MOTD')
                 await writer.drain()
         finally:
@@ -119,8 +143,9 @@ async def main():
     parser.add_argument('events', type=Path)
     parser.add_argument('--setname', action='store_true')
     parser.add_argument('--monitor', action='store_true')
+    parser.add_argument('--monitor-unavailable', action='store_true')
     args = parser.parse_args()
-    fixture = PresenceServer(args.events, args.setname, args.monitor)
+    fixture = PresenceServer(args.events, args.setname, args.monitor, args.monitor_unavailable)
     server = await asyncio.start_server(fixture.client, '127.0.0.1', 0)
     args.ready.write_text(json.dumps({'port': server.sockets[0].getsockname()[1]}))
     async with server:
