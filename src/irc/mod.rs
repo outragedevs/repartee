@@ -7,6 +7,7 @@ pub mod events;
 pub mod setname;
 pub mod monitor;
 pub mod names;
+pub mod labels;
 pub mod extban;
 pub mod flood;
 pub mod formatting;

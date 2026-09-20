@@ -591,6 +591,7 @@ impl App {
                 }
                 self.lag_pings.remove(&conn_id);
                 self.batch_trackers.remove(&conn_id);
+                self.labeled_requests.remove(&conn_id);
                 self.channel_query_queues.remove(&conn_id);
                 self.channel_query_in_flight.remove(&conn_id);
                 self.channel_query_sent_at.remove(&conn_id);
@@ -663,6 +664,7 @@ impl App {
                         }
                         _ => {}
                     }
+                    self.tick_labels();
                 }
 
                 // --- IRCv3 batch interception ---
@@ -687,6 +689,9 @@ impl App {
                                 batch.messages.len()
                             );
                             self.receive_completed_batch(&conn_id, &batch);
+                            if let Some(label) = batch.opener_tags.as_ref().and_then(|tags| tags.iter().find(|tag| tag.0 == "label")).and_then(|tag| tag.1.as_deref()) {
+                                self.finish_labeled_response(&conn_id, label);
+                            }
                         }
                     }
                     // BATCH commands themselves are not dispatched further
@@ -698,7 +703,9 @@ impl App {
                 {
                     // Message belongs to an open batch — collect it, don't process now
                     if let Some(tracker) = self.batch_trackers.get_mut(&conn_id) {
-                        tracker.add_message(*msg);
+                        let mut message = *msg;
+                        tracker.inherit_label(&mut message);
+                        tracker.add_message(message);
                     }
                 } else {
                     self.dispatch_live_irc_message(&conn_id, &msg);

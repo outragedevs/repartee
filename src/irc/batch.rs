@@ -110,6 +110,21 @@ pub struct BatchTracker {
 }
 
 impl BatchTracker {
+    pub fn inherit_label(&self, message: &mut IrcMessage) {
+        if crate::irc::labels::message_label(message).is_some() {
+            return;
+        }
+        let mut reference = Self::get_batch_tag_owned(message);
+        for _ in 0..=self.open.len() {
+            let Some(batch) = reference.as_ref().and_then(|reference| self.open.get(reference)) else { return; };
+            if let Some(label) = batch.opener_tags.as_ref().and_then(|tags| tags.iter().find(|tag| tag.0 == "label")).and_then(|tag| tag.1.clone()) {
+                message.tags.get_or_insert_with(Vec::new).push(irc::proto::message::Tag("label".into(), Some(label)));
+                return;
+            }
+            reference = batch.parent_ref().map(str::to_string);
+        }
+    }
+
     pub fn fold_messages(
         &mut self,
         parent: &str,

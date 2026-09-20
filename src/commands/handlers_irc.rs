@@ -466,7 +466,7 @@ pub(crate) fn cmd_invite(app: &mut App, args: &[String]) {
 }
 
 pub(crate) fn cmd_names(app: &mut App, args: &[String]) {
-    let Some(sender) = app.active_irc_sender().cloned() else {
+    let Some(_) = app.active_irc_sender() else {
         add_local_event(app, "Not connected");
         return;
     };
@@ -480,7 +480,7 @@ pub(crate) fn cmd_names(app: &mut App, args: &[String]) {
         args[0].clone()
     };
 
-    if let Err(e) = sender.send(irc::proto::Command::NAMES(Some(channel), None)) {
+    if let Err(e) = app.send_active_labeled_request(irc::proto::Command::NAMES(Some(channel), None)) {
         add_local_event(app, &format!("Failed to send NAMES: {e}"));
     }
 }
@@ -1256,8 +1256,8 @@ pub(crate) fn cmd_whois(app: &mut App, args: &[String]) {
         return;
     };
 
-    if let Some(sender) = app.active_irc_sender() {
-        if let Err(e) = sender.send(irc::proto::Command::WHOIS(target, nick)) {
+    if app.active_irc_sender().is_some() {
+        if let Err(e) = app.send_active_labeled_request(irc::proto::Command::WHOIS(target, nick)) {
             add_local_event(app, &format!("Failed to send WHOIS: {e}"));
         }
     } else {
@@ -1376,15 +1376,15 @@ pub(crate) fn cmd_away(app: &mut App, args: &[String]) {
 // === List ===
 
 pub(crate) fn cmd_list(app: &mut App, args: &[String]) {
-    let Some(sender) = app.active_irc_sender().cloned() else {
+    let Some(_) = app.active_irc_sender() else {
         add_local_event(app, "Not connected");
         return;
     };
 
     let result = if args.is_empty() {
-        sender.send(irc::proto::Command::LIST(None, None))
+        app.send_active_labeled_request(irc::proto::Command::LIST(None, None))
     } else {
-        sender.send(irc::proto::Command::LIST(Some(args[0].clone()), None))
+        app.send_active_labeled_request(irc::proto::Command::LIST(Some(args[0].clone()), None))
     };
     if let Err(e) = result {
         add_local_event(app, &format!("Failed to send LIST: {e}"));
@@ -1404,7 +1404,7 @@ pub(crate) fn cmd_who(app: &mut App, args: &[String]) {
         return;
     };
 
-    let Some(sender) = app.active_irc_sender().cloned() else {
+    let Some(_) = app.active_irc_sender() else {
         add_local_event(app, "Not connected");
         return;
     };
@@ -1415,12 +1415,12 @@ pub(crate) fn cmd_who(app: &mut App, args: &[String]) {
     let result = if let Some((who_target, fields)) =
         crate::irc::events::build_whox_who(&mut app.state, &conn_id, target, false)
     {
-        sender.send(irc::proto::Command::Raw(
+        app.send_active_labeled_request(irc::proto::Command::Raw(
             "WHO".to_string(),
             vec![who_target, fields],
         ))
     } else {
-        sender.send(irc::proto::Command::WHO(Some(target.clone()), None))
+        app.send_active_labeled_request(irc::proto::Command::WHO(Some(target.clone()), None))
     };
     if let Err(e) = result {
         add_local_event(app, &format!("Failed to send WHO: {e}"));
@@ -1435,12 +1435,12 @@ pub(crate) fn cmd_whowas(app: &mut App, args: &[String]) {
         return;
     }
 
-    let Some(sender) = app.active_irc_sender().cloned() else {
+    let Some(_) = app.active_irc_sender() else {
         add_local_event(app, "Not connected");
         return;
     };
 
-    if let Err(e) = sender.send(irc::proto::Command::WHOWAS(args[0].clone(), None, None)) {
+    if let Err(e) = app.send_active_labeled_request(irc::proto::Command::WHOWAS(args[0].clone(), None, None)) {
         add_local_event(app, &format!("Failed to send WHOWAS: {e}"));
     }
 }

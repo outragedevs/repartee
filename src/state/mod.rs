@@ -214,6 +214,7 @@ pub struct AppState {
     pub buffers: IndexMap<String, Buffer>,
     pub(crate) web_history_buffers: HashMap<String, String>,
     pub active_buffer_id: Option<String>,
+    pub irc_reply_buffer: Option<String>,
     pub previous_buffer_id: Option<String>,
     pub message_counter: u64,
     activity_counter: u64,
