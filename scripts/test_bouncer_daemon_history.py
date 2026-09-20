@@ -91,7 +91,7 @@ bouncer_network_id = '{os.environ['REPARTEE_BOUNCER_TEST_NETID']}'
                 assert 'fixture-browser-outgoing' not in diagnostic, 'Outgoing body entered diagnostics'
                 if cycle == 0 and os.environ.get('REPARTEE_DAEMON_LIVE_HISTORY'):
                     Path(os.environ['REPARTEE_HISTORY_CONTROL']).touch()
-                    deadline = time.monotonic() + 10
+                    deadline = time.monotonic() + 30
                     while time.monotonic() < deadline:
                         records = Path(os.environ['REPARTEE_PRESENCE_EVENTS']).read_text().splitlines()
                         if any(json.loads(line).get('offline_ack') for line in records):

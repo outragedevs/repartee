@@ -192,6 +192,7 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                                     break
                         assert "soju.im/bouncer-networks" in caps, "Capability probe did not reach the bouncer"
                         assert ("draft/chathistory" in caps) == live_history, "Unexpected history capability"
+                        assert ("soju.im/search" in caps) == (implementation == "soju" and live_history), "Unexpected search capability"
                     environment["REPARTEE_BOUNCER_TEST_NETID"] = str(settings.get("network", 1))
                     environment["REPARTEE_DAEMON_LIVE_HISTORY"] = "1"
                     environment["REPARTEE_MEMORY_HISTORY"] = str(int(memory_history))

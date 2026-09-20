@@ -1,7 +1,8 @@
 # Soju server-side search
 
-Status: isolation prerequisite merged in PR #88. Commands, result/context views
-and tests are implemented on `feat/bouncer-server-search`; validation is ongoing.
+Status: isolation prerequisite merged in PR #88; commands and result/context
+views merged in PR #89. The sections below distinguish the original development
+stages from subsequent runtime and persistence acceptance.
 
 ## Pinned provider behavior
 
@@ -154,3 +155,42 @@ Validation after the registration fix:
   search and context regressions finish their batch before any tick.
   Full Sol medium review round 10 is clean. All actionable findings from
   prior rounds were fixed before this final review.
+
+## Daemon persistence and browser acceptance
+
+The real-daemon `--live-history` scenario in
+`scripts/test_bouncer_presence.py` now also exercises search after live traffic
+and browser pagination. Run it with the pinned Soju checkout and a production
+daemon image as described in
+[bouncer-daemon-history.md](bouncer-daemon-history.md).
+
+For each of two daemon processes using the same isolated runtime directory, the
+compiled Chromium UI submits a sender-filtered search against the real Soju
+store. Incoming and outgoing texts both match the query, so requiring only
+Alice's rows verifies sender filtering. It checks the result count, requests surrounding
+history with `/bsearch context 1`, replaces the view with an empty search,
+reloads that empty view, and closes it. The ordinary conversation's message rows
+must remain identical, and no result may be pushed as a live or inserted message
+into that conversation. Normal presence events caused by browser detach/reattach
+are allowed and are not search results.
+
+After each shutdown, the existing daemon runner inspects SQLite and the TRACE
+diagnostic file. Only local startup events may persist; live, replayed, searched
+and context message bodies must be absent. Thus the display checks cannot pass
+merely by discarding search results before they reach the UI.
+
+The same browser command on Lurker and Soju's memory-only store must produce the
+unsupported-search explanation without creating a result view. The direct CAP
+probe verifies that search is advertised only in the supported Soju database
+scenario. Both unsupported paths are also covered by the disk/log inspection.
+
+This adds actual process/browser/storage evidence for successful, empty and
+unsupported search. It does not replace the existing request-correlation unit
+regressions or claim process-level coverage of every timeout, cancellation,
+capability-withdrawal and transport-error path.
+
+The offline PING barrier allows 30 seconds: the pinned Soju upstream writer
+queues PONG behind normal commands and rate-limits them at two seconds per
+message (`conn.go`, `server.go`). Browser reloads add real AWAY transitions;
+a ten-second barrier can expire despite healthy delivery. The runner still
+requires a received PONG before starting the next daemon.
