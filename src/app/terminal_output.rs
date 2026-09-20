@@ -57,6 +57,7 @@ impl App {
                 self.inline_previews.finish_frame(key);
                 self.terminal = Some(terminal);
                 self.write_tmux_direct_image();
+                self.mark_terminal_read();
             }
             Err(error) => {
                 if let Some(output) = &output {

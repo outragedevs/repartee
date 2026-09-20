@@ -224,6 +224,7 @@ pub fn ChatView() -> impl IntoView {
             return;
         };
         do_pin(&web_sys::Element::from(el));
+        state.mark_rendered_tail_read();
     };
 
     // Send an older-history `FetchMessages` for the active buffer using the
@@ -367,6 +368,10 @@ pub fn ChatView() -> impl IntoView {
         let _ = state.font_size_override.get();
         let _ = state.line_height_override.get();
         let _ = state.line_height.get();
+        let _ = state.wizard_open.get();
+        let _ = state.emote_picker_open.get();
+        let _ = state.emoji_picker_open.get();
+        let _ = state.appearance_open.get();
         if !state.scroll_mode.get().is_following_tail() {
             return;
         }
@@ -671,6 +676,7 @@ pub fn ChatView() -> impl IntoView {
         if next.is_following_tail() {
             state.scroll_mode.set(next);
             debug_log(state, "scrolled back to bottom → FollowingTail");
+            state.mark_rendered_tail_read();
             // Collapse the loaded backlog window (free the older lines, re-arm
             // scroll-up).
             if let Some(id) = state.active_buffer.get_untracked() {
@@ -772,6 +778,10 @@ pub fn ChatView() -> impl IntoView {
         move |_| scrollbar_grab.set_value(false),
     );
     on_cleanup(move || mouse_release.remove());
+    let focus_return = leptos::leptos_dom::helpers::window_event_listener(leptos::ev::focus, move |_| {
+        pin_if_following(switch_generation.get_value());
+    });
+    on_cleanup(move || focus_return.remove());
 
     // Keyboard scrolling, when the container has focus.
     let on_key_down = move |ev: web_sys::KeyboardEvent| {

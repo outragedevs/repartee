@@ -209,3 +209,10 @@ large to review, retaining the acceptance rows and dependencies.
   stored history; the Soju upstream is disabled. This does not yet establish
   complete enumeration across large timestamp ties or targets filtered after
   LIMIT; these remain acceptance gaps, alongside the remaining extension matrix.
+
+Read-marker work in progress: native and web read actions resolve displayed
+message IDs to server timestamps; background terminal focus and history scrolling
+do not advance markers. Pending updates retry and are isolated by network scope.
+The pinned integration fixture now checks server persistence and notification of
+a second client for `draft/read-marker`. Legacy Soju `READ` has isolated protocol
+regressions. Aggregate presence remains a separate pending part of stage 6.

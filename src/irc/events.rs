@@ -73,6 +73,7 @@ fn clear_rejected_join_focus(state: &mut AppState, conn_id: &str, command: &Comm
     reason = "IRC command dispatcher — one arm per message type"
 )]
 pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage) {
+    state.record_read_account_message(conn_id, msg);
     clear_rejected_join_focus(state, conn_id, &msg.command);
     let our_nick = state
         .connections
@@ -620,7 +621,9 @@ pub fn handle_cap_new(
     let to_request: Vec<String> = new_caps
         .iter()
         .filter(|cap| {
-            DESIRED_CAPS.iter().any(|d| d.eq_ignore_ascii_case(cap))
+            (DESIRED_CAPS.iter().any(|d| d.eq_ignore_ascii_case(cap))
+                || (state.connections.get(conn_id).is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some() && !conn.origin_config.bouncer_control)
+                    && matches!(cap.as_str(), "draft/read-marker" | "soju.im/read")))
                 && enabled.is_none_or(|set| !set.contains(cap.as_str()))
         })
         .cloned()
@@ -772,6 +775,10 @@ pub fn handle_cap_ack(
         for cap in &acked_caps {
             conn.enabled_caps.insert(cap.clone());
         }
+    }
+
+    if acked_caps.iter().any(|cap| matches!(cap.as_str(), "draft/read-marker" | "soju.im/read")) {
+        state.activate_connection_read_markers(conn_id);
     }
 
     // Log to server status buffer
@@ -1623,6 +1630,7 @@ fn handle_privmsg(
 
     // account-tag: update NickEntry.account from message tags (supplementary)
     if let Some(tag_account) = tags.as_ref().and_then(|t| t.get("account")) {
+        state.record_read_account(conn_id, &nick, Some(tag_account));
         let account = if tag_account == "*" {
             None
         } else {
@@ -2079,6 +2087,10 @@ fn handle_join(
             .and_then(|a| if a == "*" { None } else { Some(a.clone()) })
     });
 
+    if fields.account.is_some() || tags.as_ref().is_some_and(|tags| tags.contains_key("account")) {
+        state.record_read_account(conn_id, &nick, account.as_deref());
+    }
+
     // extended-join: realname from third JOIN arg
     let realname = fields.realname.unwrap_or("");
 
@@ -2265,6 +2277,7 @@ fn update_nick_account_in_buffers(
     nick: &str,
     account: Option<&str>,
 ) {
+    state.record_read_account(conn_id, nick, account);
     let nick_lower = nick.to_lowercase();
     for buf in state.buffers.values_mut() {
         if buf.connection_id != conn_id {
@@ -3071,8 +3084,11 @@ fn handle_nick_change(
 ) {
     let old_nick = extract_nick(prefix).unwrap_or_default();
 
+    if old_nick.eq_ignore_ascii_case(our_nick) {
+        state.record_read_nick_change(conn_id, &old_nick, new_nick, message_timestamp(tags.as_ref()).timestamp_millis());
+    }
     // Update our own nick if it's us
-    if old_nick == our_nick
+    if old_nick.eq_ignore_ascii_case(our_nick)
         && let Some(conn) = state.connections.get_mut(conn_id)
     {
         conn.nick = new_nick.to_string();
@@ -5030,6 +5046,11 @@ fn update_who_nick_entry(
     away: bool,
     account: WhoAccount,
 ) {
+    if let WhoAccount::Set(ref account) = account
+        && let Some((conn_id, _)) = buffer_id.split_once('/')
+    {
+        state.record_read_account(conn_id, nick, account.as_deref());
+    }
     if let Some(buf) = state.buffers.get_mut(buffer_id)
         && let Some(entry) = buf.users.get_mut(&nick.to_lowercase())
     {

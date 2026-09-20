@@ -1058,6 +1058,9 @@ async fn negotiate_caps(
 
         // Compute capabilities to request
         let mut caps_to_request = server_caps.negotiate(DESIRED_CAPS);
+        if params.bouncer_network_id.is_some() && !params.bouncer_control {
+            caps_to_request.extend(cap::bouncer_read_caps(&server_caps));
+        }
         if params.bouncer_network_id.is_some() || params.bouncer_control {
             caps_to_request.push(bouncer::NETWORKS_CAP.to_string());
             if params.bouncer_control && server_caps.has(bouncer::NETWORKS_NOTIFY_CAP) {

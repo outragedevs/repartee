@@ -96,7 +96,8 @@ impl super::App {
         for buffer in buffers {
             self.state.remove_buffer(&buffer);
         }
-        self.state.connections.remove(id);
+        self.state.remove_connection(id);
+        self.read_markers.remove(id);
         self.state.background_join_connections.remove(id);
         self.state
             .pending_web_events
@@ -800,6 +801,7 @@ async fn pinned_bouncer_generated_children() {
             app.handle_irc_event(event);
         }
     }).await.expect("TARGETS discovery did not finish");
+    verify_pinned_read_markers(&mut app, &id, &buffer_id).await;
     while let Ok(row) = log_rx.try_recv() {
         assert_ne!(row.buffer, "history-peer");
         assert_ne!(row.buffer, "#history-channel");
@@ -812,4 +814,54 @@ async fn pinned_bouncer_generated_children() {
     );
     app.cancel_connection_attempt("fixture");
     app.irc_handles.remove("fixture");
+}
+
+#[cfg(test)]
+async fn verify_pinned_read_markers(app: &mut crate::app::App, id: &str, buffer_id: &str) {
+    assert!(app.state.connections[id].enabled_caps.contains("draft/read-marker"));
+    assert_eq!(app.state.buffers[buffer_id].unread_count, 300);
+    let mut observer_config = app.state.connections[id].origin_config.clone();
+    observer_config.sasl_user = Some(std::env::var("REPARTEE_BOUNCER_TEST_USER").unwrap());
+    observer_config.sasl_pass = Some("fixture-password".into());
+    let (observer, mut observer_events) = crate::irc::connect_server("marker-observer", &observer_config, &app.config.general).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(event) = observer_events.recv().await {
+            if let crate::irc::IrcEvent::Connected(_, caps, _) = event {
+                assert!(caps.contains("draft/read-marker"));
+                return;
+            }
+        }
+        panic!("observer disconnected during registration");
+    }).await.unwrap();
+    let seen = &app.state.buffers[buffer_id].messages[149];
+    let (seen_id, seen_time) = (seen.id, seen.timestamp.timestamp_millis());
+    app.mark_visible_message_read(buffer_id, seen_id);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while app.confirmed_read_marker(id, "history-peer") != Some(seen_time) {
+            let event = app.irc_rx.recv().await.expect("connection closed during MARKREAD");
+            app.handle_irc_event(event);
+        }
+    }).await.expect("server did not acknowledge the read marker");
+    assert_eq!(app.state.buffers[buffer_id].unread_count, 150);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let expected = crate::irc::chathistory::rfc3339_millis(seen_time);
+        while let Some(event) = observer_events.recv().await {
+            if let crate::irc::IrcEvent::Message(_, message) = event
+                && let irc::proto::Command::Raw(command, params) = &message.command
+                && command == "MARKREAD" && params == &["history-peer".to_string(), format!("timestamp={expected}")] {
+                return;
+            }
+        }
+        panic!("observer disconnected before receiving remote read marker");
+    }).await.expect("read marker was not synchronized to another client");
+    drop(observer);
+    drop(observer_events);
+    app.reconnect_read_markers(id);
+    app.tick_read_markers();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while app.confirmed_read_marker(id, "history-peer") != Some(seen_time) {
+            let event = app.irc_rx.recv().await.expect("connection closed during read-marker query");
+            app.handle_irc_event(event);
+        }
+    }).await.expect("server did not return the stored read marker");
 }
