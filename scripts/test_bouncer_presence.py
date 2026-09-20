@@ -13,7 +13,7 @@ import tempfile
 from test_bouncer_binding import PINS, ROOT, run, wait_ready
 
 
-def scenario(implementation, source, auto_away, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, filehost=False, oauth=False):
+def scenario(implementation, source, auto_away, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, filehost=False, oauth=False, upstream_auth=False):
     with tempfile.TemporaryDirectory(prefix="bouncer-presence-", dir="/tmp") as directory:
         temporary = Path(directory)
         processes = []
@@ -47,6 +47,7 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                     *(["--invites"] if invites else []),
                     *(["--names"] if names else []),
                     *(["--redaction"] if redaction else []),
+                    *(["--upstream-auth"] if upstream_auth else []),
                 ], stdout=log, stderr=log)
                 processes.append(upstream)
                 wait_ready(upstream, ready.exists)
@@ -126,6 +127,15 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                 if oauth:
                     environment["REPARTEE_OAUTH_TEST_CA"] = str(temporary / "ca.pem")
                     test_filter = "pinned_bouncer_oauthbearer"
+                if upstream_auth:
+                    secrets = temporary / "auth.env"
+                    secrets.write_text("UPSTREAM_PASSWORD=disposable\u00a0password\nWRONG_PASSWORD=invalid password\n")
+                    secrets.chmod(0o600)
+                    environment["REPARTEE_UPSTREAM_AUTH_ENV"] = str(secrets)
+                    environment["REPARTEE_SOJU_TEST_DB"] = str(temporary / "main.db")
+                    environment["REPARTEE_SOJU_TEST_CLI"] = str(source / "sojuctl")
+                    environment["REPARTEE_SOJU_TEST_CONFIG"] = str(temporary / "config")
+                    test_filter = "pinned_bouncer_upstream_auth"
                 if setname:
                     environment["REPARTEE_SETNAME_BOUND"] = "1"
                     environment["REPARTEE_BOUNCER_TEST_PROVIDER"] = implementation
@@ -182,14 +192,17 @@ def main():
     parser.add_argument("--redaction", action="store_true")
     parser.add_argument("--filehost", action="store_true")
     parser.add_argument("--oauth", action="store_true")
+    parser.add_argument("--upstream-auth", action="store_true")
     args = parser.parse_args()
+    if args.upstream_auth and args.implementation == "soju" and not args.oauth:
+        parser.error("--upstream-auth requires --oauth for its verified TLS fixture")
     if args.oauth and args.implementation != "soju":
         parser.error("OAUTHBEARER is only advertised by Soju")
     source = args.source.resolve()
     head = run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True).stdout.strip()
     if head != PINS[args.implementation]:
         raise RuntimeError("Upstream checkout does not match the audited revision")
-    scenario(args.implementation, source, True, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.filehost, args.oauth)
+    scenario(args.implementation, source, True, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.filehost, args.oauth, args.upstream_auth)
     if args.implementation == "soju" and not args.setname and not args.monitor and not args.monitor_unavailable and not args.invites and not args.names and not args.redaction and not args.filehost and not args.oauth:
         scenario(args.implementation, source, False)
 

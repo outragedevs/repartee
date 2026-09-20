@@ -25,6 +25,7 @@ mod labels;
 #[cfg(test)]
 mod labels_tests;
 pub mod bouncer;
+pub mod upstream_auth;
 mod bouncer_children;
 mod server_history;
 mod history_discovery;
@@ -411,6 +412,7 @@ pub struct App {
     pub ui_regions: Option<UiRegions>,
     pub irc_handles: HashMap<String, IrcHandle>,
     pub(crate) bouncer_children: HashMap<String, bouncer_children::ChildNetwork>,
+    pub(crate) upstream_auth: HashMap<String, upstream_auth::Session>,
     pub(crate) bouncer_mutations: HashMap<String, bouncer_management::Pending>,
     pub(crate) bouncer_networks: HashMap<String, crate::irc::bouncer::NetworkRegistry>,
     pub(crate) connection_attempts: HashMap<String, u64>,
@@ -886,6 +888,7 @@ impl App {
             irc_handles: HashMap::new(),
             bouncer_children: HashMap::new(),
             bouncer_mutations: HashMap::new(),
+            upstream_auth: HashMap::new(),
             bouncer_networks: HashMap::new(),
             connection_attempts: HashMap::new(),
             forwarder_handles: HashMap::new(),
@@ -1676,6 +1679,7 @@ impl App {
                     self.tick_read_markers();
                     self.tick_bouncer_presence();
                     self.tick_bouncer_mutations();
+                    self.tick_upstream_auth();
                     self.tick_monitors();
                     self.tick_labels();
                     self.check_reconnects();

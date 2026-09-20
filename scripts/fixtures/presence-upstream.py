@@ -1,11 +1,13 @@
 import argparse
+import base64
 import asyncio
 import json
 from pathlib import Path
 
 
 class PresenceServer:
-    def __init__(self, events, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False):
+    def __init__(self, events, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, upstream_auth=False):
+        self.upstream_auth = upstream_auth
         self.redaction = redaction
         self.setname = setname
         self.invites = invites
@@ -27,8 +29,11 @@ class PresenceServer:
         negotiating = False
         registered = False
         monitored = set()
+        sasl_payload = ""
         monitor_available = self.monitor and not self.monitor_unavailable
         capabilities = {"setname"} if self.setname else set()
+        if self.upstream_auth:
+            capabilities.add("sasl")
         if self.invites:
             capabilities.add("invite-notify")
         if self.redaction:
@@ -59,12 +64,35 @@ class PresenceServer:
                 if command == 'CAP' and params:
                     if params[0].upper() == 'LS':
                         negotiating = True
-                        send(f':fixture.local CAP {nick} LS :{" ".join(sorted(capabilities))}')
+                        send(f':fixture.local CAP {nick} LS :{" ".join("sasl=PLAIN" if cap == "sasl" else cap for cap in sorted(capabilities))}')
                     elif params[0].upper() == 'REQ':
                         reply = 'ACK' if set(params[-1].split()) <= capabilities else 'NAK'
                         send(f':fixture.local CAP {nick} {reply} :{params[-1]}')
                     elif params[0].upper() == 'END':
                         negotiating = False
+                elif command == 'AUTHENTICATE' and self.upstream_auth and params:
+                    chunk = params[0]
+                    if chunk == 'PLAIN':
+                        sasl_payload = ''
+                        send('AUTHENTICATE +')
+                    elif chunk == '*':
+                        sasl_payload = ''
+                        send(f':fixture.local 906 {nick} :Aborted')
+                    else:
+                        if chunk != '+':
+                            sasl_payload += chunk
+                        if len(chunk) < 400:
+                            try:
+                                fields = base64.b64decode(sasl_payload, validate=True).decode().split('\0')
+                                success = len(fields) == 3 and fields[1:] == ['irc-account', 'disposable password']
+                            except (ValueError, UnicodeError):
+                                success = False
+                            with self.events.open('a') as output:
+                                output.write(json.dumps({'connection': connection, 'upstream_auth': success}) + '\n')
+                            if success:
+                                send(f':fixture.local 900 {nick} {nick}!fixture@localhost irc-account :Logged in')
+                            send(f':fixture.local {903 if success else 904} {nick} :Authentication result')
+                            sasl_payload = ''
                 elif command == 'NICK' and params:
                     nick = params[0]
                 elif command == 'USER':
@@ -187,8 +215,9 @@ async def main():
     parser.add_argument('--invites', action='store_true')
     parser.add_argument('--names', action='store_true')
     parser.add_argument('--redaction', action='store_true')
+    parser.add_argument('--upstream-auth', action='store_true')
     args = parser.parse_args()
-    fixture = PresenceServer(args.events, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction)
+    fixture = PresenceServer(args.events, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.upstream_auth)
     server = await asyncio.start_server(fixture.client, '127.0.0.1', 0)
     args.ready.write_text(json.dumps({'port': server.sockets[0].getsockname()[1]}))
     async with server:

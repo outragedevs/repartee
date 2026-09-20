@@ -345,6 +345,7 @@ impl App {
                 }
             }
             IrcEvent::HandleReady(handle) => {
+                self.upstream_auth.remove(&handle.conn_id);
                 // Store local IP on Connection state (for DCC own-IP fallback)
                 if let Some(conn) = self.state.connections.get_mut(&handle.conn_id) {
                     conn.local_ip = handle.local_ip;
@@ -549,6 +550,7 @@ impl App {
                 // limits/ref types and could be rejected for non-membership.
             }
             IrcEvent::Disconnected(conn_id, error) => {
+                self.upstream_auth.remove(&conn_id);
                 self.reset_monitor(&conn_id);
                 self.disconnect_bouncer_mutation(&conn_id);
 
@@ -605,6 +607,7 @@ impl App {
                 self.channel_query_sent_at.remove(&conn_id);
             }
             IrcEvent::Message(conn_id, msg) => {
+                if self.handle_upstream_auth(&conn_id, &msg) { return; }
                 if self.handle_bouncer_mutation(&conn_id, &msg) { return; }
                 if self.handle_bouncer_network_message(&conn_id, &msg) {
                     return;

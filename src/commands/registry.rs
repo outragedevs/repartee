@@ -24,6 +24,12 @@ use super::types::{CommandCategory, CommandDef};
 
 static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
     vec![
+        ("auth", CommandDef {
+            handler: crate::app::upstream_auth::command,
+            description: "Authenticate an upstream IRC account using a password secret reference",
+            aliases: &[],
+            category: CommandCategory::Connection,
+        }),
         ("upload", CommandDef {
             handler: crate::app::filehost::command,
             description: "Upload a file through the bouncer: /upload <path> [content-type]",

@@ -1013,6 +1013,45 @@ by the exact mask pattern.</p>
 <p>/ignore</p>
 </div>
 <h2 id="cat-connection">Connection</h2>
+<div class="command-entry" data-command="auth" data-category="Connection">
+<h1>/auth</h1>
+<h2>Syntax</h2>
+<pre><code>/auth login [-allow-insecure-upstream] &lt;IRC-account&gt; &lt;password-env-name&gt;
+/auth clear -YES
+</code></pre>
+<h2>Description</h2>
+<p>Authenticate the active bound bouncer network to its upstream IRC account.
+This requires a verified TLS connection and upstream SASL advertised by the
+bouncer after registration. It does not replace your bouncer login credentials.
+The pinned Soju implementation supports these operations; Lurker does not.</p>
+<p>The bouncer&#39;s upstream network must advertise <code>tls=1</code> through network discovery.
+If the upstream uses plaintext or its TLS state is unknown (including manually
+bound connections without discovery metadata), login is refused before loading
+the secret. <code>/auth login -allow-insecure-upstream &lt;account&gt; &lt;password-env-name&gt;</code>
+explicitly overrides this upstream check: SASL PLAIN can then expose the IRC
+password between the bouncer and IRC server. This does not bypass the verified
+TLS requirement between this client and the bouncer. Clearing saved credentials
+does not transmit a password upstream and does not need this override.</p>
+<p>Store the IRC account password in the application&#39;s <code>.env</code> file and pass the
+name of that variable, not its value. For example, with an <code>IRC_ACCOUNT_PASSWORD</code>
+entry, use <code>/auth login my-account IRC_ACCOUNT_PASSWORD</code>. No password is entered
+into the native or web command history. The result appears in that connection&#39;s
+server buffer, even if you switch to another network while waiting.</p>
+<p>On successful login, Soju saves the upstream credentials for reconnects.
+<code>/auth clear -YES</code> removes the network&#39;s saved SASL credentials on the bouncer,
+including any SASL EXTERNAL certificate and private key. This is not a command
+to log out of the bouncer, and it does not guarantee a live upstream logout.</p>
+<p>Only one unresolved authentication operation is allowed per connection.
+Timeouts report an unknown outcome; wait for a terminal reply or reconnect and
+check the account state before retrying. This command does not create or verify
+an IRC account; those operations are separate.</p>
+<h2>Examples</h2>
+<pre><code>/auth login my-account IRC_ACCOUNT_PASSWORD
+/auth clear -YES
+</code></pre>
+<h2>See Also</h2>
+<p>/bouncer, /server, /set</p>
+</div>
 <div class="command-entry" data-command="bouncer" data-category="Connection">
 <h1>/bouncer</h1>
 <h2>Syntax</h2>
