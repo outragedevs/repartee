@@ -10,6 +10,7 @@ const assert = require('node:assert/strict');
     let connected = false;
     const pages = [];
     const live = [];
+    const inserted = [];
     const errors = [];
     page.on('pageerror', error => errors.push(String(error)));
     page.on('websocket', socket => socket.on('framereceived', event => {
@@ -18,6 +19,7 @@ const assert = require('node:assert/strict');
       if (data.type === 'ConnectionStatus' && data.conn_id === 'fixture') connected = data.connected;
       if (data.type === 'Messages') pages.push(data);
       if (data.type === 'NewMessage') live.push(data.message.text);
+      if (data.type === 'NewMessage' || data.type === 'InsertMessage') inserted.push(data);
     }));
     await page.goto(process.env.REPARTEE_DAEMON_TEST_URL);
     await page.locator('input[type=password]').fill('fixture-web-password');
@@ -73,7 +75,38 @@ const assert = require('node:assert/strict');
     for (const text of [`fixture-memory-incoming-${cycle}`, `fixture-memory-outgoing-${cycle}`]) {
       assert.equal(await page.locator('.chat-line').filter({hasText: text}).count(), 1, `Duplicate visible message: ${text}`);
     }
+    const command = async text => { await input.fill(text); await input.press('Enter'); };
+    const searchButton = page.locator('.buffer-list button:visible').filter({has: page.locator('.name').filter({hasText: /^\*search\*$/})});
+    const searchSupported = process.env.REPARTEE_PRESENCE_PROVIDER === 'soju' && !memoryStore;
+    const beforeSearch = inserted.length;
+    const conversation = await page.locator('.chat-line').filter({hasText: 'fixture-memory-'}).allTextContents();
+    await command('/bsearch Alice -from Alice -- fixture-memory-');
+    if (searchSupported) {
+      await page.locator('.chat-line').filter({hasText: `${Number(cycle) * 2 + 1} search results in Alice`}).waitFor();
+      assert.equal(await page.locator('.chat-line').filter({hasText: `fixture-memory-incoming-${cycle}`}).count(), 1);
+      assert.equal(await page.locator('.chat-line').filter({hasText: 'fixture-memory-outgoing-'}).count(), 0);
+      await command('/bsearch context 1');
+      await page.locator('.chat-line').filter({hasText: 'context messages in Alice'}).waitFor();
+      assert.equal(await page.locator('.chat-line').filter({hasText: `fixture-memory-outgoing-${cycle}`}).count(), 1);
+      await command('/bsearch Alice -- absent-fixture-search-token');
+      await page.locator('.chat-line').filter({hasText: '0 search results in Alice'}).waitFor();
+      assert.equal(await page.locator('.chat-line').filter({hasText: 'fixture-memory-'}).count(), 0);
+      await page.reload();
+      await input.waitFor();
+      await searchButton.click();
+      await page.locator('.chat-line').filter({hasText: '0 search results in Alice'}).waitFor();
+      await command('/close');
+      await searchButton.waitFor({state: 'detached'});
+      await alice.click();
+      await page.locator('.chat-line').filter({hasText: `fixture-memory-outgoing-${cycle}`}).waitFor();
+      assert.deepEqual(await page.locator('.chat-line').filter({hasText: 'fixture-memory-'}).allTextContents(), conversation, 'Search changed the live conversation messages');
+    } else {
+      await page.locator('.chat-line').filter({hasText: 'Server search requires a connected bouncer network with acknowledged search'}).waitFor();
+      assert.equal(await searchButton.count(), 0);
+    }
+    assert.equal(inserted.slice(beforeSearch).filter(event => event.buffer_id.toLowerCase() === 'fixture/alice' && event.message.text.startsWith('fixture-memory-')).length, 0,
+      'Search results entered the live conversation event stream');
     assert.deepEqual(errors, []);
-    console.log('PASS: real incoming/outgoing messages, restart history, browser reload, exhausted history page.');
+    console.log('PASS: real incoming/outgoing messages, restart history, browser reload, exhausted history page, isolated search or unsupported refusal.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

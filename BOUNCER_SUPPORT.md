@@ -539,3 +539,9 @@ delivery, hydration of prior and offline messages after daemon restart, and
 exhaustion of older pages. SQLite and diagnostic exclusion are checked after each
 process lifecycle. The evidence and remaining boundaries are described in
 `docs/validation/bouncer-daemon-history.md`.
+
+The live daemon/browser fixture additionally checks Soju search results and
+AROUND context, empty-result replacement/reload, normal-conversation isolation,
+and local persistence exclusion. Lurker and Soju memory-store runs verify the
+unsupported-search path. See `docs/validation/bouncer-server-search.md`; full
+transport-error persistence coverage remains open.
