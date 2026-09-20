@@ -247,8 +247,18 @@ review. Real-server evidence covers restored availability, independent metadata
 notifications after CAP ACK, and initially unsupported upstreams. Lurker's hidden
 dynamic ISUPPORT withdrawal remains explicitly documented.
 
-The next increment on `fix/invite-network-isolation` verifies invitations,
-connection-scoped routing, local-history exclusion and native/web presentation. Remaining
-increments must still cover other dynamic capability
-behavior, labeled replies, redaction, invitations, ISUPPORT/names and upstream
-account operations; no remaining row is dropped.
+Invitations merged in https://github.com/outragedevs/repartee/pull/76 after two
+clean Sol medium reviews. Connection-scoped routing, local-history exclusion,
+case mapping, native/web notification payloads and rendered real-server events
+are documented in `docs/validation/bouncer-invitations.md`.
+
+The `feat/explicit-bouncer-names` increment implements Soju's three
+no-implicit-names aliases and explicitly populates nicklists when negotiated,
+while retaining Lurker's implicit NAMES behavior. Unit tests, two-channel reconnect
+fixtures against both pinned bouncers, and a clean Sol medium review passed; see
+`docs/validation/bouncer-names.md`.
+
+The next increment covers labeled replies and live/nested batch routing, including
+own JOIN and NAMES completion through those paths. Remaining increments must still
+cover other dynamic capability behavior, redaction, ISUPPORT and upstream account
+operations, as well as every other acceptance row above; no remaining row is dropped.

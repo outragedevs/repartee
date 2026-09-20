@@ -95,7 +95,7 @@ def main():
                 })
                 test_args = f"{args.test_filter} -- --ignored"
                 if args.test_filter == "pinned_bouncer_":
-                    test_args += " --skip pinned_bouncer_presence --skip pinned_bouncer_network_management --skip pinned_bouncer_setname --skip pinned_bouncer_monitor --skip pinned_bouncer_no_monitor --skip pinned_bouncer_invites"
+                    test_args += " --skip pinned_bouncer_presence --skip pinned_bouncer_network_management --skip pinned_bouncer_setname --skip pinned_bouncer_monitor --skip pinned_bouncer_no_monitor --skip pinned_bouncer_invites --skip pinned_bouncer_names"
                 run(["make", "test", f"TEST_ARGS={test_args}"],
                     cwd=ROOT, env=environment)
                 print(f"{args.implementation}: {args.test_filter} fixture passed")

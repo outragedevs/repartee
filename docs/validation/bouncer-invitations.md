@@ -1,7 +1,7 @@
 # Bouncer invitation validation
 
-Status: implementation and validation complete on `fix/invite-network-isolation`;
-final review and merge are pending.
+Status: merged in https://github.com/outragedevs/repartee/pull/76 after two clean
+Sol medium reviews.
 
 ## Verified defect and behavior
 
@@ -45,5 +45,5 @@ characters. `/tmp/repartee-invite-browser1.log` passed without browser errors;
 `/tmp/repartee-invite-soju-self-web.png` was visually inspected. This browser replay
 covers rendering of captured events, not a live browser-to-bouncer connection.
 
-First pinned Sol medium review returned no actionable findings. A final round is
-requested because the fixture's web receiver changed during the first review.
+Both pinned Sol medium review rounds returned no actionable findings; the second
+review checked the committed tree after the fixture web receiver was corrected.
