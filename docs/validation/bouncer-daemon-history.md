@@ -152,3 +152,27 @@ This covers an unexpected downstream TCP close, offline browsing, rejected send,
 and automatic recovery for both providers, including Soju without CHATHISTORY.
 It does not claim TLS-failure coverage, a partial history-batch timeout, or a
 restart of the provider itself. Those require separate evidence.
+
+
+## Interrupted batches in actual daemon processes
+
+Set `REPARTEE_DAEMON_PARTIAL_HISTORY=1` when running the existing binding runner
+with `--daemon-image`. The daemon runner installs a TCP proxy in front of the
+actual pinned provider. The proxy observes a real BETWEEN request, forwards its
+batch opener and exactly one message, then closes the transport before the batch
+terminator. On Soju, a second proxy repeats this sequence for a real SEARCH
+response. Lurker does not expose SEARCH.
+
+The compiled Chromium UI asserts that no partial rows are shown as completed
+results, waits for automatic reconnect after the proxy resumes forwarding,
+retries and receives exact expected results. Browser reload retains those
+transient results without duplicates. The parent runner then stops the daemon,
+inspects SQLite and TRACE output, and starts a second daemon on the same data
+directory for the original history acceptance scenario.
+
+Both pinned providers pass. Each database contains only the expected local
+startup events; server history, outgoing conversation bodies and search results
+do not enter SQLite or TRACE. This is actual process, socket, browser and storage
+evidence, unlike the older interruption after completed operations. The tested
+image uses source `a0ced811e69cb99d456a3489b1f853562ce16a08`, including the special
+buffer persistence fix, and the published `irc-repartee` 1.5.2 dependency.

@@ -55,6 +55,9 @@ async function assertEventually(predicate) {
     await page.locator('#chat-input').fill(command);
     await page.locator('#chat-input').press('Enter');
     await assertEventually(() => outgoingSent && commandProcessed);
+    if (process.env.REPARTEE_HISTORY_FAULT_CONTROL) {
+      await require('./daemon-partial-history.cjs')(page);
+    }
     assert.deepEqual(errors, []);
     if (process.env.REPARTEE_DAEMON_SCREENSHOT) await page.screenshot({path: process.env.REPARTEE_DAEMON_SCREENSHOT});
     console.log('PASS: actual daemon HTTPS login, compiled Chromium UI and server-backed history scrolling.');

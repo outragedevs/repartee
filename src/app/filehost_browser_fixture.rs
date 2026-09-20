@@ -3,6 +3,10 @@ use std::sync::Arc;
 use super::App;
 
 pub async fn run(app: &mut App, script: &str) {
+    run_with_tick(app, script, |_| {}).await;
+}
+
+pub async fn run_with_tick(app: &mut App, script: &str, tick: fn(&mut App)) {
     use crate::web::{auth::{SessionStore, RateLimiter}, server::{AppHandle, WebStateSnapshot}};
     let sessions = Arc::new(tokio::sync::Mutex::new(SessionStore::with_days(vec![0; 32], 1)));
     let cookie = sessions.lock().await.create("disposable browser fixture");
@@ -36,6 +40,7 @@ pub async fn run(app: &mut App, script: &str) {
             while let Ok((command, session)) = app.web_cmd_rx.try_recv() { app.handle_web_command(command, &session); }
             while let Ok(result) = app.upload_rx.try_recv() { app.finish_upload(result); }
             app.tick_bouncer_webpush();
+            tick(app);
             app.drain_pending_web_events();
             if let Some(status) = browser.try_wait().unwrap() { return status; }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
