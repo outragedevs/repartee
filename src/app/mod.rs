@@ -29,6 +29,7 @@ pub mod upstream_auth;
 pub mod account_registration;
 pub mod server_search;
 pub mod bouncer_metadata;
+pub mod bouncer_certificates;
 mod bouncer_children;
 mod server_history;
 mod history_discovery;
@@ -415,6 +416,7 @@ pub struct App {
     pub ui_regions: Option<UiRegions>,
     pub irc_handles: HashMap<String, IrcHandle>,
     pub(crate) bouncer_children: HashMap<String, bouncer_children::ChildNetwork>,
+    pub(crate) bouncer_certificates: HashMap<String, bouncer_certificates::Operation>,
     pub(crate) bouncer_metadata: HashMap<String, bouncer_metadata::Session>,
     pub(crate) server_search_views: HashMap<String, String>,
     pub(crate) server_search: HashMap<String, server_search::Pending>,
@@ -898,6 +900,7 @@ impl App {
             upstream_auth: HashMap::new(),
             account_registration: HashMap::new(),
             bouncer_metadata: HashMap::new(),
+            bouncer_certificates: HashMap::new(),
             server_search: HashMap::new(),
             server_search_views: HashMap::new(),
             bouncer_networks: HashMap::new(),
@@ -1695,6 +1698,7 @@ impl App {
                     self.tick_account_registration();
                     self.tick_server_search();
                     self.tick_bouncer_metadata();
+                    self.tick_bouncer_certificates();
                     self.tick_monitors();
                     self.tick_labels();
                     self.check_reconnects();

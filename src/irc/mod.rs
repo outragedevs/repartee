@@ -64,6 +64,7 @@ pub enum IrcEvent {
 
 /// Result of `IRCv3` capability negotiation.
 struct NegotiateResult {
+    sasl_authenticated: bool,
     account_registration_rules: Option<String>,
     /// Capabilities successfully enabled via `CAP REQ` / `CAP ACK`.
     enabled_caps: HashSet<String>,
@@ -810,6 +811,7 @@ pub async fn connect_server(
     };
     let mut neg = result?;
     let account_registration_rules = neg.account_registration_rules.take();
+    let sasl_authenticated = neg.sasl_authenticated;
 
     let (tx, rx) = mpsc::channel(4096);
     let id = conn_id.to_string();
@@ -917,6 +919,7 @@ pub async fn connect_server(
     let mut handle = IrcHandle::new(id2, sender, local_ip, outgoing.0.take());
     handle.reader_handle = Some(reader);
     handle.account_registration_rules = account_registration_rules;
+    handle.sasl_authenticated = sasl_authenticated;
     Ok((handle, rx))
 }
 
@@ -1087,6 +1090,7 @@ async fn negotiate_caps(
             caps_to_request.extend(server_caps.negotiate(&["draft/pre-away"]));
         }
         if params.bouncer_network_id.is_some() || params.bouncer_control {
+            caps_to_request.extend(server_caps.negotiate(&["soju.im/client-cert"]));
             caps_to_request.push(bouncer::NETWORKS_CAP.to_string());
             if params.bouncer_control && server_caps.has(bouncer::NETWORKS_NOTIFY_CAP) {
                 caps_to_request.push(bouncer::NETWORKS_NOTIFY_CAP.to_string());
@@ -1251,6 +1255,7 @@ async fn negotiate_caps(
     };
 
     Ok(NegotiateResult {
+        sasl_authenticated: authenticated,
         account_registration_rules: enabled_caps.contains("draft/account-registration").then(|| server_caps.value("draft/account-registration").unwrap_or("").to_string()),
         enabled_caps,
         diagnostics: diag,

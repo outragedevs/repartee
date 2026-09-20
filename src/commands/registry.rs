@@ -607,6 +607,15 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
             },
         ),
         (
+            "bcert",
+            CommandDef {
+                handler: crate::app::bouncer_certificates::command,
+                description: "Manage bouncer TLS client certificates",
+                aliases: &[],
+                category: CommandCategory::Connection,
+            },
+        ),
+        (
             "bmeta",
             CommandDef {
                 handler: crate::app::bouncer_metadata::command,

@@ -372,3 +372,19 @@ behavior; pinned Lurker rejects the unsupported feature. Full Sol medium review
 round 8 is clean. See `docs/validation/bouncer-metadata.md` for evidence and limits.
 Client certificates, WebPush and all remaining full-matrix acceptance rows stay
 in scope; this is not completion of the overall goal.
+
+
+The certificate increment on `feat/bouncer-client-certificates` adds `/bcert`
+LIST/CREATE/DELETE on Soju control and bound network sessions. It requires verified
+TLS, actual successful SASL authentication, and negotiated client-cert/batch.
+Acknowledgments and complete lists are checked; unsolicited CREATE is independent
+of unrelated operations, and current-certificate deletion accepts both draft and
+Soju acknowledgment forms. Timeouts retain uncertain requests without replaying
+mutations. Native/web command input shares the implementation.
+Pinned Soju with disposable verified TLS proves enrollment, EXTERNAL reconnect,
+explicit/current-certificate deletion, rejection after revocation, and NOCERT
+failures. Real WebKit verifies commands, literal names and reload. Pinned Lurker
+refuses the unavailable extension. Clippy has no project warnings; 2640 native
+and 145 web tests pass. Full Sol medium review round 4 is clean. See
+`docs/validation/bouncer-client-certificates.md`. WebPush and all remaining
+full-matrix acceptance rows remain required for goal completion.

@@ -2948,6 +2948,7 @@ pub mod submit_typing_tests {
             upstream_auth: HashMap::new(),
             account_registration: HashMap::new(),
             bouncer_metadata: HashMap::new(),
+            bouncer_certificates: HashMap::new(),
             server_search: HashMap::new(),
             server_search_views: HashMap::new(),
             bouncer_networks: HashMap::new(),
