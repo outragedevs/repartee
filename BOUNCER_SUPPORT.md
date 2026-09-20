@@ -241,8 +241,14 @@ review. Per-client isolation, notifications, rejection and reconnect have pinned
 bouncer evidence in `docs/validation/bouncer-monitor.md`. Compiled WASM command
 routing and event rendering were checked separately with controlled WebSocket data.
 
-The next increment on `fix/monitor-capability-transitions` exercises dynamic
-MONITOR/notification support and initially unsupported upstreams. Remaining
+The MONITOR capability-transition follow-up merged in
+https://github.com/outragedevs/repartee/pull/75 after a clean second Sol medium
+review. Real-server evidence covers restored availability, independent metadata
+notifications after CAP ACK, and initially unsupported upstreams. Lurker's hidden
+dynamic ISUPPORT withdrawal remains explicitly documented.
+
+The next increment on `fix/invite-network-isolation` verifies invitations,
+connection-scoped routing, local-history exclusion and native/web presentation. Remaining
 increments must still cover other dynamic capability
 behavior, labeled replies, redaction, invitations, ISUPPORT/names and upstream
 account operations; no remaining row is dropped.
