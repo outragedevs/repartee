@@ -1486,7 +1486,7 @@ redaction may retain their original copy.</p>
 <div class="command-entry" data-command="server" data-category="Connection">
 <h1>/server</h1>
 <h2>Syntax</h2>
-<pre><code>/server [list|add|remove] [args...]
+<pre><code>/server [list|add|remove|icon] [args...]
 </code></pre>
 <h2>Description</h2>
 <p>Manage IRC server configurations. Add, remove, and list servers.
@@ -1537,6 +1537,17 @@ use <code>/wizard server</code>.</p>
 <p>Remove a server and disconnect if connected.</p>
 <pre><code>/server remove &lt;id&gt;
 </code></pre>
+<h3>icon</h3>
+<p>Show the current network icon URL advertised through IRCv3 <code>draft/ICON</code>.
+Without a connection ID, use the active buffer&#39;s connection. Bouncer child
+connections are supported independently of saved server configurations.</p>
+<pre><code>/server icon [connection-id]
+</code></pre>
+<p>The optional <code>{size}</code> URL template requests 128 pixels. HTTP and HTTPS URLs
+are accepted; credentials, local-file and executable URL schemes are rejected.
+This command does not fetch images automatically. Open the link or use the
+existing <code>/preview &lt;url&gt;</code> command for image formats supported by the terminal
+preview. Updates, removals and disconnection follow the current ISUPPORT state.</p>
 <h2>Examples</h2>
 <pre><code>/server list
 /server add libera irc.libera.chat 6697 -tls

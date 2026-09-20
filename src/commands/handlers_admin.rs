@@ -564,6 +564,22 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
     }
 
     match args[0].as_str() {
+        "icon" => {
+            if args.len() > 2 {
+                add_local_event(app, "Usage: /server icon [connection-id]");
+                return;
+            }
+            let id = args.get(1).map(String::as_str).or_else(|| app.active_conn_id());
+            let Some(connection) = id.and_then(|id| app.state.connections.get(id)) else {
+                add_local_event(app, "No matching IRC connection; use /server icon <connection-id>");
+                return;
+            };
+            let text = connection.isupport_parsed.network_icon(128).map_or_else(
+                || format!("{} has not advertised a usable network icon", connection.label),
+                |url| format!("Network icon for {}: {url}", connection.label),
+            );
+            add_local_event(app, &text.replace('%', "%%"));
+        }
         "add" => {
             if args.len() < 3 {
                 add_local_event(app, SERVER_ADD_USAGE);
@@ -658,7 +674,7 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
             }
         }
         _ => {
-            add_local_event(app, "Usage: /server [list|add|remove] [args...]");
+            add_local_event(app, "Usage: /server [list|add|remove|icon] [args...]");
         }
     }
 }
