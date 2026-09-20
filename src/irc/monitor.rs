@@ -1,3 +1,4 @@
+use super::isupport::casefold as fold;
 use std::collections::{BTreeMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -51,18 +52,6 @@ pub struct MonitorState {
     metadata_caps: [bool; 5],
     pub show_list: bool,
     pub request_status: bool,
-}
-
-pub fn fold(nick: &str, mapping: &str) -> String {
-    nick.chars()
-        .map(|c| match c {
-            '[' if mapping != "ascii" => '{',
-            ']' if mapping != "ascii" => '}',
-            '\\' if mapping != "ascii" => '|',
-            '^' if mapping == "rfc1459" => '~',
-            _ => c.to_ascii_lowercase(),
-        })
-        .collect()
 }
 
 pub fn targets(input: &[String]) -> Result<Vec<String>, &'static str> {
