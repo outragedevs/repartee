@@ -542,6 +542,12 @@ impl App {
         use crate::web::snapshot;
 
         match cmd {
+            WebCommand::UploadFile { submission } => {
+                if let Ok(mut guard) = submission.lock()
+                    && let Some(request) = guard.take() {
+                    self.start_web_upload(request);
+                }
+            }
             WebCommand::Presence { present } => self.update_presence_browser(session_id, present),
             WebCommand::WebConnect { initial_buffer_id } => {
                 self.register_presence_browser(session_id);

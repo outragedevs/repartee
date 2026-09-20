@@ -11,6 +11,11 @@ pub mod e2e_gate;
 )]
 pub(crate) mod emote_anim;
 mod image;
+pub mod filehost;
+#[cfg(test)]
+mod filehost_fixture;
+#[cfg(test)]
+mod filehost_browser_fixture;
 pub mod input;
 mod irc;
 mod irc_dispatch;
@@ -432,6 +437,9 @@ pub struct App {
     pub chat_rows: Option<crate::ui::chat_view::ChatRows>,
     pub inline_previews: crate::image_preview::inline::InlinePreviews,
     pub image_clear_rect: Option<Rect>,
+    upload_pending: bool,
+    upload_tx: mpsc::Sender<filehost::UploadResult>,
+    upload_rx: mpsc::Receiver<filehost::UploadResult>,
     pub(crate) preview_rx: mpsc::Receiver<crate::image_preview::ImagePreviewEvent>,
     pub(crate) preview_tx: mpsc::Sender<crate::image_preview::ImagePreviewEvent>,
     pub http_client: reqwest::Client,
@@ -743,6 +751,7 @@ impl App {
             }
         }
 
+        let (upload_tx, upload_rx) = mpsc::channel(1);
         let (preview_tx, preview_rx) = mpsc::channel(64);
 
         let in_tmux = std::env::var("TMUX").is_ok_and(|s| !s.is_empty());
@@ -902,6 +911,9 @@ impl App {
             chat_rows: None,
             inline_previews: crate::image_preview::inline::InlinePreviews::default(),
             image_clear_rect: None,
+            upload_pending: false,
+            upload_tx,
+            upload_rx,
             preview_rx,
             preview_tx,
             http_client,
@@ -1582,6 +1594,12 @@ impl App {
                         // to 1 s latency now; events handlers still
                         // receive their full payload synchronously.
                         self.script_snapshot_dirty = true;
+                        self.drain_pending_web_events();
+                    }
+                },
+                upload = self.upload_rx.recv() => {
+                    if let Some(result) = upload {
+                        self.finish_upload(result);
                         self.drain_pending_web_events();
                     }
                 },

@@ -845,6 +845,9 @@ pub fn InputLine() -> impl IntoView {
                 title="Emoji"
                 on:click=move |_| state.emoji_picker_open.set(true)
             >"\u{1F600}"</button>
+            <super::upload::UploadButton on_url=Callback::new(move |url| {
+                if value.get_untracked().is_empty() { set_value.set(url); }
+            }) />
             <span class="prompt">"❯"</span>
             <textarea
                 id="chat-input"

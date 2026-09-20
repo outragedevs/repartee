@@ -71,6 +71,13 @@ pub fn parse_command(input: &str) -> Option<ParsedCommand> {
         rest.trim()
     };
 
+    if canonical == "upload" {
+        let args = shell_words::split(&rest.replace('#', "\0"))
+            .map(|words| words.into_iter().map(|word| word.replace('\0', "#")).collect())
+            .unwrap_or_default();
+        return Some(ParsedCommand { name: command, args });
+    }
+
     if GREEDY_COMMANDS.contains(&canonical) {
         if matches!(canonical, "me" | "quit" | "quote" | "setname") {
             return Some(ParsedCommand {
@@ -109,6 +116,17 @@ mod tests {
             let direct = parse_command(&format!("/{name} '/path with spaces/tool' 'two words'")).unwrap();
             assert_eq!(direct.args.join(" "), "'/path with spaces/tool' 'two words'");
         }
+    }
+
+    #[test]
+    fn upload_paths_preserve_quoted_spaces_and_literal_shell_characters() {
+        let command = parse_command(r#"/upload "/tmp/my document.pdf" application/pdf"#).unwrap();
+        assert_eq!(command.args, ["/tmp/my document.pdf", "application/pdf"]);
+        let command = parse_command(r"/upload /tmp/escaped\ space.txt text/plain").unwrap();
+        assert_eq!(command.args, ["/tmp/escaped space.txt", "text/plain"]);
+        let command = parse_command(r"/upload '/tmp/#file $HOME ; name.txt'").unwrap();
+        assert_eq!(command.args, ["/tmp/#file $HOME ; name.txt"]);
+        assert!(parse_command("/upload \"unterminated").unwrap().args.is_empty());
     }
 
     #[test]

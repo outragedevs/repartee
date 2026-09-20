@@ -16,6 +16,7 @@ mod dcc;
 mod e2e;
 mod emotes;
 mod fs_secure;
+mod filehost;
 mod image_preview;
 mod irc;
 mod nick_color;

@@ -6,3 +6,5 @@ pub mod server;
 pub mod snapshot;
 pub mod tls;
 pub mod ws;
+
+pub mod upload;

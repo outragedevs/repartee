@@ -10,12 +10,29 @@ import tempfile
 from test_bouncer_binding import PINS, ROOT, run, wait_ready
 
 
-def scenario(implementation, source, auto_away, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False):
+def scenario(implementation, source, auto_away, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, filehost=False):
     with tempfile.TemporaryDirectory(prefix="bouncer-presence-", dir="/tmp") as directory:
         temporary = Path(directory)
         processes = []
         with (temporary / "server.log").open("w+") as log:
             try:
+                http_port = None
+                if filehost:
+                    with socket.socket() as reservation:
+                        reservation.bind(("127.0.0.1", 0))
+                        http_port = reservation.getsockname()[1]
+                    run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                         "-keyout", str(temporary / "ca-key.pem"), "-out", str(temporary / "ca.pem"),
+                         "-days", "1", "-subj", "/CN=Disposable fixture CA",
+                         "-addext", "basicConstraints=critical,CA:TRUE"], capture_output=True)
+                    run(["openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes",
+                         "-keyout", str(temporary / "key.pem"), "-out", str(temporary / "server.csr"),
+                         "-subj", "/CN=localhost"], capture_output=True)
+                    (temporary / "extensions").write_text("basicConstraints=critical,CA:FALSE\nsubjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n")
+                    run(["openssl", "x509", "-req", "-in", str(temporary / "server.csr"),
+                         "-CA", str(temporary / "ca.pem"), "-CAkey", str(temporary / "ca-key.pem"),
+                         "-CAcreateserial", "-out", str(temporary / "cert.pem"), "-days", "1",
+                         "-extfile", str(temporary / "extensions")], capture_output=True)
                 ready = temporary / "upstream.json"
                 events = temporary / "events.jsonl"
                 upstream = subprocess.Popen([
@@ -35,7 +52,7 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                     bouncer = subprocess.Popen([
                         "node", str(source / "node_modules/tsx/dist/cli.mjs"),
                         str(ROOT / "scripts/fixtures/lurker-presence.mts"),
-                        str(source), str(bouncer_ready), str(upstream_port),
+                        str(source), str(bouncer_ready), str(upstream_port), *([str(http_port)] if filehost else []),
                     ], cwd=source, stdout=log, stderr=log)
                     processes.append(bouncer)
                     wait_ready(bouncer, bouncer_ready.exists)
@@ -50,6 +67,8 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                         f"hostname fixture.local\ndb sqlite3 {temporary}/main.db\n"
                         f"listen irc+insecure://127.0.0.1:{port}\n"
                         f"listen unix+admin://{admin}\nmessage-store db\n"
+                        + (f"listen https://127.0.0.1:{http_port}\ntls {temporary}/cert.pem {temporary}/key.pem\n"
+                           f"http-ingress https://127.0.0.1:{http_port}\nfile-upload fs {temporary}/uploads\n" if filehost else "")
                     )
                     run([str(source / "sojudb"), "-config", str(config), "create-user", "fixture"],
                         input="fixture-password\n", capture_output=True)
@@ -70,6 +89,9 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                     "REPARTEE_PRESENCE_AUTO_AWAY": str(auto_away).lower(),
                 })
                 test_filter = "pinned_bouncer_presence"
+                if filehost:
+                    environment["REPARTEE_FILEHOST_TEST_CA"] = str(temporary / "ca.pem")
+                    test_filter = "pinned_bouncer_filehost"
                 if setname:
                     environment["REPARTEE_SETNAME_BOUND"] = "1"
                     environment["REPARTEE_BOUNCER_TEST_PROVIDER"] = implementation
@@ -121,13 +143,14 @@ def main():
     parser.add_argument("--invites", action="store_true")
     parser.add_argument("--names", action="store_true")
     parser.add_argument("--redaction", action="store_true")
+    parser.add_argument("--filehost", action="store_true")
     args = parser.parse_args()
     source = args.source.resolve()
     head = run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True).stdout.strip()
     if head != PINS[args.implementation]:
         raise RuntimeError("Upstream checkout does not match the audited revision")
-    scenario(args.implementation, source, True, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction)
-    if args.implementation == "soju" and not args.setname and not args.monitor and not args.monitor_unavailable and not args.invites and not args.names and not args.redaction:
+    scenario(args.implementation, source, True, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.filehost)
+    if args.implementation == "soju" and not args.setname and not args.monitor and not args.monitor_unavailable and not args.invites and not args.names and not args.redaction and not args.filehost:
         scenario(args.implementation, source, False)
 
 
