@@ -24,10 +24,15 @@ impl super::App {
         let tx = self.irc_tx.clone();
         let general = self.config.general.clone();
         let connection_id = id.to_string();
+        let network_name = self.bouncer_children.get(id).map(|child| child.network.name().to_string());
         let task = tokio::spawn(async move {
             let wrap =
                 |event| IrcEvent::Attempt(connection_id.clone(), generation, Box::new(event));
-            match crate::irc::connect_server(&connection_id, &config, &general).await {
+            let connection = match network_name.as_deref() {
+                Some(network) => crate::irc::connect_server_with_selector(&connection_id, &config, &general, Some(network)).await,
+                None => crate::irc::connect_server(&connection_id, &config, &general).await,
+            };
+            match connection {
                 Ok((handle, mut events)) => {
                     if tx
                         .send(wrap(IrcEvent::HandleReady(Box::new(handle))))

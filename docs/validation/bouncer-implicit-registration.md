@@ -1,4 +1,4 @@
-# Implicit bouncer registration (in progress)
+# Implicit bouncer registration
 
 A login containing a network selector is not evidence that the server is a
 bouncer. Repartee detects `soju.im/bouncer-networks` in CAP LS on the actual
@@ -40,15 +40,26 @@ REPARTEE_BOUNCER_TEST_LEGACY=1 python3 scripts/test_bouncer_binding.py lurker /p
 
 ## Release dependency
 
-This draft pins the reviewed library commit
-`a2c50fb237434892cc6727a40d38f6a23db5b184` from
-https://github.com/outragedevs/irc so the branch can be built on another machine.
-It uses no local path override or vendored library. Before merging, the owner
-publishes irc-repartee 1.5.2 from the `crates-io-publish` branch; then remove the
-Git revision/source from Cargo.toml and update Cargo.lock to the registry release.
-The final distribution must retain `cargo install repartee`.
+The owner published irc-repartee 1.5.2. Cargo.toml and Cargo.lock now use the
+crates.io release, with no Git dependency, local path override or vendor copy.
+The package supplies the connection-local autojoin control used during CAP
+negotiation. The registry package checksum is
+`f1ee01f1d7f62d201ad71bd832867ebc7217540514d691e8723e49f7cfd24688`.
 
-This evidence covers legacy bound USER/PASS sessions. Provider-specific combined
-PASS account scope, implicit control child connections, and privileged feature
-eligibility for non-SASL authentication still require reconciliation. It does not
+## PASS control connections
+
+Generated child connections preserve the parent's PASS authentication and select
+the discovered network in USER. They do not send BIND before PASS authentication;
+Soju rejects that ordering. The requested numeric network ID remains mandatory
+in the registration confirmation. The selector is read from the current network
+registry for each connection attempt, including reconnect after a rename.
+The existing `pinned_bouncer_generated_children` fixture also passed on both
+pinned providers with `REPARTEE_BOUNCER_TEST_LEGACY=1`: an implicit PASS control
+session creates the network child, hydrates/paginates history and excludes
+conversation rows from the local log. SASL-authenticated child connections
+retain BIND. Names that cannot fit a USER
+parameter require SASL authentication.
+
+Provider-specific combined PASS account scope and privileged feature eligibility
+for non-SASL authentication still require reconciliation. This change does not
 close the entire bouncer completion goal.

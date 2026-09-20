@@ -744,8 +744,15 @@ async fn pinned_bouncer_generated_children() {
         .unwrap()
         .parse()
         .unwrap();
-    config.sasl_user = Some(std::env::var("REPARTEE_BOUNCER_TEST_USER").unwrap());
-    config.sasl_pass = Some("fixture-password".into());
+    let username = std::env::var("REPARTEE_BOUNCER_TEST_USER").unwrap();
+    if std::env::var("REPARTEE_BOUNCER_TEST_LEGACY").as_deref() == Ok("1") {
+        config.bouncer_control = false;
+        config.username = Some(username);
+        config.password = Some("fixture-password".into());
+    } else {
+        config.sasl_user = Some(username);
+        config.sasl_pass = Some("fixture-password".into());
+    }
     let network = std::env::var("REPARTEE_BOUNCER_TEST_NETID").unwrap();
     app.setup_connection("fixture", &config);
     app.start_connection_attempt("fixture", config);

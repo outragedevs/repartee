@@ -20,6 +20,21 @@ pub fn normalize_network_id(value: &str) -> Result<String, String> {
     Err("Bouncer network ID must be a positive decimal integer".to_string())
 }
 
+pub(super) fn legacy_child_username(config: &crate::config::ServerConfig, username: &str, network: &str) -> Result<Option<String>> {
+    if config.bouncer_network_id.is_none() || config.password.as_deref().is_none_or(str::is_empty)
+        || [&config.sasl_user, &config.sasl_pass, &config.sasl_mechanism,
+            &config.sasl_key_path, &config.client_cert_path].iter().any(|value| value.is_some())
+    {
+        return Ok(None);
+    }
+    if network.is_empty() || network.chars().any(char::is_whitespace) || network.contains(['\0', '\r', '\n']) {
+        return Err(eyre!("This network name cannot be selected using PASS; configure SASL authentication"));
+    }
+    let account = username.split(['/', '@']).next().unwrap_or_default();
+    let client = username.split_once('@').map_or("", |(_, client)| client.split('/').next().unwrap_or_default());
+    Ok(Some(format!("{account}/{network}@{client}")))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Identity {
     Control,

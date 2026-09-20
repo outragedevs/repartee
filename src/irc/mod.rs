@@ -660,11 +660,20 @@ impl Drop for RegistrationOutgoing {
 ///
 /// Spawns a tokio task that reads from the message stream and forwards
 /// events over an unbounded channel.
-#[expect(clippy::too_many_lines, reason = "IRC config builder with many fields")]
 pub async fn connect_server(
     conn_id: &str,
     server_config: &crate::config::ServerConfig,
     general: &crate::config::GeneralConfig,
+) -> Result<(IrcHandle, mpsc::Receiver<IrcEvent>)> {
+    connect_server_with_selector(conn_id, server_config, general, None).await
+}
+
+#[expect(clippy::too_many_lines, reason = "IRC config builder with many fields")]
+pub async fn connect_server_with_selector(
+    conn_id: &str,
+    server_config: &crate::config::ServerConfig,
+    general: &crate::config::GeneralConfig,
+    network_name: Option<&str>,
 ) -> Result<(IrcHandle, mpsc::Receiver<IrcEvent>)> {
     if server_config.sasl_mechanism.as_deref().is_some_and(|mechanism| mechanism.eq_ignore_ascii_case("OAUTHBEARER"))
         && (!server_config.tls || !server_config.tls_verify)
@@ -695,6 +704,8 @@ pub async fn connect_server(
         .username
         .as_deref()
         .unwrap_or(&general.username);
+    let legacy_username = network_name.map(|name| bouncer::legacy_child_username(server_config, username, name)).transpose()?.flatten();
+    let username = legacy_username.as_deref().unwrap_or(username);
     let realname = server_config
         .realname
         .as_deref()
@@ -798,7 +809,7 @@ pub async fn connect_server(
         sasl_mechanism_override: server_config.sasl_mechanism.as_deref(),
         has_client_cert: server_config.client_cert_path.is_some(),
         sasl_key_path: server_config.sasl_key_path.as_deref(),
-        bouncer_network_id: bouncer_network_id.as_deref(),
+        bouncer_network_id: if legacy_username.is_some() { None } else { bouncer_network_id.as_deref() },
         bouncer_control: server_config.bouncer_control,
     };
 
