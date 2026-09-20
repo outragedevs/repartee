@@ -1,7 +1,7 @@
 # Bouncer labeled responses and batch integration
 
-Status: implementation and integration verification on
-`feat/bouncer-labeled-responses`, following PR 78. Full GPT-5.6 Sol medium review clean.
+Status: merged in https://github.com/outragedevs/repartee/pull/79 after a clean
+full GPT-5.6 Sol medium review.
 
 ## Source evidence
 
