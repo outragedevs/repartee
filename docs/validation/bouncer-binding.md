@@ -213,3 +213,14 @@ records, including thresholds belonging to already closed buffers. Dynamic
 bouncer child removal also drops its pending marker scheduler immediately.
 Regressions cover unrelated-connection isolation and eight successive real
 registry create/delete events without retained child read-state allocations.
+
+Server-owned buffers retain unread arrivals even when the final read-marker
+capability disappears. Buffer selection alone does not clear activity; focused
+native tail rendering or an explicit browser read boundary does. Browser reads
+without marker support still preserve later arrivals beyond the displayed ID.
+The first marker response after reconnect reconciles an existing retained
+threshold with server state, including an unknown marker, while pending local
+writes remain effective. Timed retained rows are reclassified without playback
+notifications; a scope reset without a retained threshold does not reintroduce
+old rows. Regressions cover cap-loss arrivals, web read boundaries, and unknown
+server markers with and without pending local updates.

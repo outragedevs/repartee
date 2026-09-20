@@ -832,7 +832,14 @@ impl App {
             }
             return;
         }
-        self.state.clear_activity(buffer_id);
+        if self.state.buffer_uses_server_history(buffer_id)
+            && let Some(message_id) = message_id
+        {
+            self.state.clear_visible_read_rows(buffer_id, message_id);
+            self.drain_pending_web_events();
+            return;
+        }
+        self.state.clear_visible_activity(buffer_id);
         self.broadcast_web(crate::web::protocol::WebEvent::ActivityChanged {
             buffer_id: buffer_id.to_string(),
             activity: 0,
@@ -1053,6 +1060,26 @@ mod activity_read_tests {
         assert_eq!(app.state.buffers["account/peer"].unread_count, 1);
         assert!(app.read_markers.is_empty());
         assert!(matches!(receiver.try_recv().unwrap(), crate::web::protocol::WebEvent::Error { message, session_id } if session_id.as_deref() == Some("old-browser") && message.contains("Reload")));
+    }
+
+    #[tokio::test]
+    async fn capability_loss_preserves_active_web_arrivals_until_reported_visible() {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let config = toml::from_str("label='Bouncer'\naddress='bnc.example.org'\nport=6697\ntls=true\nchannels=[]\nbouncer_network_id='42'").unwrap();
+        app.setup_connection("account", &config);
+        app.state.connections.get_mut("account").unwrap().enabled_caps.insert("draft/read-marker".into());
+        app.state.add_buffer_with_focus(Buffer::empty("account", BufferType::Query, "Peer"), false);
+        app.state.set_active_buffer("account/peer");
+        crate::irc::events::handle_cap_del(&mut app.state, "account", Some("draft/read-marker"), None);
+        let first = crate::state::events::tests::make_test_message(&mut app.state, "first unseen");
+        let id = first.id;
+        app.state.add_transient_message_with_activity("account/peer", first, ActivityLevel::Activity);
+        let second = crate::state::events::tests::make_test_message(&mut app.state, "later unseen");
+        app.state.add_transient_message_with_activity("account/peer", second, ActivityLevel::Activity);
+        app.set_active_buffer_silent("account/peer");
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 2);
+        app.web_mark_read("account/peer", Some(id), "browser");
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 1);
     }
 
     #[tokio::test]

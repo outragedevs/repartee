@@ -1980,11 +1980,10 @@ impl AppState {
         message: Message,
         level: ActivityLevel,
     ) {
-        let read_markers = self.uses_read_markers(buffer_id);
         let server_owned = self.buffer_uses_server_history(buffer_id);
         self.record_read_origin(buffer_id, &message, buffer_id);
         let already_read = server_owned && self.message_already_read(buffer_id, &message);
-        if server_owned && (read_markers || self.active_buffer_id.as_deref() != Some(buffer_id)) {
+        if server_owned {
             self.record_read_activity(buffer_id, &message, level);
         }
         // Queue web events for broadcast.
@@ -2002,7 +2001,7 @@ impl AppState {
                 buffer_id: buffer_id.to_string(),
                 message: wire,
             });
-        if !already_read && (read_markers || self.active_buffer_id.as_deref() != Some(buffer_id)) {
+        if !already_read && (server_owned || self.active_buffer_id.as_deref() != Some(buffer_id)) {
             self.record_activity(buffer_id, level);
         }
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
@@ -2011,7 +2010,7 @@ impl AppState {
             enforce_scrollback(buf, self.scrollback_limit);
             // Only escalate activity if this is not the active buffer
             let is_active = self.active_buffer_id.as_deref() == Some(buffer_id);
-            if !read_markers && !already_read && !is_active && level > buf.activity {
+            if !server_owned && !already_read && !is_active && level > buf.activity {
                 buf.activity = level;
                 buf.unread_count += 1;
                 self.pending_web_events
@@ -2022,10 +2021,8 @@ impl AppState {
                     });
             }
         }
-        if read_markers {
+        if server_owned {
             self.refresh_read_activity(buffer_id);
-        } else if server_owned {
-            self.prune_read_activity(buffer_id);
         }
     }
 

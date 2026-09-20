@@ -150,8 +150,6 @@ impl AppState {
         own_nick: Option<&str>,
     ) {
         if !self.buffer_uses_server_history(buffer_id)
-            || (!self.uses_read_markers(buffer_id)
-                && self.active_buffer_id.as_deref() == Some(buffer_id))
             || self.is_own_history_message(buffer_id, message, own_nick)
         {
             return;
@@ -194,10 +192,8 @@ impl AppState {
     }
 
     pub(super) fn finish_history_read_activity(&mut self, buffer_id: &str) {
-        if self.uses_read_markers(buffer_id) {
+        if self.buffer_uses_server_history(buffer_id) {
             self.refresh_read_activity(buffer_id);
-        } else if self.buffer_uses_server_history(buffer_id) {
-            self.prune_read_activity(buffer_id);
         }
     }
 
@@ -268,6 +264,57 @@ impl AppState {
             if state.unread.len() != before {
                 self.refresh_read_activity(buffer_id);
             }
+        }
+    }
+
+    pub(crate) fn reconcile_server_read_marker(&mut self, buffer_id: &str, marker: Option<i64>) {
+        if self
+            .read_activity
+            .get(buffer_id)
+            .and_then(|state| state.through)
+            .is_none()
+        {
+            if let Some(millis) = marker {
+                self.apply_server_read_marker(buffer_id, millis);
+            }
+            return;
+        }
+        self.read_activity
+            .entry(buffer_id.to_string())
+            .or_default()
+            .through = None;
+        if let Some(millis) = marker {
+            self.apply_server_read_marker(buffer_id, millis);
+        } else if let Some(buffer) = self.buffers.get_mut(buffer_id) {
+            buffer.last_read = chrono::DateTime::UNIX_EPOCH;
+        }
+        let rows: Vec<_> = self
+            .buffers
+            .iter()
+            .flat_map(|(id, buffer)| {
+                buffer
+                    .messages
+                    .iter()
+                    .filter(|message| {
+                        server_time(message).is_some()
+                            && self
+                                .read_activity
+                                .get(id)
+                                .and_then(|state| state.origins.get(&message.id))
+                                .map_or(id.as_str(), String::as_str)
+                                == buffer_id
+                    })
+                    .map(|message| (id.clone(), buffer.connection_id.clone(), message.clone()))
+            })
+            .collect();
+        let mut changed = std::collections::HashSet::new();
+        for (id, conn_id, message) in rows {
+            let own_nick = self.connections.get(&conn_id).map(|conn| conn.nick.clone());
+            self.record_history_read_activity(&id, &message, own_nick.as_deref());
+            changed.insert(id);
+        }
+        for id in changed {
+            self.refresh_read_activity(&id);
         }
     }
 
@@ -400,7 +447,7 @@ mod tests {
             .enabled_caps
             .clear();
         deliver(&mut state, 1000, ActivityLevel::Mention);
-        state.clear_activity("account/peer");
+        state.clear_visible_activity("account/peer");
         deliver(&mut state, 2000, ActivityLevel::Activity);
         crate::irc::events::handle_cap_ack(&mut state, "account", Some("draft/read-marker"), None);
         assert_eq!(state.buffers["account/peer"].unread_count, 1);
