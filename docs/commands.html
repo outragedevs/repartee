@@ -1085,6 +1085,42 @@ an IRC account; those operations are separate.</p>
 <h2>See Also</h2>
 <p>/bouncer, /server, /set</p>
 </div>
+<div class="command-entry" data-command="bcert" data-category="Connection">
+<h1>/bcert</h1>
+<h2>Syntax</h2>
+<pre><code>/bcert [list]
+/bcert create &lt;name&gt;
+/bcert delete [fingerprint]
+</code></pre>
+<h2>Description</h2>
+<p>Manage TLS client certificates pinned to the active Soju account. Available on
+both control and bound network connections over verified TLS after successful SASL authentication,
+with <code>soju.im/client-cert</code> and <code>batch</code> negotiated. Lurker does not advertise this
+extension. The command works from native and web command input.</p>
+<p><code>list</code> displays certificate SHA-512 fingerprints, names, last-use times and IPs.
+An empty list is reported only after a complete server response. <code>create</code> pins
+the TLS certificate already presented on the current connection, using the given
+name (1–64 UTF-8 bytes). It does not generate a certificate. <code>delete</code> removes the
+specified 128-character hexadecimal fingerprint; without an argument it removes
+the certificate presented on the current connection.</p>
+<p>To enroll a certificate, configure <code>client_cert_path</code> to a PEM file containing
+its certificate chain and unencrypted private key, enable TLS with certificate verification and explicitly
+select <code>sasl_mechanism = &quot;PLAIN&quot;</code> with your existing bouncer credentials. Reconnect,
+then use <code>/bcert create My device</code>. After confirmation, you can select
+<code>sasl_mechanism = &quot;EXTERNAL&quot;</code> and reconnect. The command never rewrites these
+settings automatically. Another client can revoke the certificate at any time;
+a successful enrollment does not guarantee future authentication.</p>
+<p>Only one request may be pending per connection. After a timeout, the result is
+unknown; wait for the outstanding response or reconnect before retrying. No
+mutation is automatically retried. Certificate management applies to the whole
+bouncer account, not just the currently selected upstream network.</p>
+<h2>Examples</h2>
+<p><code>/bcert list</code>
+<code>/bcert create Desktop terminal</code>
+<code>/bcert delete</code></p>
+<h2>Related</h2>
+<p>/bouncer, /connect, /disconnect</p>
+</div>
 <div class="command-entry" data-command="bmeta" data-category="Connection">
 <h1>/bmeta</h1>
 <h2>Syntax</h2>

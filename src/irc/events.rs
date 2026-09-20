@@ -651,6 +651,7 @@ pub fn handle_cap_new(
         .iter()
         .filter(|cap| {
             (DESIRED_CAPS.iter().any(|d| d.eq_ignore_ascii_case(cap))
+                || (cap.as_str() == "soju.im/client-cert" && state.connections.get(conn_id).is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some() || conn.origin_config.bouncer_control))
                 || (state.connections.get(conn_id).is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some() && !conn.origin_config.bouncer_control)
                     && matches!(cap.as_str(), "draft/read-marker" | "soju.im/read" | "draft/message-redaction" | "draft/account-registration" | "soju.im/search" | "draft/metadata-2")))
                 && enabled.is_none_or(|set| !set.contains(cap.as_str()))

@@ -13,7 +13,7 @@ import tempfile
 from test_bouncer_binding import PINS, ROOT, run, wait_ready
 
 
-def scenario(implementation, source, auto_away, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, filehost=False, oauth=False, upstream_auth=False, account_registration=False, server_search=False, metadata=False):
+def scenario(implementation, source, auto_away, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, filehost=False, oauth=False, upstream_auth=False, account_registration=False, server_search=False, metadata=False, certificates=False):
     with tempfile.TemporaryDirectory(prefix="bouncer-presence-", dir="/tmp") as directory:
         temporary = Path(directory)
         processes = []
@@ -21,7 +21,7 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
         with (temporary / "server.log").open("w+") as log:
             try:
                 http_port = None
-                if filehost or oauth:
+                if filehost or oauth or (certificates and implementation == "soju"):
                     with socket.socket() as reservation:
                         reservation.bind(("127.0.0.1", 0))
                         http_port = reservation.getsockname()[1]
@@ -71,7 +71,7 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                     admin = temporary / "admin"
                     config.write_text(
                         f"hostname fixture.local\ndb sqlite3 {temporary}/main.db\n"
-                        f"listen {'ircs' if oauth else 'irc+insecure'}://127.0.0.1:{port}\n"
+                        f"listen {'ircs' if oauth or certificates else 'irc+insecure'}://127.0.0.1:{port}\n"
                         f"listen unix+admin://{admin}\nmessage-store db\n"
                         + (f"listen https://127.0.0.1:{http_port}\ntls {temporary}/cert.pem {temporary}/key.pem\n"
                            f"http-ingress https://127.0.0.1:{http_port}\nfile-upload fs {temporary}/uploads\n" if filehost else "")
@@ -105,6 +105,15 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                             output.write(f"auth oauth2 http://127.0.0.1:{oauth_server.server_port}\n")
                             if not filehost:
                                 output.write(f"tls {temporary}/cert.pem {temporary}/key.pem\n")
+                    if certificates:
+                        with config.open("a") as output:
+                            output.write(f"tls {temporary}/cert.pem {temporary}/key.pem\nclient-cert-auth true\n")
+                        run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                             "-keyout", str(temporary / "client-key.pem"), "-out", str(temporary / "client-cert.pem"),
+                             "-days", "1", "-subj", "/CN=Disposable test client"], capture_output=True)
+                        client_pem = temporary / "client.pem"
+                        client_pem.write_bytes((temporary / "client-cert.pem").read_bytes() + (temporary / "client-key.pem").read_bytes())
+                        client_pem.chmod(0o600)
                     bouncer = subprocess.Popen([str(source / "soju"), "-config", str(config)], stdout=log, stderr=log)
                     processes.append(bouncer)
                     wait_ready(bouncer, admin.exists)
@@ -156,6 +165,11 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                     test_filter = "pinned_bouncer_server_search"
                 if metadata:
                     test_filter = "pinned_bouncer_metadata"
+                if certificates:
+                    test_filter = "pinned_bouncer_certificates"
+                    if implementation == "soju":
+                        environment["REPARTEE_OAUTH_TEST_CA"] = str(temporary / "ca.pem")
+                        environment["REPARTEE_CLIENT_CERT_TEST_PEM"] = str(temporary / "client.pem")
                 run(["make", "test", f"TEST_ARGS={test_filter} -- --ignored --nocapture"],
                     cwd=ROOT, env=environment)
                 if setname and implementation == "soju":
@@ -198,6 +212,7 @@ def main():
     parser.add_argument("--redaction", action="store_true")
     parser.add_argument("--server-search", action="store_true")
     parser.add_argument("--metadata", action="store_true")
+    parser.add_argument("--certificates", action="store_true")
     parser.add_argument("--filehost", action="store_true")
     parser.add_argument("--oauth", action="store_true")
     parser.add_argument("--upstream-auth", action="store_true")
@@ -211,8 +226,8 @@ def main():
     head = run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True).stdout.strip()
     if head != PINS[args.implementation]:
         raise RuntimeError("Upstream checkout does not match the audited revision")
-    scenario(args.implementation, source, True, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.filehost, args.oauth, args.upstream_auth, args.account_registration, args.server_search, args.metadata)
-    if args.implementation == "soju" and not args.setname and not args.monitor and not args.monitor_unavailable and not args.invites and not args.names and not args.redaction and not args.filehost and not args.oauth and not args.upstream_auth and not args.account_registration and not args.server_search and not args.metadata:
+    scenario(args.implementation, source, True, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.filehost, args.oauth, args.upstream_auth, args.account_registration, args.server_search, args.metadata, args.certificates)
+    if args.implementation == "soju" and not args.setname and not args.monitor and not args.monitor_unavailable and not args.invites and not args.names and not args.redaction and not args.filehost and not args.oauth and not args.upstream_auth and not args.account_registration and not args.server_search and not args.metadata and not args.certificates:
         scenario(args.implementation, source, False)
 
 
