@@ -5,8 +5,9 @@ from pathlib import Path
 
 
 class PresenceServer:
-    def __init__(self, events, setname=False):
+    def __init__(self, events, setname=False, monitor=False):
         self.setname = setname
+        self.monitor = monitor
         self.events = events
         self.next_connection = 0
 
@@ -21,6 +22,10 @@ class PresenceServer:
         have_user = False
         negotiating = False
         registered = False
+        monitored = set()
+        capabilities = {"setname"} if self.setname else set()
+        if self.monitor:
+            capabilities.update(["account-notify", "away-notify", "chghost", "setname", "extended-monitor"])
 
         def send(line):
             writer.write((line + '\r\n').encode())
@@ -41,9 +46,9 @@ class PresenceServer:
                 if command == 'CAP' and params:
                     if params[0].upper() == 'LS':
                         negotiating = True
-                        send(f':fixture.local CAP {nick} LS :{"setname" if self.setname else ""}')
+                        send(f':fixture.local CAP {nick} LS :{" ".join(sorted(capabilities))}')
                     elif params[0].upper() == 'REQ':
-                        reply = 'ACK' if self.setname and params[-1] == 'setname' else 'NAK'
+                        reply = 'ACK' if set(params[-1].split()) <= capabilities else 'NAK'
                         send(f':fixture.local CAP {nick} {reply} :{params[-1]}')
                     elif params[0].upper() == 'END':
                         negotiating = False
@@ -57,6 +62,33 @@ class PresenceServer:
                     with self.events.open('a') as output:
                         output.write(json.dumps({'connection': connection, 'realname': params[0]}) + '\n')
                     send(f':{nick}!fixture@localhost SETNAME :{params[0]}')
+                elif command == 'MONITOR' and registered and self.monitor and params:
+                    operation = params[0].upper()
+                    names = params[1].split(',') if len(params) > 1 else []
+                    if operation == '+':
+                        rejected = [name for name in names if name.lower() == 'rejected']
+                        for name in rejected:
+                            send(f':fixture.local 734 {nick} 2 {name} :Monitor list is full')
+                        names = [name for name in names if name not in rejected]
+                        monitored.update(name.lower() for name in names)
+                    elif operation == '-':
+                        monitored.difference_update(name.lower() for name in names)
+                    elif operation == 'C':
+                        monitored.clear()
+                    elif operation == 'L':
+                        if monitored:
+                            send(f':fixture.local 732 {nick} :{",".join(sorted(monitored))}')
+                        send(f':fixture.local 733 {nick} :End of MONITOR list')
+                    if operation in ['+', 'S']:
+                        for name in (names if operation == '+' else sorted(monitored)):
+                            online = name.lower() == 'alice'
+                            mask = f'{name}!peer@fixture.local' if online else name
+                            send(f':fixture.local {730 if online else 731} {nick} :{mask}')
+                            if online:
+                                send(f':{name}!peer@fixture.local ACCOUNT alice-account')
+                                send(f':{name}!peer@fixture.local AWAY :Away fixture')
+                                send(f':{name}!peer@fixture.local CHGHOST changed changed.example')
+                                send(f':{name}!changed@changed.example SETNAME :Alice Fixture')
                 elif command == 'AWAY' and registered:
                     away = params[0] if params else None
                     self.record(connection, nick, away)
@@ -73,7 +105,7 @@ class PresenceServer:
                     registered = True
                     self.record(connection, nick, None)
                     send(f':fixture.local 001 {nick} :Welcome to the disposable presence fixture')
-                    send(f':fixture.local 005 {nick} CASEMAPPING=ascii CHANTYPES=# PREFIX=(ov)@+ :supported')
+                    send(f':fixture.local 005 {nick} CASEMAPPING=ascii CHANTYPES=# PREFIX=(ov)@+ {"MONITOR=100" if self.monitor else ""} :supported')
                     send(f':fixture.local 376 {nick} :End of MOTD')
                 await writer.drain()
         finally:
@@ -86,8 +118,9 @@ async def main():
     parser.add_argument('ready', type=Path)
     parser.add_argument('events', type=Path)
     parser.add_argument('--setname', action='store_true')
+    parser.add_argument('--monitor', action='store_true')
     args = parser.parse_args()
-    fixture = PresenceServer(args.events, args.setname)
+    fixture = PresenceServer(args.events, args.setname, args.monitor)
     server = await asyncio.start_server(fixture.client, '127.0.0.1', 0)
     args.ready.write_text(json.dumps({'port': server.sockets[0].getsockname()[1]}))
     async with server:
