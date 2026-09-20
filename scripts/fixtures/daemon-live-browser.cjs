@@ -106,7 +106,29 @@ const assert = require('node:assert/strict');
     }
     assert.equal(inserted.slice(beforeSearch).filter(event => event.buffer_id.toLowerCase() === 'fixture/alice' && event.message.text.startsWith('fixture-memory-')).length, 0,
       'Search results entered the live conversation event stream');
+    const control = async action => {
+      const response = await fetch(`${process.env.REPARTEE_FAULT_CONTROL_URL}/${action}`, {method: 'POST'});
+      assert.equal(response.status, 200);
+      return response.json();
+    };
+    assert.ok((await control('cut')).closed >= 1, 'No established transport was interrupted');
+    for (let attempt = 0; attempt < 500 && connected; attempt++) await page.waitForTimeout(20);
+    assert.equal(connected, false, 'Daemon did not report transport loss');
+    await page.reload();
+    await input.waitFor();
+    await alice.click();
+    await page.locator('.chat-line').filter({hasText: `fixture-memory-outgoing-${cycle}`}).waitFor();
+    assert.equal(connected, false);
+    await command(`/msg Alice fixture-memory-fault-unsent-${cycle}`);
+    await page.locator('.chat-line').filter({hasText: 'Failed to send message:'}).waitFor();
+    await control('resume');
+    for (let attempt = 0; attempt < 1500 && !connected; attempt++) await page.waitForTimeout(20);
+    assert.ok(connected, 'Daemon did not reconnect after transport restoration');
+    await command(`/msg Alice fixture-memory-reconnected-${cycle}`);
+    await page.locator('.chat-line').filter({hasText: `fixture-memory-reconnected-${cycle}`}).waitFor();
+    assert.equal(await page.locator('.chat-line').filter({hasText: `fixture-memory-outgoing-${cycle}`}).count(), 1);
+    assert.equal(await page.locator('.chat-line').filter({hasText: `fixture-memory-fault-unsent-${cycle}`}).count(), 0);
     assert.deepEqual(errors, []);
-    console.log('PASS: real incoming/outgoing messages, restart history, browser reload, exhausted history page, isolated search or unsupported refusal.');
+    console.log('PASS: real incoming/outgoing messages, restart history, browser reload, exhausted history page, isolated search, transport failure and reconnect.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
