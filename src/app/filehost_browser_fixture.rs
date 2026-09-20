@@ -17,7 +17,7 @@ pub async fn run(app: &mut App, script: &str) {
         broadcaster: Arc::clone(&app.web_broadcaster), web_cmd_tx: app.web_cmd_tx.clone(),
         password: "disposable-fixture".into(), username: "fixture".into(),
         session_store: sessions, rate_limiter: Arc::new(tokio::sync::Mutex::new(RateLimiter::new())),
-        session_cookie_max_age: 86_400, preview_extractor: None, web_state_snapshot: Some(snapshot),
+        session_cookie_max_age: 86_400, icon_extractor: None, preview_extractor: None, web_state_snapshot: Some(snapshot),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

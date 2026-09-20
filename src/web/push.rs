@@ -55,7 +55,7 @@ mod tests {
             password: String::new(), username: String::new(),
             session_store: Arc::new(Mutex::new(SessionStore::with_days(vec![0; 32], 1))),
             rate_limiter: Arc::new(Mutex::new(RateLimiter::new())), session_cookie_max_age: 86400,
-            preview_extractor: None, web_state_snapshot: None,
+            icon_extractor: None, preview_extractor: None, web_state_snapshot: None,
         }), rx)
     }
 

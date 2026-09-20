@@ -79,6 +79,7 @@ impl AppState {
             nick_color_lit: 0.65,
             e2e_manager: None,
             suppress_event_display: false,
+            web_icon_extractor: None,
             web_preview_extractor: None,
         }
     }

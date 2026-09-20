@@ -485,3 +485,15 @@ use the current ISUPPORT state. Real pinned Soju and Lurker fixtures confirm
 upstream icon forwarding and command output. See
 `docs/validation/bouncer-network-icon.md`. Web sidebar image rendering and its
 fetch/cache pipeline remain a required follow-up, not completed by this command.
+
+
+## Network icons in the web sidebar
+
+The web UI now displays network icons with live updates, removal, disconnect
+cleanup and failed-image fallback. Icons use an authenticated same-origin
+proxy with bounded public-only image fetching and sandboxed SVG responses.
+They work independently of chat image previews and use browser-private caching.
+Provider forwarding, backend HTTP/state tests and compiled-WASM Chromium checks
+are described in `docs/validation/bouncer-network-icon.md`. This completes the
+web presentation follow-up above; SAFERATE publication and the complete
+acceptance matrix remain required.

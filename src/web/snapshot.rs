@@ -49,6 +49,7 @@ pub fn build_sync_init(
         .connections
         .values()
         .map(|c| ConnectionMeta {
+            icon_url: network_icon_url(state, &c.id),
             id: c.id.clone(),
             label: c.label.clone(),
             nick: c.nick.clone(),
@@ -189,6 +190,12 @@ pub const fn buffer_type_str(bt: &BufferType) -> &'static str {
 /// Split a `buffer_id` (`"connection_id/buffer_name"`) into `(network, buffer)`.
 pub fn split_buffer_id(buffer_id: &str) -> (&str, &str) {
     buffer_id.split_once('/').unwrap_or((buffer_id, buffer_id))
+}
+
+
+pub fn network_icon_url(state: &AppState, connection_id: &str) -> Option<String> {
+    let url = state.connections.get(connection_id)?.isupport_parsed.network_icon(32)?;
+    state.web_icon_extractor.as_ref()?.register_network_icon(&url)
 }
 
 #[cfg(test)]

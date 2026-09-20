@@ -416,6 +416,7 @@ pub struct AppState {
     /// its `previews` populated by this extractor. `None` = web image
     /// previews disabled.
     pub web_preview_extractor: Option<std::sync::Arc<crate::web::preview::WebPreviewExtractor>>,
+    pub web_icon_extractor: Option<std::sync::Arc<crate::web::preview::WebPreviewExtractor>>,
 }
 
 impl AppState {

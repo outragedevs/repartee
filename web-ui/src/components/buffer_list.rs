@@ -77,12 +77,16 @@ pub fn BufferList() -> impl IntoView {
                     if buf.pinned { display_name.push_str(" [pinned]"); }
                     if buf.muted { display_name.push_str(" [muted]"); }
                     if buf.blocked { display_name.push_str(" [blocked]"); }
+                    let icon = is_server.then(|| conn.and_then(|connection| connection.icon_url.clone())).flatten()
+                        .filter(|url| url.starts_with("/api/network-icon?h="))
+                        .map(|url| view! { <img class="network-icon" src=url alt="" width="20" height="20" loading="lazy" referrerpolicy="no-referrer" on:load=move |event| { event_target::<web_sys::HtmlElement>(&event).set_hidden(false); } on:error=move |event| { event_target::<web_sys::HtmlElement>(&event).set_hidden(true); } /> });
                     views.push(
                         view! {
                             <button type="button" class=class on:click=on_click
                                 aria-current=is_active.then_some("page")>
                                 <span class="num">{current_num}"."</span>
                                 " "
+                                {icon}
                                 <span class="name">{display_name}</span>
                                 {badge}
                             </button>
