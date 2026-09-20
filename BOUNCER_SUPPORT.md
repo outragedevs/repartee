@@ -279,3 +279,13 @@ Next, implement message redaction and audit remaining specialized-batch/request
 variants and older server-buffer backlog reads. Remaining increments must still
 cover other dynamic capability behavior, ISUPPORT and upstream account operations,
 as well as every other acceptance row above; no remaining row is dropped.
+
+Unlabeled routing and logging merged in
+https://github.com/outragedevs/repartee/pull/80. Source audit for the next redaction
+increment is in `docs/validation/bouncer-message-redaction.md`; implementation,
+real-server validation and review remain pending.
+
+The `fix/bouncer-redaction-pagination` prerequisite excludes deletion metadata
+from CHATHISTORY page counts and anchors. Regression tests reproduced the old
+anchor error; make clippy/test and a clean full Sol medium review passed. Full
+redaction delivery, commands and native/web behavior remain unimplemented.
