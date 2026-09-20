@@ -10,7 +10,7 @@ import tempfile
 from test_bouncer_binding import PINS, ROOT, run, wait_ready
 
 
-def scenario(implementation, source, auto_away, setname=False, monitor=False, monitor_unavailable=False):
+def scenario(implementation, source, auto_away, setname=False, monitor=False, monitor_unavailable=False, invites=False):
     with tempfile.TemporaryDirectory(prefix="bouncer-presence-", dir="/tmp") as directory:
         temporary = Path(directory)
         processes = []
@@ -23,6 +23,7 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                     str(ready), str(events), *(["--setname"] if setname else []),
                     *(["--monitor"] if monitor or monitor_unavailable else []),
                     *(["--monitor-unavailable"] if monitor_unavailable else []),
+                    *(["--invites"] if invites else []),
                 ], stdout=log, stderr=log)
                 processes.append(upstream)
                 wait_ready(upstream, ready.exists)
@@ -75,6 +76,8 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                     test_filter = "pinned_bouncer_monitor"
                 if monitor_unavailable:
                     test_filter = "pinned_bouncer_no_monitor"
+                if invites:
+                    test_filter = "pinned_bouncer_invites"
                 run(["make", "test", f"TEST_ARGS={test_filter} -- --ignored --nocapture"],
                     cwd=ROOT, env=environment)
                 if setname and implementation == "soju":
@@ -109,13 +112,14 @@ def main():
     parser.add_argument("--setname", action="store_true")
     parser.add_argument("--monitor", action="store_true")
     parser.add_argument("--monitor-unavailable", action="store_true")
+    parser.add_argument("--invites", action="store_true")
     args = parser.parse_args()
     source = args.source.resolve()
     head = run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True).stdout.strip()
     if head != PINS[args.implementation]:
         raise RuntimeError("Upstream checkout does not match the audited revision")
-    scenario(args.implementation, source, True, args.setname, args.monitor, args.monitor_unavailable)
-    if args.implementation == "soju" and not args.setname and not args.monitor and not args.monitor_unavailable:
+    scenario(args.implementation, source, True, args.setname, args.monitor, args.monitor_unavailable, args.invites)
+    if args.implementation == "soju" and not args.setname and not args.monitor and not args.monitor_unavailable and not args.invites:
         scenario(args.implementation, source, False)
 
 

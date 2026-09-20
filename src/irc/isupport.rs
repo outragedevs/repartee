@@ -310,6 +310,18 @@ impl Isupport {
     }
 }
 
+pub fn casefold(nick: &str, mapping: &str) -> String {
+    nick.chars()
+        .map(|c| match c {
+            '[' if mapping != "ascii" => '{',
+            ']' if mapping != "ascii" => '}',
+            '\\' if mapping != "ascii" => '|',
+            '^' if mapping == "rfc1459" => '~',
+            _ => c.to_ascii_lowercase(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

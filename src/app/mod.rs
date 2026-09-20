@@ -22,6 +22,8 @@ mod presence;
 mod bouncer_management;
 pub mod monitor;
 #[cfg(test)]
+mod invite_fixture;
+#[cfg(test)]
 mod presence_fixture;
 mod connection_attempt;
 mod log_browser;
