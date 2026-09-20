@@ -124,7 +124,7 @@ async function buildCommandsPage(): Promise<string> {
   for (const cat of sortedCats) {
     html += `<h2 id="cat-${cat.toLowerCase().replace(/\s+/g, "-")}">${cat}</h2>\n`;
     for (const cmd of categories.get(cat)!) {
-      html += `<div class="command-entry" data-command="${cmd.name}" data-category="${cmd.category}">\n${cmd.html}</div>\n`;
+      html += `<div id="${cmd.name}" class="command-entry" data-command="${cmd.name}" data-category="${cmd.category}">\n${cmd.html}</div>\n`;
     }
   }
   html += `<script>(function(){const i=document.getElementById('command-search'),c=document.getElementById('search-clear'),n=document.getElementById('search-count'),e=document.querySelectorAll('.command-entry'),h=document.querySelectorAll('h2[id^="cat-"]');function f(){const q=i.value.toLowerCase().trim();let v=0;e.forEach(function(x){const nm=x.getAttribute('data-command')||'',ct=x.getAttribute('data-category')||'',t=x.textContent||'',m=!q||nm.includes(q)||ct.toLowerCase().includes(q)||t.toLowerCase().includes(q);x.style.display=m?'':'none';if(m)v++});h.forEach(function(x){let s=x.nextElementSibling,ok=false;while(s&&!s.matches('h2')){if(s.classList.contains('command-entry')&&s.style.display!=='none'){ok=true;break}s=s.nextElementSibling}x.style.display=ok?'':'none'});n.textContent=q?v+' command'+(v!==1?'s':'')+' found':''}i.addEventListener('input',f);c.addEventListener('click',function(){i.value='';f();i.focus()})})();<\/script>`;
