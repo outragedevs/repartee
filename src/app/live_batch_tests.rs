@@ -300,3 +300,54 @@ async fn nested_payloads_keep_wire_order_on_close_and_expiration() {
         );
     }
 }
+
+#[tokio::test]
+async fn search_batches_never_enter_live_history_or_activity() {
+    for bound in [false, true] {
+        for expired in [false, true] {
+            for nested in [false, true] {
+                let mut app = app();
+                if bound {
+                    app.state.connections.get_mut("fixture").unwrap().origin_config.bouncer_network_id = Some("1".into());
+                }
+                receive(&mut app, ":me!u@h JOIN #test");
+                app.state.set_active_buffer("fixture/fixture");
+                let before = app.state.buffers["fixture/#test"].messages.len();
+                let activity = app.state.buffers["fixture/#test"].activity;
+                let (tx, mut log_rx) = tokio::sync::mpsc::channel(16);
+                app.state.log_tx = Some(tx);
+                app.web_broadcaster = std::sync::Arc::new(crate::web::broadcast::WebBroadcaster::new(128));
+                let mut web_rx = app.web_broadcaster.subscribe();
+                if nested {
+                    receive(&mut app, ":server BATCH +outer labeled-response");
+                    receive(&mut app, "@batch=outer :server BATCH +search soju.im/search");
+                } else {
+                    receive(&mut app, ":server BATCH +search soju.im/search");
+                }
+                receive(&mut app, "@batch=search :server BATCH +inner vendor/wrapper");
+                receive(&mut app, "@batch=inner;msgid=search-only;time=2024-01-01T00:00:00.000Z :Alice!u@h PRIVMSG #test :me search result");
+                receive(&mut app, "@batch=search :me!u@h JOIN #unexpected");
+                if expired {
+                    let tracker = app.batch_trackers.get_mut("fixture").unwrap();
+                    let mut batches = vec![("fixture".into(), "search".into(), tracker.end_batch("search").unwrap()),
+                        ("fixture".into(), "inner".into(), tracker.end_batch("inner").unwrap())];
+                    if nested { batches.push(("fixture".into(), "outer".into(), tracker.end_batch("outer").unwrap())); }
+                    app.dispatch_expired_batch_set(batches);
+                } else {
+                    receive(&mut app, ":server BATCH -inner");
+                    receive(&mut app, ":server BATCH -search");
+                    if nested { receive(&mut app, ":server BATCH -outer"); }
+                }
+                receive(&mut app, "@batch=search;msgid=late-search;time=2024-01-01T00:00:01.000Z :Alice!u@h PRIVMSG #test :me late search result");
+                assert_eq!(app.state.buffers["fixture/#test"].messages.len(), before, "bound={bound} expired={expired} nested={nested}");
+                assert_eq!(app.state.buffers["fixture/#test"].activity, activity);
+                assert!(!app.state.buffers.contains_key("fixture/#unexpected"));
+                assert!(log_rx.try_recv().is_err());
+                assert!(!std::iter::from_fn(|| web_rx.try_recv().ok()).any(|event| matches!(event, crate::web::protocol::WebEvent::NewMessage { message, .. } if message.text.contains("search result"))));
+                receive(&mut app, ":Alice!u@h PRIVMSG #test :ordinary live message");
+                assert_eq!(app.state.buffers["fixture/#test"].messages.len(), before + 1);
+                assert_eq!(log_rx.try_recv().is_ok(), !bound);
+            }
+        }
+    }
+}

@@ -738,7 +738,7 @@ impl App {
                             tracker.refresh_redactions(&tag, &mut self.state, &conn_id);
                         }
                     }
-                } else {
+                } else if crate::irc::batch::BatchTracker::get_batch_tag_owned(&msg).is_none() {
                     self.dispatch_live_irc_message(&conn_id, &msg);
                 }
             }

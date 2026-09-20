@@ -338,3 +338,11 @@ have regressions. Clippy, 2585 native and 144 web tests passed; full Sol medium
 review round 2 is clean. See `docs/validation/bouncer-account-registration.md`.
 Server search, metadata, certificates, WebPush and the remaining full-matrix
 acceptance rows remain in scope.
+
+The server-search prerequisite `fix/bouncer-search-batch-isolation` prevents
+search batches and late orphan batch rows from entering live chat, unread state
+or local history. Both defects were reproduced. Regression coverage spans direct
+IRC/bouncer connections, nested and expired batches, web live delivery and normal
+message/logging non-regression. Clippy and 2586 native/144 web tests passed; full
+Sol medium review round 2 is clean. Search request/UI implementation remains
+pending; see `docs/validation/bouncer-server-search.md`.

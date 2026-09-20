@@ -102,6 +102,7 @@ impl App {
         clean_end: bool,
     ) {
         match batch.batch_type.as_str() {
+            "SOJU.IM/SEARCH" => {},
             "DRAFT/CHATHISTORY-TARGETS" if clean_end => {
                 self.receive_history_targets(conn_id, batch);
             }
