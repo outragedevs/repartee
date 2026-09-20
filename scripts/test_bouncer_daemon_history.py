@@ -1,6 +1,7 @@
 """Check history exclusion across real daemon processes in disposable containers."""
 
 import argparse
+import json
 import os
 import re
 import sqlite3
@@ -71,7 +72,7 @@ bouncer_network_id = '{os.environ['REPARTEE_BOUNCER_TEST_NETID']}'
                     time.sleep(.1)
                 else:
                     raise TimeoutError('Disposable daemon HTTPS readiness timed out')
-                run(['node', str(ROOT / 'scripts/fixtures/daemon-history-browser.cjs')], env=environment)
+                run(['node', str(ROOT / ('scripts/fixtures/daemon-memory-browser.cjs' if os.environ.get('REPARTEE_MEMORY_HISTORY') else 'scripts/fixtures/daemon-history-browser.cjs'))], env=environment)
                 run(['docker', 'stop', '-t', '20', container], capture_output=True)
                 exit_code = run(['docker', 'inspect', '-f', '{{.State.ExitCode}}', container], capture_output=True).stdout.strip()
                 assert exit_code == '0', f'Unclean daemon exit: {exit_code}'
@@ -85,8 +86,19 @@ bouncer_network_id = '{os.environ['REPARTEE_BOUNCER_TEST_NETID']}'
                 diagnostic = (data / f'{APP_NAME}.log').read_text()
                 assert 'TRACE ' in diagnostic, 'Diagnostic TRACE output was not enabled'
                 assert 'web command received' in diagnostic, 'Command receipt diagnostics were not exercised'
+                assert 'fixture-memory-' not in diagnostic, 'Memory-only message body entered diagnostics'
                 assert 'fixture-history-' not in diagnostic, 'History body entered diagnostics'
                 assert 'fixture-browser-outgoing' not in diagnostic, 'Outgoing body entered diagnostics'
+                if cycle == 0 and os.environ.get('REPARTEE_MEMORY_HISTORY'):
+                    Path(os.environ['REPARTEE_MEMORY_CONTROL']).touch()
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline:
+                        records = Path(os.environ['REPARTEE_PRESENCE_EVENTS']).read_text().splitlines()
+                        if any(json.loads(line).get('offline_ack') for line in records):
+                            break
+                        time.sleep(.02)
+                    else:
+                        raise TimeoutError('Soju did not acknowledge the offline upstream message')
                 print(f'PASS: daemon cycle {cycle + 1}: browser history, clean stop, only local startup events in SQLite, no history bodies in diagnostics')
             except Exception:
                 run(['docker', 'logs', container])

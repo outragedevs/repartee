@@ -13,7 +13,7 @@ import tempfile
 from test_bouncer_binding import PINS, ROOT, run, wait_ready
 
 
-def scenario(implementation, source, auto_away, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, filehost=False, oauth=False, upstream_auth=False, account_registration=False, server_search=False, metadata=False, certificates=False, channel_context=False, network_icon=False):
+def scenario(implementation, source, auto_away, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, filehost=False, oauth=False, upstream_auth=False, account_registration=False, server_search=False, metadata=False, certificates=False, channel_context=False, network_icon=False, memory_history=False, daemon_image=None):
     with tempfile.TemporaryDirectory(prefix="bouncer-presence-", dir="/tmp") as directory:
         temporary = Path(directory)
         processes = []
@@ -48,6 +48,7 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                     *(["--names"] if names or channel_context else []),
                     *(["--channel-context"] if channel_context else []),
                     *(["--network-icon"] if network_icon else []),
+                    *(["--memory-history", "--memory-control", str(temporary / "memory-trigger")] if memory_history else []),
                     *(["--redaction"] if redaction or server_search or metadata else []),
                     *(["--upstream-auth"] if upstream_auth else []),
                     *(["--account-registration"] if account_registration else []),
@@ -74,7 +75,7 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                     config.write_text(
                         f"hostname fixture.local\ndb sqlite3 {temporary}/main.db\n"
                         f"listen {'ircs' if oauth or certificates else 'irc+insecure'}://127.0.0.1:{port}\n"
-                        f"listen unix+admin://{admin}\nmessage-store db\n"
+                        f"listen unix+admin://{admin}\nmessage-store {'memory' if memory_history else 'db'}\n"
                         + (f"listen https://127.0.0.1:{http_port}\ntls {temporary}/cert.pem {temporary}/key.pem\n"
                            f"http-ingress https://127.0.0.1:{http_port}\nfile-upload fs {temporary}/uploads\n" if filehost else "")
                     )
@@ -176,8 +177,32 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                     if implementation == "soju":
                         environment["REPARTEE_OAUTH_TEST_CA"] = str(temporary / "ca.pem")
                         environment["REPARTEE_CLIENT_CERT_TEST_PEM"] = str(temporary / "client.pem")
-                run(["make", "test", f"TEST_ARGS={test_filter} -- --ignored --nocapture"],
-                    cwd=ROOT, env=environment)
+                if memory_history:
+                    with socket.create_connection(("127.0.0.1", settings["port"]), timeout=5) as probe:
+                        probe.sendall(b"CAP LS 302\r\n")
+                        caps = set()
+                        with probe.makefile("r") as lines:
+                            for line in lines:
+                                header, _, values = line.rstrip().partition(" :")
+                                if " CAP " not in header or " LS" not in header:
+                                    continue
+                                caps.update(value.split("=", 1)[0] for value in values.split())
+                                if not header.endswith(" LS *"):
+                                    break
+                        assert "soju.im/bouncer-networks" in caps, "Capability probe did not reach Soju"
+                        assert "draft/chathistory" not in caps, "Memory-store Soju advertised CHATHISTORY"
+                    environment["REPARTEE_BOUNCER_TEST_NETID"] = "1"
+                    environment["REPARTEE_MEMORY_HISTORY"] = "1"
+                    environment["REPARTEE_MEMORY_CONTROL"] = str(temporary / "memory-trigger")
+                    run([sys.executable, str(ROOT / "scripts/test_bouncer_daemon_history.py"), daemon_image],
+                        cwd=ROOT, env=environment)
+                    rows = [json.loads(line) for line in events.read_text().splitlines()]
+                    for cycle in range(2):
+                        assert any(row.get("outgoing") == f"fixture-memory-outgoing-{cycle}" for row in rows), "Outgoing message did not reach upstream"
+                    test_filter = "daemon memory history"
+                else:
+                    run(["make", "test", f"TEST_ARGS={test_filter} -- --ignored --nocapture"],
+                        cwd=ROOT, env=environment)
                 if setname and implementation == "soju":
                     rows = [json.loads(line) for line in events.read_text().splitlines()]
                     if not any(row.get("realname") == "Fixture changed name %" for row in rows):
@@ -225,7 +250,16 @@ def main():
     parser.add_argument("--oauth", action="store_true")
     parser.add_argument("--upstream-auth", action="store_true")
     parser.add_argument("--account-registration", action="store_true")
+    parser.add_argument("--memory-history", action="store_true")
+    parser.add_argument("--daemon-image")
     args = parser.parse_args()
+    if args.memory_history and (args.implementation != "soju" or not args.daemon_image):
+        parser.error("--memory-history requires Soju and --daemon-image")
+    if args.memory_history and any((args.setname, args.monitor, args.monitor_unavailable, args.invites,
+                                   args.network_icon, args.channel_context, args.names, args.redaction,
+                                   args.server_search, args.metadata, args.certificates, args.filehost,
+                                   args.oauth, args.upstream_auth, args.account_registration)):
+        parser.error("--memory-history is a standalone daemon scenario")
     if (args.upstream_auth or args.account_registration) and args.implementation == "soju" and not args.oauth:
         parser.error("--upstream-auth requires --oauth for its verified TLS fixture")
     if args.oauth and args.implementation != "soju":
@@ -234,8 +268,8 @@ def main():
     head = run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True).stdout.strip()
     if head != PINS[args.implementation]:
         raise RuntimeError("Upstream checkout does not match the audited revision")
-    scenario(args.implementation, source, True, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.filehost, args.oauth, args.upstream_auth, args.account_registration, args.server_search, args.metadata, args.certificates, args.channel_context, args.network_icon)
-    if args.implementation == "soju" and not args.setname and not args.monitor and not args.monitor_unavailable and not args.invites and not args.names and not args.redaction and not args.filehost and not args.oauth and not args.upstream_auth and not args.account_registration and not args.server_search and not args.metadata and not args.certificates and not args.channel_context and not args.network_icon:
+    scenario(args.implementation, source, True, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.filehost, args.oauth, args.upstream_auth, args.account_registration, args.server_search, args.metadata, args.certificates, args.channel_context, args.network_icon, args.memory_history, args.daemon_image)
+    if args.implementation == "soju" and not args.setname and not args.monitor and not args.monitor_unavailable and not args.invites and not args.names and not args.redaction and not args.filehost and not args.oauth and not args.upstream_auth and not args.account_registration and not args.server_search and not args.metadata and not args.certificates and not args.channel_context and not args.network_icon and not args.memory_history:
         scenario(args.implementation, source, False)
 
 
