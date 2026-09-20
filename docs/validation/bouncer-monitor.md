@@ -76,8 +76,8 @@ server targets and proves the status query is issued.
 Both providers passed dynamic account-notify withdrawal/re-advertisement; stale
 account data is cleared and the capability is negotiated again. Soju additionally
 passed MONITOR withdrawal and restoration with refreshed online/offline states.
-Results: `/tmp/repartee-monitor-dynamic-soju5.log` and
-`/tmp/repartee-monitor-dynamic-lurker5.log`.
+Results: `/tmp/repartee-monitor-dynamic-soju6.log` and
+`/tmp/repartee-monitor-dynamic-lurker6.log`.
 
 The pinned Lurker does not expose dynamic MONITOR withdrawal: `bouncer.ts`
 RELAY_DROP includes numeric 005 (lines 212–222, applied at line 471), and
@@ -95,7 +95,7 @@ Results: `/tmp/repartee-monitor-unavailable-soju1.log` and
 `/tmp/repartee-monitor-unavailable-lurker1.log`.
 
 `make clippy` then `make test` passed in
-`/tmp/repartee-monitor-dynamic-check6`: zero project warnings, 2484 native tests,
+`/tmp/repartee-monitor-dynamic-check7`: zero project warnings, 2484 native tests,
 142 web host tests and 8 ignored fixture tests. Follow-up review is pending.
 
 ## Review round 1
@@ -130,3 +130,25 @@ rows for subscribed/pending states and rejection, with literal percent and marku
 characters. `/tmp/repartee-monitor-browser1.log` records the result; the screenshot
 `/tmp/repartee-monitor-web.png` was inspected. Controlled WebSocket messages supply
 these UI payloads; actual App/bouncer behavior is tested separately above.
+
+## Follow-up review round 1: metadata refresh claim
+
+The reviewer proposed MONITOR S on metadata-capability restoration to hydrate
+account/away/host/real-name fields. Source verification contradicts that mechanism:
+Soju `downstream.go`'s MONITOR S branch and Lurker `bouncer.ts`'s S branch send only
+730/731 with the nickname. Neither returns those metadata fields or forwards S
+upstream. The IRCv3 extended-monitor specification
+(https://ircv3.net/specs/extensions/extended-monitor) promises change notifications,
+not an initial metadata snapshot or refresh command. Unknown after invalidation
+is therefore intentional until a new notification arrives, not evidence that the
+subscription is broken. Automatic WHO/WHOIS metadata hydration would be a separate
+feature, not something MONITOR S can provide.
+
+The integration sequence now injects a new ACCOUNT notification after CAP ACK,
+before any MONITOR transition, and requires the watched peer to update while the
+other client's list stays isolated. This directly checks the claimed failure
+path without relying on a subsequent MONITOR toggle.
+
+The strengthened post-CAP-ACK ACCOUNT scenario passed on both pinned servers in
+`/tmp/repartee-monitor-dynamic-soju6.log` and
+`/tmp/repartee-monitor-dynamic-lurker6.log`; follow-up review round 2 is pending.

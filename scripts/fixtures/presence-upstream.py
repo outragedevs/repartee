@@ -76,6 +76,8 @@ class PresenceServer:
                     elif params[1] == 'account-off':
                         capabilities.discard('account-notify')
                         send(f':fixture.local CAP {nick} DEL :account-notify')
+                    elif params[1] == 'account-change':
+                        send(':Alice!changed@changed.example ACCOUNT restored-account')
                     elif params[1] == 'account-on':
                         capabilities.add('account-notify')
                         send(f':fixture.local CAP {nick} NEW :account-notify')
