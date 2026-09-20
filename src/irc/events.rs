@@ -84,6 +84,11 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
     let tags = extract_tags(msg);
 
     match &msg.command {
+        _ if super::account_required::is_failure(msg) => {
+            let label = state.connections.get(conn_id).map_or(conn_id, |conn| conn.label.as_str());
+            let buffer_id = make_buffer_id(conn_id, label);
+            emit(state, &buffer_id, &super::account_required::Required.to_string());
+        }
         Command::PRIVMSG(target, text) => {
             handle_privmsg(
                 state,

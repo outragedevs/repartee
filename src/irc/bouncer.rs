@@ -27,11 +27,16 @@ pub(super) async fn confirm_registration(
 ) -> Result<()> {
     let mut confirmed = expected.is_none();
     let mut tracker = super::batch::BatchTracker::default();
+    let mut welcomed = false;
     for message in early_messages.iter() {
+        if !welcomed { super::account_required::check(message)?; }
+        welcomed |= matches!(message.command, Command::Response(Response::RPL_WELCOME, _));
         confirm_identity(message, &mut tracker, expected, &mut confirmed)?;
     }
     while let Some(result) = stream.next().await {
         let message = result?;
+        if !welcomed { super::account_required::check(&message)?; }
+        welcomed |= matches!(message.command, Command::Response(Response::RPL_WELCOME, _));
         confirm_identity(&message, &mut tracker, expected, &mut confirmed)?;
         match &message.command {
             Command::Raw(command, args)
@@ -40,6 +45,9 @@ pub(super) async fn confirm_registration(
                         .first()
                         .is_some_and(|arg| arg.eq_ignore_ascii_case("BOUNCER")) =>
             {
+                if args.get(1).is_some_and(|code| code.eq_ignore_ascii_case("ACCOUNT_REQUIRED")) {
+                    return Err(super::account_required::Required.into());
+                }
                 return Err(eyre!("Bouncer rejected the requested network binding"));
             }
             Command::ERROR(_) => return Err(eyre!("Bouncer closed registration")),

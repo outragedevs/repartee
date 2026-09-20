@@ -1,3 +1,4 @@
+mod account_required;
 pub mod batch;
 pub mod bouncer;
 pub mod cap;
@@ -372,6 +373,7 @@ async fn await_authenticate_payload(stream: &mut irc::client::ClientStream) -> R
         let mut total = 0usize;
         while let Some(msg_result) = stream.next().await {
             let msg = msg_result?;
+            account_required::check(&msg)?;
             match &msg.command {
                 Command::AUTHENTICATE(param) => {
                     total += param.len();
@@ -428,6 +430,7 @@ async fn await_authenticate_plus(
     let result = tokio::time::timeout(std::time::Duration::from_secs(SASL_TIMEOUT_SECS), async {
         while let Some(msg_result) = stream.next().await {
             let msg = msg_result?;
+            account_required::check(&msg)?;
             match &msg.command {
                 Command::AUTHENTICATE(param) if param == "+" => {
                     return Ok(AuthenticateAck::Proceed);
@@ -476,6 +479,7 @@ async fn await_sasl_result(stream: &mut irc::client::ClientStream) -> Result<()>
     let result = tokio::time::timeout(std::time::Duration::from_secs(SASL_TIMEOUT_SECS), async {
         while let Some(result) = stream.next().await {
             let msg = result?;
+            account_required::check(&msg)?;
             if let Command::Response(response, _) = &msg.command {
                 if sasl_success(*response) {
                     return Ok(());
@@ -846,6 +850,10 @@ pub async fn connect_server(
         // reads the same stream), so anything they made it send has already been
         // charged to the real counter — the mirror has to catch up on them too.
         for message in neg.early_messages {
+            if !sent_connected && account_required::is_failure(&message) {
+                let _ = tx.send(IrcEvent::Disconnected(id, Some(account_required::Required.to_string()))).await;
+                return;
+            }
             if !sent_connected { cap::update_registration_caps(&mut neg.enabled_caps, &message); }
             if let Err(error) = echo.handle_inbound(&message, &echo_sender, std::time::Instant::now()) {
                 tracing::warn!("failed to send CTCP reply: {error}");
@@ -879,6 +887,10 @@ pub async fn connect_server(
             let Some(result) = result else { break };
             match result {
                 Ok(message) => {
+                    if !sent_connected && account_required::is_failure(&message) {
+                        error = Some(account_required::Required.to_string());
+                        break;
+                    }
                     if !sent_connected { cap::update_registration_caps(&mut neg.enabled_caps, &message); }
                     // The crate has just handled this message inside `poll_next`
                     // and may already have queued the autojoin
@@ -1016,6 +1028,7 @@ async fn negotiate_caps(
 
     while let Some(result) = stream.next().await {
         let msg = result?;
+        account_required::check(&msg)?;
 
         // 421 ERR_UNKNOWNCOMMAND for CAP → non-IRCv3 server
         if let Command::Response(Response::ERR_UNKNOWNCOMMAND, ref args) = msg.command
@@ -1124,6 +1137,7 @@ async fn negotiate_caps(
             // Wait for ACK/NAK
             while let Some(result) = stream.next().await {
                 let msg = result?;
+                account_required::check(&msg)?;
                 if let Command::CAP(_, CapSubCommand::ACK, ref acked, _) = msg.command {
                     if let Some(ref acked_str) = *acked {
                         for cap in acked_str.split_whitespace() {
@@ -1201,6 +1215,7 @@ async fn negotiate_caps(
                         diag.push(format!("SASL: {mechanism} authentication successful"));
                     }
                     Err(e) => {
+                        if e.downcast_ref::<account_required::Required>().is_some() { return Err(e); }
                         diag.push(format!("SASL: {mechanism} authentication FAILED: {e}"));
                         enabled_caps.remove("sasl");
                         // Abort the exchange before CAP END. A failure we
@@ -1221,10 +1236,18 @@ async fn negotiate_caps(
             diag.push("SASL: credentials available but server does not advertise sasl".to_string());
         }
 
+        if server_caps.has(account_required::CAP) {
+            if !authenticated && params.password.is_none_or(str::is_empty) && !params.has_client_cert {
+                return Err(account_required::Required.into());
+            }
+            diag.push("Server requires account authentication; SASL or a supported PASS login must succeed.".into());
+        }
+
         if server_caps.has("draft/extended-isupport") {
             sender.send(Command::CAP(None, CapSubCommand::REQ, None, Some("draft/extended-isupport".into())))?;
             while let Some(result) = stream.next().await {
                 let message = result?;
+                account_required::check(&message)?;
                 if let Command::CAP(_, CapSubCommand::ACK | CapSubCommand::NAK, _, _) = &message.command {
                     cap::update_registration_caps(&mut enabled_caps, &message);
                     break;

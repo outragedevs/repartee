@@ -434,3 +434,18 @@ and web views, preserving explicit names and conversation buffers. Clippy has
 no project warnings; 2666 native/145 web tests and pinned Soju/Lurker integration
 pass. Full Sol medium review round 3 is clean. Remaining identity extensions,
 channel-context routing and the complete acceptance audit remain in scope.
+
+### Required account authentication (clean review completed)
+
+Recognize the informational `soju.im/account-required` capability without
+requesting it; retain SASL and PASS login paths and surface global
+`FAIL * ACCOUNT_REQUIRED` during registration and in native/web server buffers.
+Evidence and protocol scope: `docs/validation/bouncer-account-required.md`.
+
+Global authentication refusals are classified at CAP, SASL and registration
+stages; post-welcome failures remain visible without disconnecting the session.
+Binding-specific authentication failures retain an actionable diagnostic. Clippy
+has no project warnings; 2669 native/145 web tests, pinned Soju/Lurker PASS/SASL,
+and Soju certificate/EXTERNAL and OAUTHBEARER fixtures pass. Full Sol medium
+review round 3 is clean. SAFERATE, ICON, channel-context routing and the full
+acceptance audit remain required.

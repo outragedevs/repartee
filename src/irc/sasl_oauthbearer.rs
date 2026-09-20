@@ -27,7 +27,9 @@ pub async fn run(sender: &IrcSender, stream: &mut irc::client::ClientStream, use
         let mut challenge_bytes = 0;
         let mut error_acknowledged = false;
         while let Some(message) = stream.next().await {
-            match message?.command {
+            let message = message?;
+            super::account_required::check(&message)?;
+            match message.command {
                 Command::Response(response, _) => {
                     if let Some(error) = sasl_failure(response) { return Err(eyre!(error)); }
                     if sasl_success(response) {
