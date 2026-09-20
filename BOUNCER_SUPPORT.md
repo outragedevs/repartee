@@ -545,3 +545,9 @@ AROUND context, empty-result replacement/reload, normal-conversation isolation,
 and local persistence exclusion. Lurker and Soju memory-store runs verify the
 unsupported-search path. See `docs/validation/bouncer-server-search.md`; full
 transport-error persistence coverage remains open.
+
+Live daemon scenarios now include a real downstream TCP interruption, browser
+reload while disconnected, rejection of an offline send, automatic reconnect,
+and successful post-reconnect delivery. The local persistence boundary is checked
+at shutdown after these errors. The exact fault and remaining failure cases are
+documented in `docs/validation/bouncer-daemon-history.md`.

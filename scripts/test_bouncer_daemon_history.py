@@ -1,6 +1,7 @@
 """Check history exclusion across real daemon processes in disposable containers."""
 
 import argparse
+from contextlib import ExitStack
 import json
 import os
 import re
@@ -9,6 +10,8 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+
+from bouncer_fault_proxy import FaultProxy
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_NAME = re.search(r'pub const APP_NAME: &str = "([^"]+)"', (ROOT / 'src/constants.rs').read_text()).group(1)
@@ -22,7 +25,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('image')
     args = parser.parse_args()
-    with tempfile.TemporaryDirectory(prefix='bouncer-daemon-', dir='/tmp') as directory:
+    with tempfile.TemporaryDirectory(prefix='bouncer-daemon-', dir='/tmp') as directory, ExitStack() as resources:
+        provider_port = int(os.environ['REPARTEE_BOUNCER_TEST_PORT'])
+        proxy = resources.enter_context(FaultProxy(provider_port)) if os.environ.get('REPARTEE_DAEMON_LIVE_HISTORY') else None
         data = Path(directory)
         (data / 'config.toml').write_text(f'''
 [general]
@@ -42,9 +47,10 @@ port = 8443
 [servers.fixture]
 label = 'fixture'
 address = 'host.docker.internal'
-port = {int(os.environ['REPARTEE_BOUNCER_TEST_PORT'])}
+port = {proxy.port if proxy else provider_port}
 tls = false
 autoconnect = true
+reconnect_delay = 1
 channels = []
 bouncer_network_id = '{os.environ['REPARTEE_BOUNCER_TEST_NETID']}'
 ''')
@@ -62,6 +68,8 @@ bouncer_network_id = '{os.environ['REPARTEE_BOUNCER_TEST_NETID']}'
                 port = run(['docker', 'port', container, '8443/tcp'], capture_output=True).stdout.strip().rsplit(':', 1)[1]
                 environment = dict(os.environ, REPARTEE_DAEMON_TEST_URL=f'https://127.0.0.1:{port}',
                                    REPARTEE_DAEMON_TEST_CYCLE=str(cycle))
+                if proxy:
+                    environment["REPARTEE_FAULT_CONTROL_URL"] = proxy.control_url
                 deadline = time.monotonic() + 30
                 while time.monotonic() < deadline:
                     if run(['docker', 'inspect', '-f', '{{.State.Running}}', container], capture_output=True).stdout.strip() != 'true':

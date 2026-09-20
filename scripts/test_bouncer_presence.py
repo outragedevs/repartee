@@ -202,6 +202,9 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                     rows = [json.loads(line) for line in events.read_text().splitlines()]
                     for cycle in range(2):
                         assert any(row.get("outgoing") == f"fixture-memory-outgoing-{cycle}" for row in rows), "Outgoing message did not reach upstream"
+                    assert not any("fixture-memory-fault-unsent-" in row.get("outgoing", "") for row in rows), "Disconnected send reached upstream"
+                    for cycle in range(2):
+                        assert any(row.get("outgoing") == f"fixture-memory-reconnected-{cycle}" for row in rows), "Post-reconnect message did not reach upstream"
                     test_filter = "daemon memory history" if memory_history else "daemon live history"
                 else:
                     run(["make", "test", f"TEST_ARGS={test_filter} -- --ignored --nocapture"],

@@ -125,3 +125,30 @@ previous connection already acknowledged. See
 These scenarios close the live-upstream delivery gap of the earlier fake/disabled
 upstream fixture. They do not cover provider process restart, server-search
 persistence, all transport failures, or the unresolved TARGETS enumeration gaps.
+
+## Transport loss and reconnect
+
+The live-history and Soju memory-store daemon scenarios route the downstream IRC
+connection through `scripts/bouncer_fault_proxy.py`. This disposable loopback
+proxy forwards bytes unchanged and never records their contents. Its separate
+loopback control endpoint is used by the test runner, not by application code.
+
+For each daemon lifecycle, after the search checks, the browser fixture cuts an
+established TCP connection and blocks replacement connections. It requires an
+actual daemon `ConnectionStatus` transition to disconnected. The browser reloads
+while transport is still unavailable and must display the conversation from
+volatile daemon memory. A send attempt must report `Failed to send message`; its sentinel
+must never appear as a chat message or reach the upstream, including after
+reconnection.
+
+The proxy then resumes forwarding. With the fixture's reconnect delay set to one
+second, the browser must observe automatic reconnection, send a new message, and
+receive its upstream echo without duplicating the pre-disconnect message. The
+upstream event log independently proves successful post-reconnect delivery. The
+normal shutdown inspection still requires only local startup records in SQLite
+and no message bodies in the diagnostic file.
+
+This covers an unexpected downstream TCP close, offline browsing, rejected send,
+and automatic recovery for both providers, including Soju without CHATHISTORY.
+It does not claim TLS-failure coverage, a partial history-batch timeout, or a
+restart of the provider itself. Those require separate evidence.
