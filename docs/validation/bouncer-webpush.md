@@ -29,8 +29,9 @@ request's Debug implementation. Raw IRC trace output is suppressed for both lega
 `diagnostics::WireContentFilter`, even under explicit dependency trace directives.
 Subscription data remains transient; the browser and bouncer own persistence.
 
-Operations require verified TLS, successful SASL on the current transport,
-negotiated capability and a valid VAPID point. Endpoint validation requires HTTPS,
+Operations require verified TLS, either successful SASL or a confirmed bound
+bouncer identity on the current transport, negotiated capability and a valid
+VAPID point. Endpoint validation requires HTTPS,
 no userinfo/fragment/whitespace/control characters, a valid uncompressed P-256
 subscription key, a 16-byte auth secret and an IRC frame within 512 bytes.
 Each physical connection serializes mutations. Matching server acknowledgments
@@ -108,3 +109,17 @@ include the regression evidence.
 Full Sol medium review round 4 is clean (`/tmp/repartee-webpush-review4.log`).
 The explicit mixed-case regression passes with all 2652 native and 145 web tests
 and no project clippy warnings (`/tmp/repartee-webpush-case-check-{clippy,test}.log`).
+
+## PASS authentication
+
+Soju permits WebPush after successful USER/PASS registration; its WebPush
+extension does not require SASL. Repartee now accepts a bound bouncer identity
+confirmed by the current IRC transport for this path. Configured network IDs
+alone do not grant access. TLS verification, capability negotiation and VAPID
+validation remain required. CLIENTCERT retains its separate SASL requirement
+from Soju's client-cert extension specification.
+
+The existing encrypted provider fixture also accepts
+`REPARTEE_BOUNCER_TEST_LEGACY=1`, selecting USER `fixture/fixture` and PASS
+instead of SASL and BIND. It asserts that SASL did not authenticate, then runs
+the same subscription and independently decrypted network-message checks.

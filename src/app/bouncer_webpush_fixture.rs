@@ -52,9 +52,18 @@ async fn pinned_bouncer_webpush() {
     let browser = std::env::var_os("REPARTEE_WEBPUSH_BROWSER").is_some();
     let mut config: crate::config::ServerConfig = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=true\nchannels=[]\nbouncer_network_id='1'\nsasl_mechanism='PLAIN'").unwrap();
     config.port = std::env::var("REPARTEE_BOUNCER_TEST_PORT").unwrap().parse().unwrap();
-    config.sasl_user = Some("fixture".into());
-    config.sasl_pass = Some("fixture-password".into());
+    let legacy = std::env::var("REPARTEE_BOUNCER_TEST_LEGACY").as_deref() == Ok("1");
+    if legacy {
+        config.bouncer_network_id = None;
+        config.sasl_mechanism = None;
+        config.username = Some("fixture/fixture".into());
+        config.password = Some("fixture-password".into());
+    } else {
+        config.sasl_user = Some("fixture".into());
+        config.sasl_pass = Some("fixture-password".into());
+    }
     let mut app = connect(&config).await;
+    assert_eq!(app.irc_handles["fixture"].sasl_authenticated, !legacy);
     if let Ok(script) = std::env::var("REPARTEE_WEBPUSH_UI_SCRIPT") {
         app.web_broadcaster = std::sync::Arc::new(crate::web::broadcast::WebBroadcaster::new(128));
         super::super::filehost_browser_fixture::run(&mut app, &script).await;

@@ -28,7 +28,8 @@ impl super::App {
         if conn.status != ConnectionStatus::Connected || !conn.origin_config.tls || !conn.origin_config.tls_verify
             || conn.bouncer_control() || conn.bouncer_network_id().is_none()
             || !conn.enabled_caps.contains(webpush::CAP)
-            || !self.irc_handles.get(id).is_some_and(|handle| handle.sasl_authenticated) { return None; }
+            || !self.irc_handles.get(id).is_some_and(|handle| handle.sasl_authenticated
+                || matches!(&handle.bouncer_identity, Some(crate::irc::bouncer::Identity::Network(_)))) { return None; }
         let vapid = conn.isupport_parsed.get("VAPID")?;
         if !webpush::valid_public_key(vapid) { return None; }
         let scope = format!("{:x}", Sha256::digest(conn.network_key().as_bytes()));
