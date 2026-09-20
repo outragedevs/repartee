@@ -1,7 +1,7 @@
 # Explicit bouncer NAMES validation
 
-Status: implemented on `feat/explicit-bouncer-names`; the full tracked and
-untracked diff passed a clean GPT-5.6 Sol medium review.
+Status: merged in https://github.com/outragedevs/repartee/pull/77 after a clean
+GPT-5.6 Sol medium review of the full tracked and untracked diff.
 
 Soju at `82e8b7adfb2ab64ec3b88807d29b8b6940236008` advertises
 `no-implicit-names`, `draft/no-implicit-names` and `soju.im/no-implicit-names`.

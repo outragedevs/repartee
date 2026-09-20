@@ -13,6 +13,7 @@ pub(crate) mod emote_anim;
 mod image;
 pub mod input;
 mod irc;
+mod irc_dispatch;
 pub mod bouncer;
 mod bouncer_children;
 mod server_history;
@@ -25,6 +26,8 @@ pub mod monitor;
 mod invite_fixture;
 #[cfg(test)]
 mod names_fixture;
+#[cfg(test)]
+mod live_batch_tests;
 #[cfg(test)]
 mod presence_fixture;
 mod connection_attempt;

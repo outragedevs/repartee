@@ -30,6 +30,8 @@ class PresenceServer:
         capabilities = {"setname"} if self.setname else set()
         if self.invites:
             capabilities.add("invite-notify")
+        if self.names:
+            capabilities.update(["labeled-response", "message-tags", "batch", "echo-message"])
         if self.monitor:
             capabilities.update(["account-notify", "away-notify", "chghost", "setname", "extended-monitor"])
 
