@@ -340,6 +340,9 @@ pub fn process_completed_batch(
             };
             let is_before = matches!(direction, Some(Direction::Before));
             let collect_display = (is_gapfill || server_owned) && !(server_owned && is_before && !clean_end);
+            let history_rows = batch.messages.iter()
+                .filter(|message| !crate::irc::redaction::is_redaction(message))
+                .count();
             let outcome =
                 crate::irc::events::ingest_chathistory_batch(state, conn_id, batch, collect_display);
             let mut continuation: Option<GapfillContinuation> = None;
@@ -347,7 +350,7 @@ pub fn process_completed_batch(
                 if let Some(conn) = state.connections.get_mut(conn_id) {
                     conn.chathistory.complete_target(
                         target,
-                        batch.messages.len(),
+                        history_rows,
                         outcome.oldest,
                         clean_end,
                     );
@@ -370,7 +373,7 @@ pub fn process_completed_batch(
                 if clean_end
                     && is_after
                     && let Some(limit) = after_limit
-                    && batch.messages.len() >= limit
+                    && history_rows >= limit
                     && let Some((newest_ms, newest_msgid)) = outcome.newest
                     && let Some(conn) = state.connections.get_mut(conn_id)
                 {
@@ -1830,6 +1833,112 @@ mod tests {
             process_completed_batch(&mut state, conn_id, &short, true).is_none(),
             "a short AFTER page does not chain"
         );
+    }
+
+    #[test]
+    fn redactions_do_not_fill_history_pages_or_advance_anchors() {
+        use crate::irc::chathistory::Direction;
+        for direction in [Direction::Before, Direction::After] {
+            let (mut state, _rx, _) = setup_ingest_state("test");
+            state
+                .connections
+                .get_mut("test")
+                .unwrap()
+                .chathistory
+                .mark_in_flight("#test", direction, 2);
+            let batch = BatchInfo {
+                message_order: Vec::new(),
+                batch_type: "CHATHISTORY".into(),
+                params: vec!["#test".into()],
+                started_at: Instant::now(),
+                opener_tags: None,
+                dropped_messages: 0,
+                messages: vec![
+                    make_history_privmsg_at("a", "#test", "text", "m1", "2024-01-01T00:00:01.000Z"),
+                    "@time=2024-01-01T00:00:09.000Z;msgid=deletion :a!u@h REDACT #test m1 :reason"
+                        .parse()
+                        .unwrap(),
+                ],
+            };
+            let outcome =
+                crate::irc::events::ingest_chathistory_batch(&state, "test", &batch, false);
+            assert_eq!(outcome.newest, Some((1_704_067_201_000, Some("m1".into()))));
+            assert!(process_completed_batch(&mut state, "test", &batch, true).is_none());
+            if direction == Direction::Before {
+                assert!(
+                    state.connections["test"]
+                        .chathistory
+                        .is_before_exhausted("#test")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn redaction_only_pages_have_no_anchor_and_timeout_is_not_exhaustion() {
+        use crate::irc::chathistory::Direction;
+        for clean_end in [false, true] {
+            let (mut state, _rx, _) = setup_ingest_state("test");
+            state
+                .connections
+                .get_mut("test")
+                .unwrap()
+                .chathistory
+                .mark_in_flight("#test", Direction::Before, 1);
+            let batch = BatchInfo {
+                message_order: Vec::new(),
+                batch_type: "CHATHISTORY".into(),
+                params: vec!["#test".into()],
+                started_at: Instant::now(),
+                opener_tags: None,
+                dropped_messages: 0,
+                messages: vec![
+                    "@time=2024-01-01T00:00:09.000Z;msgid=deletion :a!u@h redact #test m1"
+                        .parse()
+                        .unwrap(),
+                ],
+            };
+            let outcome =
+                crate::irc::events::ingest_chathistory_batch(&state, "test", &batch, false);
+            assert!(outcome.oldest.is_none());
+            assert!(outcome.newest.is_none());
+            assert!(process_completed_batch(&mut state, "test", &batch, clean_end).is_none());
+            assert_eq!(
+                state.connections["test"]
+                    .chathistory
+                    .is_before_exhausted("#test"),
+                clean_end
+            );
+        }
+    }
+
+    #[test]
+    fn full_history_page_with_redaction_keeps_original_continuation() {
+        use crate::irc::chathistory::Direction;
+        let (mut state, _rx, _) = setup_ingest_state("test");
+        state
+            .connections
+            .get_mut("test")
+            .unwrap()
+            .chathistory
+            .mark_in_flight("#test", Direction::After, 1);
+        let batch = BatchInfo {
+            message_order: Vec::new(),
+            batch_type: "CHATHISTORY".into(),
+            params: vec!["#test".into()],
+            started_at: Instant::now(),
+            opener_tags: None,
+            dropped_messages: 0,
+            messages: vec![
+                make_history_privmsg_at("a", "#test", "text", "m1", "2024-01-01T00:00:01.000Z"),
+                "@time=2024-01-01T00:00:09.000Z;msgid=deletion :a!u@h REDACT #test m1"
+                    .parse()
+                    .unwrap(),
+            ],
+        };
+        let continuation = process_completed_batch(&mut state, "test", &batch, true).unwrap();
+        assert_eq!(continuation.anchor_msgid.as_deref(), Some("m1"));
+        assert_eq!(continuation.anchor_ms, 1_704_067_201_000);
     }
 
     #[test]
