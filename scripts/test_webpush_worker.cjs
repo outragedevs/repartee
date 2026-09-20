@@ -125,10 +125,17 @@ const crypto = require('node:crypto');
         assert.equal(first.data.scope, scope);
         await push('MARKREAD Alice :timestamp=2026-09-20T10:00:00.000Z');
         await until(async () => (await notifications()).length === 0);
-        await push('@time=2026-09-20T10:00:00.000Z;+draft/channel-context=#Room[;msgid=context :Alice!u@host PRIVMSG Me :channel context');
+        for (const [tag, channel] of [['+channel-context', '#Final['], ['+draft/channel-context', '#Draft['], ['+channel-context', '#Colon:scope']]) {
+            await push(`@time=2026-09-20T10:00:00.000Z;${tag}=${channel};msgid=context-${channel} :Alice PRIVMSG Me :channel context`);
+            await until(async () => (await notifications()).length === 1);
+            assert.equal((await notifications())[0].data.target, channel);
+            await push(`MARKREAD ${channel.toLowerCase().replace('[', '{')} :timestamp=2026-09-20T10:00:00.000Z`);
+            await until(async () => (await notifications()).length === 0);
+        }
+        await push('@time=2026-09-20T10:00:00.000Z;+channel-context=#Wrong;msgid=public :Alice!u@host PRIVMSG @#Actual :public message');
         await until(async () => (await notifications()).length === 1);
-        assert.equal((await notifications())[0].data.target, '#Room[');
-        await push('MARKREAD #room{ :timestamp=2026-09-20T10:00:00.000Z');
+        assert.equal((await notifications())[0].data.target, '#Actual');
+        await push('MARKREAD #actual :timestamp=2026-09-20T10:00:00.000Z');
         await until(async () => (await notifications()).length === 0);
         await push('@time=2026-09-20T09:59:59.000Z;msgid=late :Alice!u@host PRIVMSG Me :already read');
         await push('@time=2026-09-20T10:00:01.000Z;msgid=new :Alice!u@host PRIVMSG Me :new unread');

@@ -449,3 +449,19 @@ has no project warnings; 2669 native/145 web tests, pinned Soju/Lurker PASS/SASL
 and Soju certificate/EXTERNAL and OAUTHBEARER fixtures pass. Full Sol medium
 review round 3 is clean. SAFERATE, ICON, channel-context routing and the full
 acceptance audit remain required.
+
+## WebPush channel-context compatibility
+
+The current IRCv3 tag is `+channel-context`; the pinned Soju source still handles
+`+draft/channel-context`. The push payload parser accepts both, with the current
+name taking precedence when both are present. Context applies only to private
+user PRIVMSG/NOTICE traffic. Public channel messages, status-targeted channel
+messages, broadcasts, recipient lists and unambiguous server prefixes retain their original
+routing. Notification clicks and MARKREAD use the resulting channel consistently.
+
+Source: https://ircv3.net/specs/client-tags/channel-context.html . Ten payload
+tests and a Chromium module-service-worker fixture cover both aliases, invalid
+values, public-message isolation and matching read-marker routing. The worker
+fixture injects push events and does not claim to exercise push delivery over
+the network. Native/live/history channel-context routing remains a separate
+required increment; this correction does not complete that acceptance item.

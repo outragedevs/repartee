@@ -78,8 +78,10 @@ export function notification(payload, config, now = Date.now()) {
             withoutStatus = withoutStatus.slice(1);
             if (withoutStatus && (config.chantypes || "#&").includes(withoutStatus[0])) recipient = withoutStatus;
         }
-        const context = tags["+draft/channel-context"];
-        if (context && context.length <= 512 && !/[\x00-\x20\x7f,:]/.test(context) && (config.chantypes || "#&").includes(context[0])) recipient = context;
+        const context = tags["+channel-context"] ?? tags["+draft/channel-context"];
+        const userSource = /[!@]/.test(prefix) || !prefix.includes(".");
+        const privateUserMessage = userSource && recipient && !(config.chantypes || "#&").includes(recipient[0]) && !recipient.startsWith("$") && !/[\x00-\x20\x7f,*]/.test(recipient);
+        if (privateUserMessage && context && context.length <= 512 && !/[\x00-\x20\x7f,]/.test(context) && (config.chantypes || "#&").includes(context[0])) recipient = context;
         const channel = recipient && (config.chantypes || "#&").includes(recipient[0]);
         target = channel ? recipient : sender;
         body = params[1];
