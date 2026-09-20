@@ -26,26 +26,14 @@ pub(super) async fn confirm_registration(
     early_messages: &mut Vec<Message>,
 ) -> Result<()> {
     let mut confirmed = expected.is_none();
+    let mut tracker = super::batch::BatchTracker::default();
+    for message in early_messages.iter() {
+        confirm_identity(message, &mut tracker, expected, &mut confirmed)?;
+    }
     while let Some(result) = stream.next().await {
         let message = result?;
+        confirm_identity(&message, &mut tracker, expected, &mut confirmed)?;
         match &message.command {
-            Command::Response(Response::RPL_ISUPPORT, args) => {
-                for token in args.iter().skip(1).take(args.len().saturating_sub(2)) {
-                    if let Some(value) = token.strip_prefix("BOUNCER_NETID=") {
-                        let Some(expected) = expected else {
-                            return Err(eyre!(
-                                "Bouncer control login selected a network; remove the network selector from the login"
-                            ));
-                        };
-                        if normalize_network_id(value).as_deref() != Ok(expected) {
-                            return Err(eyre!(
-                                "Bouncer selected a different network than requested"
-                            ));
-                        }
-                        confirmed = true;
-                    }
-                }
-            }
             Command::Raw(command, args)
                 if command.eq_ignore_ascii_case("FAIL")
                     && args
@@ -69,6 +57,42 @@ pub(super) async fn confirm_registration(
     Err(eyre!(
         "Bouncer disconnected before confirming the network ID"
     ))
+}
+
+fn confirm_identity(message: &Message, tracker: &mut super::batch::BatchTracker, expected: Option<&str>, confirmed: &mut bool) -> Result<()> {
+    let completed;
+    let tokens = match &message.command {
+        Command::BATCH(reference, kind, params) => {
+            tracker.invalidate_isupport_parent(message);
+            if let Some(reference) = reference.strip_prefix('+') {
+                tracker.start_batch(reference, kind.as_ref().map_or("", |kind| kind.to_str()), params.clone().unwrap_or_default(), message.tags.clone());
+                return Ok(());
+            }
+            let Some(batch) = reference.strip_prefix('-').and_then(|reference| tracker.end_batch(reference)) else { return Ok(()); };
+            if batch.batch_type != "DRAFT/ISUPPORT" || batch.parent_ref().is_some_and(|parent| !tracker.is_open(parent)) { return Ok(()); }
+            completed = batch;
+            completed.isupport_tokens(true)
+        }
+        _ if super::batch::BatchTracker::get_batch_tag_owned(message).is_some() => {
+            tracker.add_message(message.clone());
+            return Ok(());
+        }
+        Command::Response(Response::RPL_ISUPPORT, args) => super::isupport::response_tokens(args),
+        _ => return Ok(()),
+    };
+    for token in tokens.unwrap_or_default() {
+        if token == "-BOUNCER_NETID" { *confirmed = expected.is_none(); }
+        if let Some(value) = token.strip_prefix("BOUNCER_NETID=") {
+            let Some(expected) = expected else {
+                return Err(eyre!("Bouncer control login selected a network; remove the network selector from the login"));
+            };
+            if normalize_network_id(value).as_deref() != Ok(expected) {
+                return Err(eyre!("Bouncer selected a different network than requested"));
+            }
+            *confirmed = true;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

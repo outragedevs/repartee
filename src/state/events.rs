@@ -2744,6 +2744,7 @@ pub mod tests {
     pub fn make_test_connection() -> Connection {
         Connection {
             own_realname: None,
+            network_label: None,
             id: "libera".to_string(),
             label: "Libera".to_string(),
             network_scope: None,

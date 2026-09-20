@@ -501,6 +501,7 @@ mod tests {
     fn make_connection() -> Connection {
         Connection {
             own_realname: None,
+            network_label: None,
             id: "net".to_string(),
             label: "NetServer".to_string(),
             network_scope: None,

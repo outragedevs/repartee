@@ -394,7 +394,6 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
     state.update_connection_status(conn_id, ConnectionStatus::Connected);
 
     // Reset reconnect state on successful connection.
-    // Reset ISUPPORT (server sends fresh 005 lines) and silent WHO state.
     // Do NOT clear enabled_caps — the caller sets them from the CAP negotiation
     // result (IrcEvent::Connected carries the negotiated caps). On reconnect,
     // `conn.enabled_caps = enabled_caps` at the call site replaces the old set
@@ -405,7 +404,9 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
         conn.reconnect_attempts = 0;
         conn.next_reconnect = None;
         conn.error = None;
-        conn.isupport_parsed = crate::irc::isupport::Isupport::default();
+        if !conn.enabled_caps.contains("draft/extended-isupport") {
+            conn.isupport_parsed = crate::irc::isupport::Isupport::default();
+        }
         conn.silent_who_channels.clear();
         conn.silent_banlist_channels.clear();
         // Fresh connection ⇒ fresh chathistory state. Clears any request left
@@ -4013,21 +4014,11 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
 
         // RPL_ISUPPORT: args = [our_nick, TOKEN=VALUE, TOKEN=VALUE, ..., "are supported by this server"]
         Response::RPL_ISUPPORT => {
-            if args.len() >= 2 {
-                // Parse KEY=VALUE tokens (skip first arg = our nick, skip last = trailing text)
-                let tokens = &args[1..args.len().saturating_sub(1)];
-                let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+            if let Some(tokens) = super::isupport::response_tokens(args) {
                 if let Some(conn) = state.connections.get_mut(conn_id) {
-                    conn.isupport_parsed.parse_tokens(&token_strs);
+                    conn.isupport_parsed.parse_tokens(&tokens);
                 }
-                // Update label from NETWORK for ad-hoc connections
-                if let Some(network) = state
-                    .connections
-                    .get(conn_id)
-                    .and_then(|c| c.isupport_parsed.network().map(str::to_owned))
-                {
-                    update_label_from_network(state, conn_id, &network);
-                }
+                refresh_isupport_label(state, conn_id);
             }
         }
 
@@ -4669,39 +4660,66 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
     }
 }
 
+pub fn refresh_isupport_label(state: &mut AppState, conn_id: &str) {
+    if let Some(network) = state.connections.get(conn_id)
+        .and_then(|conn| conn.isupport_parsed.network().map(str::to_owned)
+            .or_else(|| conn.network_label.as_ref().map(|_| conn.origin_config.label.clone())))
+    {
+        update_label_from_network(state, conn_id, &network);
+    }
+}
+
 /// Update connection label and server buffer name from NETWORK token.
 /// Only applies to ad-hoc connections where the label still matches the address.
 fn update_label_from_network(state: &mut AppState, conn_id: &str, network_name: &str) {
     let current_label = match state.connections.get(conn_id) {
         Some(conn) if conn.network_scope.is_some() => return,
+        Some(conn) if conn.network_label.as_ref().is_some_and(|label| label != &conn.label) => return,
         Some(conn) => conn.label.clone(),
         None => return,
     };
 
-    // Only update if label looks like a raw address (contains a dot = ad-hoc)
-    // Configured servers already have a human-friendly label from config.
-    if !current_label.contains('.') {
+    if state.connections[conn_id].network_label.is_none()
+        && current_label != state.connections[conn_id].origin_config.address
+    {
         return;
     }
 
-    // Update connection label
-    if let Some(conn) = state.connections.get_mut(conn_id) {
-        conn.label = network_name.to_string();
-    }
-
-    // Rename the server buffer: change id and name
+    if network_name.is_empty() { return; }
     let old_buf_id = make_buffer_id(conn_id, &current_label);
+    let mut label = network_name.to_string();
+    let mut suffix = 2;
+    while make_buffer_id(conn_id, &label) != old_buf_id && state.buffers.contains_key(&make_buffer_id(conn_id, &label)) {
+        label = format!("{network_name} [{suffix}]");
+        suffix += 1;
+    }
+    let network_name = label.as_str();
+    if let Some(conn) = state.connections.get_mut(conn_id) {
+        conn.network_label = Some(label.clone());
+        if current_label == label { return; }
+        conn.label.clone_from(&label);
+        state.pending_web_events.push(crate::web::protocol::WebEvent::ConnectionStatus {
+            conn_id: conn_id.to_string(), label: label.clone(), nick: conn.nick.clone(),
+            connected: conn.status == ConnectionStatus::Connected,
+        });
+    }
     let new_buf_id = make_buffer_id(conn_id, network_name);
     if let Some(mut buf) = state.buffers.shift_remove(&old_buf_id) {
         buf.id.clone_from(&new_buf_id);
         buf.name = network_name.to_string();
         state.buffers.insert(new_buf_id.clone(), buf);
-        state.rekey_activity(&old_buf_id, &new_buf_id);
+        state.rekey_buffer_state(&old_buf_id, &new_buf_id);
 
         // Update active buffer reference if it pointed to the old id
         if state.active_buffer_id.as_deref() == Some(&old_buf_id) {
-            state.active_buffer_id = Some(new_buf_id);
+            state.active_buffer_id = Some(new_buf_id.clone());
         }
+        if state.previous_buffer_id.as_deref() == Some(&old_buf_id) {
+            state.previous_buffer_id = Some(new_buf_id.clone());
+        }
+        state.pending_web_events.push(crate::web::protocol::WebEvent::BufferRenamed {
+            old_id: old_buf_id, new_id: new_buf_id, name: label,
+        });
     }
 }
 
@@ -6144,6 +6162,7 @@ mod tests {
         let mut state = AppState::new();
         state.add_connection(Connection {
             own_realname: None,
+            network_label: None,
             id: "test".to_string(),
             label: "TestServer".to_string(),
             network_scope: None,
@@ -11120,6 +11139,7 @@ mod tests {
         // Second connection with its own channel
         state.add_connection(Connection {
             own_realname: None,
+            network_label: None,
             id: "other".into(),
             label: "Other".into(),
             network_scope: None,
@@ -12126,6 +12146,7 @@ mod activity_label_tests {
         let mut state = crate::state::AppState::new();
         let mut connection = crate::state::events::tests::make_test_connection();
         connection.label = "irc.example.invalid".into();
+        connection.origin_config.address.clone_from(&connection.label);
         state.add_connection(connection);
         state.add_buffer(Buffer::for_test("libera", BufferType::Server, "irc.example.invalid"));
         state.add_buffer(Buffer::for_test("libera", BufferType::Channel, "#newer"));

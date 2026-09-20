@@ -1288,6 +1288,7 @@ impl App {
         let buf_id = make_buffer_id(Self::DEFAULT_CONN_ID, "Status");
         state.add_connection(Connection {
             own_realname: None,
+            network_label: None,
             id: Self::DEFAULT_CONN_ID.to_string(),
             label: "Status".to_string(),
             network_scope: None,

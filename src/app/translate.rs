@@ -2792,6 +2792,9 @@ impl crate::app::App {
         let rekeys = std::mem::take(&mut self.state.pending_buffer_rekeys);
         let mut followed = false;
         for (old_id, new_id) in rekeys {
+            for selected in self.web_active_buffers.values_mut() {
+                if selected == &old_id { selected.clone_from(&new_id); }
+            }
             self.rekey_pending_history(&old_id, &new_id);
             // A conversation the user never configured has nothing to follow.
             // Skipping it also bounds the list by the number of configured

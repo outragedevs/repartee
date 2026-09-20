@@ -89,6 +89,7 @@ impl App {
             let net_label = label_for(net);
             self.state.add_connection(Connection {
                 own_realname: None,
+            network_label: None,
                 id: conn_id.clone(),
                 label: net_label.clone(),
                 network_scope: Some(net.clone()),

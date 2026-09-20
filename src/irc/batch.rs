@@ -86,10 +86,20 @@ impl BatchInfo {
         self.redaction_refs = references;
     }
 
+    pub fn isupport_tokens(&self, clean_end: bool) -> Option<Vec<&str>> {
+        if !clean_end || self.dropped_messages != 0 || self.messages.is_empty() || !self.params.is_empty() { return None; }
+        let mut updates = Vec::new();
+        for message in &self.messages {
+            let Command::Response(irc::proto::Response::RPL_ISUPPORT, args) = &message.command else { return None; };
+            updates.extend(super::isupport::response_tokens(args)?);
+        }
+        Some(updates)
+    }
+
     pub fn is_live(&self) -> bool {
         !matches!(
             self.batch_type.as_str(),
-            "CHATHISTORY" | "DRAFT/CHATHISTORY-TARGETS" | "NETSPLIT" | "NETJOIN" | "SOJU.IM/SEARCH"
+            "CHATHISTORY" | "DRAFT/CHATHISTORY-TARGETS" | "NETSPLIT" | "NETJOIN" | "SOJU.IM/SEARCH" | "DRAFT/ISUPPORT"
         )
     }
 
@@ -187,6 +197,15 @@ impl BatchTracker {
         params: Vec<String>,
         opener_tags: Option<Vec<irc::proto::message::Tag>>,
     ) {
+        let parent = opener_tags.as_ref().and_then(|tags| tags.iter().find(|tag| tag.0 == "batch")).and_then(|tag| tag.1.as_deref());
+        let invalid_snapshot = batch_type.eq_ignore_ascii_case("DRAFT/ISUPPORT") && (self.open.contains_key(ref_tag)
+            || parent.is_some_and(|parent| self.open.get(parent).is_none_or(|batch| batch.batch_type == "DRAFT/ISUPPORT")));
+        if let Some(parent) = opener_tags.as_ref().and_then(|tags| tags.iter().find(|tag| tag.0 == "batch")).and_then(|tag| tag.1.as_deref())
+            && let Some(batch) = self.open.get_mut(parent)
+            && batch.batch_type == "DRAFT/ISUPPORT"
+        {
+            batch.dropped_messages = batch.dropped_messages.saturating_add(1);
+        }
         self.open.insert(
             ref_tag.to_string(),
             BatchInfo {
@@ -195,7 +214,7 @@ impl BatchTracker {
                 batch_type: batch_type.to_uppercase(),
                 params,
                 messages: Vec::new(),
-                dropped_messages: 0,
+                dropped_messages: usize::from(invalid_snapshot),
                 started_at: Instant::now(),
                 opener_tags,
             },
@@ -239,7 +258,6 @@ impl BatchTracker {
     /// Whether a batch with `ref_tag` is currently open (used to fold a nested
     /// sub-batch's result into its still-open parent).
     #[must_use]
-    #[cfg(test)]
     pub fn is_open(&self, ref_tag: &str) -> bool {
         self.open.contains_key(ref_tag)
     }
@@ -283,6 +301,15 @@ impl BatchTracker {
     pub fn refresh_redactions(&mut self, tag: &str, state: &mut AppState, conn_id: &str) {
         if let Some(batch) = self.open.get_mut(tag) {
             batch.refresh_redactions(state, conn_id);
+        }
+    }
+
+    pub fn invalidate_isupport_parent(&mut self, message: &IrcMessage) {
+        if let Some(parent) = Self::get_batch_tag(message)
+            && let Some(batch) = self.open.get_mut(parent)
+            && batch.batch_type == "DRAFT/ISUPPORT"
+        {
+            batch.dropped_messages = batch.dropped_messages.saturating_add(1);
         }
     }
 
@@ -1096,6 +1123,7 @@ mod tests {
         // Set up connection and channel buffer with users
         state.add_connection(crate::state::connection::Connection {
             own_realname: None,
+            network_label: None,
             id: conn_id.to_string(),
             label: "Test".to_string(),
             network_scope: None,
@@ -1362,6 +1390,7 @@ mod tests {
         state.log_tx = Some(tx);
         state.add_connection(crate::state::connection::Connection {
             own_realname: None,
+            network_label: None,
             id: conn_id.to_string(),
             label: "libera".to_string(),
             network_scope: None,
@@ -2475,6 +2504,7 @@ mod tests {
 
         state.add_connection(crate::state::connection::Connection {
             own_realname: None,
+            network_label: None,
             id: conn_id.to_string(),
             label: "Test".to_string(),
             network_scope: None,

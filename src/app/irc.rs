@@ -38,6 +38,7 @@ impl App {
 
         self.state.add_connection(Connection {
             own_realname: None,
+            network_label: None,
             id: conn_id.to_string(),
             label: server_config.label.clone(),
             network_scope: (server_config.bouncer_network_id.is_some() || server_config.bouncer_control)
@@ -706,6 +707,7 @@ impl App {
                 {
                     let redaction_ref = self.state.retain_wire_redaction(&conn_id, &msg);
                     let tracker = self.batch_trackers.entry(conn_id.clone()).or_default();
+                    tracker.invalidate_isupport_parent(&msg);
                     if let Some(tag) = ref_tag.strip_prefix('+') {
                         // Start batch
                         let batch_type = sub
