@@ -452,6 +452,7 @@ impl App {
                 // Collect channels to rejoin before handle_connected resets state
                 let rejoin_channels = crate::irc::events::channels_to_rejoin(&self.state, &conn_id);
                 crate::irc::events::handle_connected(&mut self.state, &conn_id);
+                self.refresh_saferate(&conn_id);
 
                 // Stamp the reconnect cutoff now — after handle_connected reset the
                 // chathistory state, but before any JOIN echo or post-reconnect

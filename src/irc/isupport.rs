@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Structured representation of ISUPPORT (005) tokens received from the server.
 ///
@@ -16,6 +16,7 @@ pub struct Isupport {
     /// Raw token storage.  For `KEY=VALUE` the value is `Some(value)`;
     /// for bare `KEY` the value is `Some("")`; removed keys are absent.
     tokens: HashMap<String, String>,
+    bare_tokens: HashSet<String>,
 }
 
 pub fn response_tokens(args: &[String]) -> Option<Vec<&str>> {
@@ -50,10 +51,13 @@ impl Isupport {
         for &token in tokens {
             if let Some(negated) = token.strip_prefix('-') {
                 self.tokens.remove(negated);
+                self.bare_tokens.remove(negated);
             } else if let Some((key, value)) = token.split_once('=') {
                 self.tokens.insert(key.to_string(), value.to_string());
+                self.bare_tokens.remove(key);
             } else {
                 self.tokens.insert(token.to_string(), String::new());
+                self.bare_tokens.insert(token.to_string());
             }
         }
     }
@@ -75,6 +79,10 @@ impl Isupport {
             return None;
         }
         Some(url.to_string())
+    }
+
+    pub fn has_saferate(&self) -> bool {
+        self.bare_tokens.contains("soju.im/SAFERATE")
     }
 
     /// Parse `PREFIX=(modes)prefixes` into a vec of `(mode_char, prefix_char)`

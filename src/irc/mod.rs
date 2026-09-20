@@ -17,6 +17,9 @@ pub mod extban;
 pub mod flood;
 pub mod formatting;
 pub mod handle;
+
+#[cfg(test)]
+mod flood_control_tests;
 pub mod ignore;
 pub mod isupport;
 pub mod multiline;
