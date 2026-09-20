@@ -353,6 +353,7 @@ mod tests {
         assert!(web.try_recv().is_err());
         assert_eq!(app.pending_history_pages.len(), 1);
         let batch = crate::irc::batch::BatchInfo {
+            message_order: Vec::new(),
             batch_type: "CHATHISTORY".into(),
             params: vec!["#test".into()],
             started_at: Instant::now(),
@@ -463,6 +464,7 @@ mod tests {
         app.flush_server_history_pages();
         assert!(web.try_recv().is_err());
         let batch = crate::irc::batch::BatchInfo {
+            message_order: Vec::new(),
             batch_type: "CHATHISTORY".into(),
             params: vec!["#test".into()],
             started_at: Instant::now(),
@@ -750,6 +752,7 @@ mod tests {
             "browser",
         );
         let batch = crate::irc::batch::BatchInfo {
+            message_order: Vec::new(),
             batch_type: "CHATHISTORY".into(),
             params: vec!["#test".into()],
             started_at: Instant::now(),
@@ -836,6 +839,7 @@ mod tests {
         assert!(app.state.buffers["account/#test"].pin_backlog);
         app.state.collapse_buffer_backlog("account/#test");
         let batch = crate::irc::batch::BatchInfo {
+            message_order: Vec::new(),
             batch_type: "CHATHISTORY".into(),
             params: vec!["#test".into()],
             started_at: Instant::now(),
@@ -906,6 +910,7 @@ mod tests {
             .unwrap()
             .clone();
         let batch = crate::irc::batch::BatchInfo {
+            message_order: Vec::new(),
             batch_type: "CHATHISTORY".into(),
             params: vec!["#test".into()],
             started_at: Instant::now(),

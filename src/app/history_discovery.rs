@@ -523,6 +523,7 @@ mod tests {
 
     fn batch(lines: &[&str]) -> BatchInfo {
         BatchInfo {
+            message_order: Vec::new(),
             batch_type: "DRAFT/CHATHISTORY-TARGETS".into(),
             params: Vec::new(),
             messages: lines.iter().map(|line| line.parse().unwrap()).collect(),
