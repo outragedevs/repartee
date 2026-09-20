@@ -80,7 +80,7 @@ fn setup_logging() {
         .with(tracing_subscriber::fmt::layer()
             .with_writer(log_file)
             .with_ansi(false)
-            .with_filter(diagnostics::IrcWireFilter))
+            .with_filter(diagnostics::WireContentFilter))
         .init();
 }
 

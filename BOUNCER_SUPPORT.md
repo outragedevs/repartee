@@ -514,3 +514,9 @@ and reconstruction of the App against the preserved database. Its precise scope
 and remaining process/browser/error-path boundaries are documented in
 `docs/validation/bouncer-history-acceptance.md`; it does not close the full
 history acceptance gate.
+
+The real-daemon/browser history fixture exposed two diagnostic-file leaks outside
+SQLite: tungstenite frame TRACE and the application's web-command DEBUG dump.
+The fix and repeatable two-process acceptance procedure are documented in
+`docs/validation/bouncer-daemon-history.md`. This adds process restart and actual
+browser/diagnostic coverage without closing the remaining history matrix.

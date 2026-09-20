@@ -1,0 +1,99 @@
+"""Check history exclusion across real daemon processes in disposable containers."""
+
+import argparse
+import os
+import re
+import sqlite3
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+APP_NAME = re.search(r'pub const APP_NAME: &str = "([^"]+)"', (ROOT / 'src/constants.rs').read_text()).group(1)
+
+
+def run(command, **kwargs):
+    return subprocess.run(command, check=True, text=True, timeout=120, **kwargs)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('image')
+    args = parser.parse_args()
+    with tempfile.TemporaryDirectory(prefix='bouncer-daemon-', dir='/tmp') as directory:
+        data = Path(directory)
+        (data / 'config.toml').write_text(f'''
+[general]
+nick = 'fixture'
+flood_protection = false
+[display]
+backlog_lines = 200
+[logging]
+enabled = true
+encrypt = false
+retention_days = 0
+event_retention_hours = 0
+[web]
+enabled = true
+bind_address = '0.0.0.0'
+port = 8443
+[servers.fixture]
+label = 'fixture'
+address = 'host.docker.internal'
+port = {int(os.environ['REPARTEE_BOUNCER_TEST_PORT'])}
+tls = false
+autoconnect = true
+channels = []
+bouncer_network_id = '{os.environ['REPARTEE_BOUNCER_TEST_NETID']}'
+''')
+        (data / '.env').write_text(
+            f"FIXTURE_SASL_USER={os.environ['REPARTEE_BOUNCER_TEST_USER']}\n"
+            'FIXTURE_SASL_PASS=fixture-password\nWEB_PASSWORD=fixture-web-password\n'
+        )
+        for cycle in range(2):
+            container = run([
+                'docker', 'run', '-d', '-p', '127.0.0.1::8443',
+                '--mount', f'type=bind,src={data},dst=/root/.{APP_NAME}',
+                '-e', 'RUST_LOG=trace', args.image, f'/usr/local/bin/{APP_NAME}', '-d',
+            ], capture_output=True).stdout.strip()
+            try:
+                port = run(['docker', 'port', container, '8443/tcp'], capture_output=True).stdout.strip().rsplit(':', 1)[1]
+                environment = dict(os.environ, REPARTEE_DAEMON_TEST_URL=f'https://127.0.0.1:{port}',
+                                   REPARTEE_DAEMON_TEST_CYCLE=str(cycle))
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    if run(['docker', 'inspect', '-f', '{{.State.Running}}', container], capture_output=True).stdout.strip() != 'true':
+                        raise RuntimeError('Disposable daemon exited before readiness')
+                    health = subprocess.run(['curl', '-skf', '--max-time', '1', environment['REPARTEE_DAEMON_TEST_URL'] + '/api/health'], capture_output=True)
+                    if health.returncode == 0:
+                        break
+                    time.sleep(.1)
+                else:
+                    raise TimeoutError('Disposable daemon HTTPS readiness timed out')
+                run(['node', str(ROOT / 'scripts/fixtures/daemon-history-browser.cjs')], env=environment)
+                run(['docker', 'stop', '-t', '20', container], capture_output=True)
+                exit_code = run(['docker', 'inspect', '-f', '{{.State.ExitCode}}', container], capture_output=True).stdout.strip()
+                assert exit_code == '0', f'Unclean daemon exit: {exit_code}'
+                snapshot = data / f'inspection-{cycle}'
+                snapshot.mkdir()
+                run(['docker', 'cp', f'{container}:/root/.{APP_NAME}/logs/.', str(snapshot)], capture_output=True)
+                with sqlite3.connect(str(snapshot / 'messages.db')) as database:
+                    rows = database.execute('SELECT network, buffer, type, text FROM messages ORDER BY id').fetchall()
+                    welcome = ('Status', 'status', 'event', f'Welcome to {APP_NAME}! Use /connect <server> to connect.')
+                    assert rows == [welcome] * (cycle + 1), f'Unexpected persistent messages after cycle {cycle}: {rows}'
+                diagnostic = (data / f'{APP_NAME}.log').read_text()
+                assert 'TRACE ' in diagnostic, 'Diagnostic TRACE output was not enabled'
+                assert 'web command received' in diagnostic, 'Command receipt diagnostics were not exercised'
+                assert 'fixture-history-' not in diagnostic, 'History body entered diagnostics'
+                assert 'fixture-browser-outgoing' not in diagnostic, 'Outgoing body entered diagnostics'
+                print(f'PASS: daemon cycle {cycle + 1}: browser history, clean stop, only local startup events in SQLite, no history bodies in diagnostics')
+            except Exception:
+                run(['docker', 'logs', container])
+                raise
+            finally:
+                run(['docker', 'rm', '-f', container], capture_output=True)
+
+
+if __name__ == '__main__':
+    main()

@@ -1661,7 +1661,7 @@ impl App {
                 },
                 web_cmd = self.web_cmd_rx.recv() => {
                     if let Some((cmd, session_id)) = web_cmd {
-                        tracing::debug!(?cmd, %session_id, "web command received");
+                        tracing::debug!(%session_id, "web command received");
                         self.handle_web_command(cmd, &session_id);
                         self.drain_pending_web_events();
                     }
