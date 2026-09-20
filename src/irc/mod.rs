@@ -20,6 +20,7 @@ pub mod netsplit;
 pub mod sasl_ecdsa;
 mod sasl_mechanism_names;
 pub mod sasl_scram;
+mod sasl_oauthbearer;
 pub mod typing;
 
 use std::collections::HashSet;
@@ -87,11 +88,12 @@ pub enum SaslMechanism {
     /// SASL PLAIN — username + password, base64-encoded. The password crosses
     /// the wire, so this ranks last.
     Plain,
+    OAuthBearer,
 }
 
-/// Every mechanism we implement, **strongest first**.
+/// Password mechanisms in preference order, followed by explicit-only OAUTHBEARER.
 ///
-/// This is the order auto-detection walks and the order the wizards list.
+/// Wizards list every entry; auto-detection excludes OAUTHBEARER.
 /// Certificate and key mechanisms put no secret on the wire at all; SCRAM never
 /// sends the password; `PLAIN` does, so it comes last. `SCRAM-SHA-1` still
 /// outranks `PLAIN` — SHA-1's collision weakness does not touch its use inside
@@ -103,6 +105,7 @@ pub const SASL_MECHANISMS: &[SaslMechanism] = &[
     SaslMechanism::Scram(sasl_scram::ScramHash::Sha256),
     SaslMechanism::Scram(sasl_scram::ScramHash::Sha1),
     SaslMechanism::Plain,
+    SaslMechanism::OAuthBearer,
 ];
 
 impl SaslMechanism {
@@ -115,6 +118,7 @@ impl SaslMechanism {
             Self::EcdsaNist256pChallenge => "ECDSA-NIST256P-CHALLENGE",
             Self::Scram(hash) => hash.mechanism(),
             Self::Plain => "PLAIN",
+            Self::OAuthBearer => "OAUTHBEARER",
         }
     }
 
@@ -137,7 +141,7 @@ impl SaslMechanism {
         match self {
             Self::External => have.client_cert,
             Self::EcdsaNist256pChallenge => have.sasl_key,
-            Self::Scram(_) | Self::Plain => have.password,
+            Self::Scram(_) | Self::Plain | Self::OAuthBearer => have.password,
         }
     }
 }
@@ -219,7 +223,7 @@ pub fn select_sasl_mechanism(
     SASL_MECHANISMS
         .iter()
         .copied()
-        .find(|m| m.prerequisite_met(have) && named(list, *m))
+        .find(|m| *m != SaslMechanism::OAuthBearer && m.prerequisite_met(have) && named(list, *m))
 }
 
 /// Timeout in seconds for SASL authentication steps.
@@ -652,6 +656,11 @@ pub async fn connect_server(
     server_config: &crate::config::ServerConfig,
     general: &crate::config::GeneralConfig,
 ) -> Result<(IrcHandle, mpsc::Receiver<IrcEvent>)> {
+    if server_config.sasl_mechanism.as_deref().is_some_and(|mechanism| mechanism.eq_ignore_ascii_case("OAUTHBEARER"))
+        && (!server_config.tls || !server_config.tls_verify)
+    {
+        return Err(eyre!("OAUTHBEARER requires verified TLS"));
+    }
     if server_config.bouncer_control && server_config.bouncer_network_id.is_some() {
         return Err(eyre!("Choose either bouncer control mode or an explicit network ID"));
     }
@@ -754,6 +763,10 @@ pub async fn connect_server(
         ..Config::default()
     };
 
+    #[cfg(test)]
+    if let Ok(path) = std::env::var("REPARTEE_OAUTH_TEST_CA") {
+        irc_config.cert_path = Some(path);
+    }
     client_cert::configure(&mut irc_config, server_config.client_cert_path.as_deref())?;
 
     let mut client = Client::from_config(irc_config).await?;
@@ -1154,6 +1167,12 @@ async fn negotiate_caps(
                         } else {
                             Err(eyre!("SASL {hash} selected but credentials missing"))
                         }
+                    }
+                    SaslMechanism::OAuthBearer => {
+                        if let (Some(user), Some(token)) = (params.sasl_user, params.sasl_pass) {
+                            diag.push("SASL: authenticating via OAUTHBEARER".into());
+                            sasl_oauthbearer::run(sender, stream, user, token).await
+                        } else { Err(eyre!("SASL OAUTHBEARER selected but credentials missing")) }
                     }
                     SaslMechanism::Plain => {
                         if let (Some(user), Some(pass)) = (params.sasl_user, params.sasl_pass) {
@@ -1694,7 +1713,7 @@ mod tests {
         );
         // A name we do not implement at all.
         assert_eq!(
-            select_sasl_mechanism(Some(&all), Some("OAUTHBEARER"), ALL_CREDS),
+            select_sasl_mechanism(Some(&all), Some("UNSUPPORTED"), ALL_CREDS),
             None
         );
     }
@@ -1730,6 +1749,27 @@ mod tests {
     }
 
     #[test]
+    fn bearer_requires_explicit_selection_and_available_credentials() {
+        let advertised = offers(&["OAUTHBEARER", "PLAIN"]);
+        assert_eq!(select_sasl_mechanism(Some(&advertised), None, PASSWORD_ONLY), Some(SaslMechanism::Plain));
+        assert_eq!(select_sasl_mechanism(Some(&offers(&["OAUTHBEARER"])), None, PASSWORD_ONLY), None);
+        assert_eq!(select_sasl_mechanism(Some(&advertised), Some("oauthbearer"), PASSWORD_ONLY), Some(SaslMechanism::OAuthBearer));
+        assert_eq!(select_sasl_mechanism(Some(&advertised), Some("OAUTHBEARER"), SaslCapabilities::default()), None);
+    }
+
+    #[tokio::test]
+    async fn bearer_rejects_unverified_transport_before_connecting() {
+        for (tls, tls_verify) in [(false, true), (true, false), (false, false)] {
+            let config = crate::config::ServerConfig {
+                tls, tls_verify, sasl_mechanism: Some("oauthbearer".into()),
+                ..server_with(None)
+            };
+            let result = connect_server("test", &config, &crate::config::GeneralConfig::default()).await;
+            assert_eq!(result.err().unwrap().to_string(), "OAUTHBEARER requires verified TLS");
+        }
+    }
+
+    #[test]
     fn the_shared_name_list_matches_the_mechanism_table() {
         // `SASL_MECHANISM_NAMES` is what both wizards list; `SASL_MECHANISMS`
         // is what selection walks. They are separate because the web UI can
@@ -1742,7 +1782,7 @@ mod tests {
         );
         // Order is meaningful in both: strongest first.
         assert_eq!(SASL_MECHANISM_NAMES.first(), Some(&"EXTERNAL"));
-        assert_eq!(SASL_MECHANISM_NAMES.last(), Some(&"PLAIN"));
+        assert_eq!(SASL_MECHANISM_NAMES.last(), Some(&"OAUTHBEARER"));
     }
 
     #[test]

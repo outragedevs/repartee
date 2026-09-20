@@ -236,6 +236,18 @@ Leave `sasl_mechanism` unset and repartee picks the strongest mechanism the serv
 
 Set `sasl_mechanism` to one of those names to pin it. A pinned mechanism the server does not offer means **no SASL at all**, never a quiet downgrade to a weaker one. The `-PLUS` (channel-binding) variants are not implemented and are never selected.
 
+For an OAuth-enabled Soju bouncer, explicitly select `sasl_mechanism = "OAUTHBEARER"`.
+Set `sasl_user` to the bouncer account name and store the access token in the
+server's `SERVERNAME_SASL_PASS` environment secret, using the same secret storage
+as SASL passwords. In either server wizard, choose OAUTHBEARER and enter the token
+in the SASL password/token field. Keep `tls = true` and `tls_verify = true`;
+connections without verified TLS are rejected before sending credentials.
+OAUTHBEARER is never selected automatically: existing passwords must not be
+interpreted as tokens. Obtain and renew the access token through your bouncer
+administrator's OAuth provider; automatic token acquisition and refresh are not
+implemented. This authenticates the bouncer account, not the upstream IRC account.
+Lurker's IRC endpoint advertises PLAIN instead, so do not select OAUTHBEARER there.
+
 `client_cert_path` and `sasl_key_path` are separate keys with separate jobs: the first is presented during the TLS handshake, the second is only ever used to sign a challenge. Relative paths resolve against `~/.repartee/certs`.
 
 To use `EXTERNAL` / CertFP, set `tls = true` and point `client_cert_path` to one **PEM file containing both the certificate chain (leaf first) and its unencrypted private key**. PKCS#8 (`PRIVATE KEY`), PKCS#1 (`RSA PRIVATE KEY`), and SEC1 (`EC PRIVATE KEY`) keys are supported. PKCS#12 (`.p12` / `.pfx`) and encrypted private keys are not supported. The IRC connection uses rustls for this PEM identity.

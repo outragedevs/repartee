@@ -1,5 +1,8 @@
 import argparse
 import json
+import http.server
+import threading
+import urllib.parse
 import os
 from pathlib import Path
 import socket
@@ -10,14 +13,15 @@ import tempfile
 from test_bouncer_binding import PINS, ROOT, run, wait_ready
 
 
-def scenario(implementation, source, auto_away, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, filehost=False):
+def scenario(implementation, source, auto_away, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, filehost=False, oauth=False):
     with tempfile.TemporaryDirectory(prefix="bouncer-presence-", dir="/tmp") as directory:
         temporary = Path(directory)
         processes = []
+        oauth_server = None
         with (temporary / "server.log").open("w+") as log:
             try:
                 http_port = None
-                if filehost:
+                if filehost or oauth:
                     with socket.socket() as reservation:
                         reservation.bind(("127.0.0.1", 0))
                         http_port = reservation.getsockname()[1]
@@ -65,13 +69,40 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                     admin = temporary / "admin"
                     config.write_text(
                         f"hostname fixture.local\ndb sqlite3 {temporary}/main.db\n"
-                        f"listen irc+insecure://127.0.0.1:{port}\n"
+                        f"listen {'ircs' if oauth else 'irc+insecure'}://127.0.0.1:{port}\n"
                         f"listen unix+admin://{admin}\nmessage-store db\n"
                         + (f"listen https://127.0.0.1:{http_port}\ntls {temporary}/cert.pem {temporary}/key.pem\n"
                            f"http-ingress https://127.0.0.1:{http_port}\nfile-upload fs {temporary}/uploads\n" if filehost else "")
                     )
                     run([str(source / "sojudb"), "-config", str(config), "create-user", "fixture"],
                         input="fixture-password\n", capture_output=True)
+                    if oauth:
+                        class OAuthHandler(http.server.BaseHTTPRequestHandler):
+                            def log_message(self, *args):
+                                pass
+
+                            def respond(self, value):
+                                body = json.dumps(value).encode()
+                                self.send_response(200)
+                                self.send_header("Content-Type", "application/json")
+                                self.send_header("Content-Length", str(len(body)))
+                                self.end_headers()
+                                self.wfile.write(body)
+
+                            def do_GET(self):
+                                self.respond({"issuer": f"http://127.0.0.1:{self.server.server_port}", "introspection_endpoint": f"http://127.0.0.1:{self.server.server_port}/introspect",
+                                              "introspection_endpoint_auth_methods_supported": ["none"]})
+
+                            def do_POST(self):
+                                form = urllib.parse.parse_qs(self.rfile.read(int(self.headers["Content-Length"])).decode())
+                                self.respond({"active": form.get("token") == ["fixture-token"], "username": "fixture"})
+
+                        oauth_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), OAuthHandler)
+                        threading.Thread(target=oauth_server.serve_forever, daemon=True).start()
+                        with config.open("a") as output:
+                            output.write(f"auth oauth2 http://127.0.0.1:{oauth_server.server_port}\n")
+                            if not filehost:
+                                output.write(f"tls {temporary}/cert.pem {temporary}/key.pem\n")
                     bouncer = subprocess.Popen([str(source / "soju"), "-config", str(config)], stdout=log, stderr=log)
                     processes.append(bouncer)
                     wait_ready(bouncer, admin.exists)
@@ -92,6 +123,9 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                 if filehost:
                     environment["REPARTEE_FILEHOST_TEST_CA"] = str(temporary / "ca.pem")
                     test_filter = "pinned_bouncer_filehost"
+                if oauth:
+                    environment["REPARTEE_OAUTH_TEST_CA"] = str(temporary / "ca.pem")
+                    test_filter = "pinned_bouncer_oauthbearer"
                 if setname:
                     environment["REPARTEE_SETNAME_BOUND"] = "1"
                     environment["REPARTEE_BOUNCER_TEST_PROVIDER"] = implementation
@@ -123,6 +157,9 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                 print(log.read())
                 raise
             finally:
+                if oauth_server is not None:
+                    oauth_server.shutdown()
+                    oauth_server.server_close()
                 for process in reversed(processes):
                     if process.poll() is None:
                         process.terminate()
@@ -144,13 +181,16 @@ def main():
     parser.add_argument("--names", action="store_true")
     parser.add_argument("--redaction", action="store_true")
     parser.add_argument("--filehost", action="store_true")
+    parser.add_argument("--oauth", action="store_true")
     args = parser.parse_args()
+    if args.oauth and args.implementation != "soju":
+        parser.error("OAUTHBEARER is only advertised by Soju")
     source = args.source.resolve()
     head = run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True).stdout.strip()
     if head != PINS[args.implementation]:
         raise RuntimeError("Upstream checkout does not match the audited revision")
-    scenario(args.implementation, source, True, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.filehost)
-    if args.implementation == "soju" and not args.setname and not args.monitor and not args.monitor_unavailable and not args.invites and not args.names and not args.redaction and not args.filehost:
+    scenario(args.implementation, source, True, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.filehost, args.oauth)
+    if args.implementation == "soju" and not args.setname and not args.monitor and not args.monitor_unavailable and not args.invites and not args.names and not args.redaction and not args.filehost and not args.oauth:
         scenario(args.implementation, source, False)
 
 

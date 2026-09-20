@@ -1,5 +1,4 @@
-// The SASL mechanism names, strongest first — the order auto-detection walks
-// and the order both wizards list.
+// SASL mechanisms in wizard order; OAUTHBEARER requires explicit selection.
 //
 // Its own file, holding nothing else, because `web-ui` is a separate crate that
 // cannot depend on this binary and pulls this list in with `include!`. One
@@ -10,7 +9,7 @@
 // no inner (`//!`) doc comments, which an include at item position rejects, and
 // nothing here may reference the rest of this crate — web-ui has none of it.
 
-/// Every SASL mechanism repartee implements, strongest first.
+/// Every supported SASL mechanism in wizard order.
 ///
 /// This is the flat name list. `crate::irc::SASL_MECHANISMS` is the table that
 /// carries each mechanism's prerequisites and drives selection; a test binds
@@ -22,4 +21,5 @@ pub const SASL_MECHANISM_NAMES: &[&str] = &[
     "SCRAM-SHA-256",
     "SCRAM-SHA-1",
     "PLAIN",
+    "OAUTHBEARER",
 ];

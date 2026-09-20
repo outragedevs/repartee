@@ -15,6 +15,8 @@ pub mod filehost;
 #[cfg(test)]
 mod filehost_fixture;
 #[cfg(test)]
+mod oauthbearer_fixture;
+#[cfg(test)]
 mod filehost_browser_fixture;
 pub mod input;
 mod irc;
