@@ -470,18 +470,58 @@ errors, or `/bouncer refresh` to request a fresh list.
 configure this mode. Reconnect after changing the setting. Both terminal and web
 command input support `/bouncer`.
 
-Control connections automatically open their discovered networks using separate,
-SASL-authenticated bound connections. Names and removals follow bouncer updates;
+Control connections automatically open their discovered networks using separate
+connections. SASL-authenticated accounts bind by network ID; PASS-authenticated
+accounts use the provider's USER/network selector and verify the returned network
+ID before becoming connected. Names and removals follow bouncer updates;
 manual child disconnects remain off until `/bouncer connect ID`. Disconnecting the
 control connection suspends all children until a new valid network list arrives.
-Explicit binding and control mode use server-owned history for channels and
-private IRC conversations. Their messages and mentions remain in memory; they
+Explicit binding, control mode and recognized legacy bouncer sessions use
+server-owned history for channels and private IRC conversations. Their messages
+and mentions remain in memory; they
 are not written to the local chat database or text logs. Peer-to-peer DCC chats
 keep local history because the bouncer cannot retrieve them.
 Terminal and web scrollback request older pages from the bouncer. A bouncer that
 does not advertise CHATHISTORY provides only live traffic and its automatic
 replay; the connection displays that limitation. Existing local logs are not
 deleted and remain available in the explicit log browser.
+
+## Existing USER/PASS bouncer configurations
+
+Existing provider-compatible USER/PASS network selectors do not require an
+explicit `bouncer_network_id`. Repartee detects the bouncer's capabilities during
+registration and confirms the bound network identity before exposing the
+connection. It suppresses configured autojoin and uses server-owned conversation
+history for these recognized sessions too. A normal IRC connection retains its
+usual local history behavior.
+
+Keep passwords in the server's `*_PASSWORD` environment setting. Soju treats the
+whole value as a secret, including any colon. Lurker additionally supports its
+combined account-and-secret PASS form; Repartee recognizes that provider's form
+when authenticating file uploads. Prefer the explicit SASL/control configuration
+above when setting up a new multi-network account.
+
+## Bouncer history discovery and search
+
+Repartee discovers available conversations through TARGETS and loads their
+history from the bouncer. Read markers synchronize the last displayed/read
+message when the server supports them. Use [`/bsearch`](commands.html#bsearch) for
+Soju text search or bounded time-range history on either provider. Search results
+remain separate from the live conversation and are not written to local logs.
+[`/bmeta`](commands.html#bmeta) manages supported Soju conversation metadata;
+Lurker does not advertise that IRC extension.
+
+The currently audited Lurker and Soju versions can omit conversation names from
+TARGETS: more than 1000 names at one timestamp exceed the server page limit, and
+filtering hidden conversations can produce an empty page before older visible
+conversations are reached. Repartee warns when it detects a full timestamp tie,
+but an empty filtered page cannot be distinguished from an exhausted list.
+If you know a missing peer's nick, open it with `/query nick` in the web interface
+and request history by scrolling. Native terminal scrollback currently requires
+an existing message as a history anchor, so it cannot retrieve history for a
+newly opened empty query. Retrieving a known conversation cannot discover unknown
+names omitted by the server. These enumeration limits do not indicate that the
+bouncer deleted the stored messages.
 
 ## Bouncer network identity
 
@@ -512,5 +552,5 @@ their existing label-based storage and migration behavior.
 
 History pages use the stable network scope for request isolation. Reconnect
 anchors come from messages still in memory, never from old local chat rows.
-Read markers, TARGETS discovery and server-side search are separate stages;
-these features are not implied by basic history pagination support.
+History discovery, read markers and search each follow the capabilities and
+limits advertised by the connected bouncer.

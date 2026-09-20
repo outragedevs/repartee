@@ -508,18 +508,52 @@ errors, or <code>/bouncer refresh</code> to request a fresh list.</p>
 <p><code>/server add -bouncer-control</code> and <code>/set servers.&lt;id&gt;.bouncer_control true</code>
 configure this mode. Reconnect after changing the setting. Both terminal and web
 command input support <code>/bouncer</code>.</p>
-<p>Control connections automatically open their discovered networks using separate,
-SASL-authenticated bound connections. Names and removals follow bouncer updates;
+<p>Control connections automatically open their discovered networks using separate
+connections. SASL-authenticated accounts bind by network ID; PASS-authenticated
+accounts use the provider&#39;s USER/network selector and verify the returned network
+ID before becoming connected. Names and removals follow bouncer updates;
 manual child disconnects remain off until <code>/bouncer connect ID</code>. Disconnecting the
 control connection suspends all children until a new valid network list arrives.
-Explicit binding and control mode use server-owned history for channels and
-private IRC conversations. Their messages and mentions remain in memory; they
+Explicit binding, control mode and recognized legacy bouncer sessions use
+server-owned history for channels and private IRC conversations. Their messages
+and mentions remain in memory; they
 are not written to the local chat database or text logs. Peer-to-peer DCC chats
 keep local history because the bouncer cannot retrieve them.
 Terminal and web scrollback request older pages from the bouncer. A bouncer that
 does not advertise CHATHISTORY provides only live traffic and its automatic
 replay; the connection displays that limitation. Existing local logs are not
 deleted and remain available in the explicit log browser.</p>
+<h2>Existing USER/PASS bouncer configurations</h2>
+<p>Existing provider-compatible USER/PASS network selectors do not require an
+explicit <code>bouncer_network_id</code>. Repartee detects the bouncer&#39;s capabilities during
+registration and confirms the bound network identity before exposing the
+connection. It suppresses configured autojoin and uses server-owned conversation
+history for these recognized sessions too. A normal IRC connection retains its
+usual local history behavior.</p>
+<p>Keep passwords in the server&#39;s <code>*_PASSWORD</code> environment setting. Soju treats the
+whole value as a secret, including any colon. Lurker additionally supports its
+combined account-and-secret PASS form; Repartee recognizes that provider&#39;s form
+when authenticating file uploads. Prefer the explicit SASL/control configuration
+above when setting up a new multi-network account.</p>
+<h2>Bouncer history discovery and search</h2>
+<p>Repartee discovers available conversations through TARGETS and loads their
+history from the bouncer. Read markers synchronize the last displayed/read
+message when the server supports them. Use <a href="commands.html#bsearch"><code>/bsearch</code></a> for
+Soju text search or bounded time-range history on either provider. Search results
+remain separate from the live conversation and are not written to local logs.
+<a href="commands.html#bmeta"><code>/bmeta</code></a> manages supported Soju conversation metadata;
+Lurker does not advertise that IRC extension.</p>
+<p>The currently audited Lurker and Soju versions can omit conversation names from
+TARGETS: more than 1000 names at one timestamp exceed the server page limit, and
+filtering hidden conversations can produce an empty page before older visible
+conversations are reached. Repartee warns when it detects a full timestamp tie,
+but an empty filtered page cannot be distinguished from an exhausted list.
+If you know a missing peer&#39;s nick, open it with <code>/query nick</code> in the web interface
+and request history by scrolling. Native terminal scrollback currently requires
+an existing message as a history anchor, so it cannot retrieve history for a
+newly opened empty query. Retrieving a known conversation cannot discover unknown
+names omitted by the server. These enumeration limits do not indicate that the
+bouncer deleted the stored messages.</p>
 <h2>Bouncer network identity</h2>
 <p>For explicit network binding and control connections, local data uses a stable
 scope separate from the display label. It combines the configured server ID,
@@ -546,8 +580,8 @@ fresh message from the peer. No previous encryption keys are copied. Direct IRC 
 their existing label-based storage and migration behavior.</p>
 <p>History pages use the stable network scope for request isolation. Reconnect
 anchors come from messages still in memory, never from old local chat rows.
-Read markers, TARGETS discovery and server-side search are separate stages;
-these features are not implied by basic history pagination support.</p>
+History discovery, read markers and search each follow the capabilities and
+limits advertised by the connected bouncer.</p>
 
 
         <!-- Prev / Next navigation -->

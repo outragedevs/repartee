@@ -105,7 +105,7 @@
 </div>
 <p class="search-results-count" id="search-count"></p>
 <h2 id="cat-channel">Channel</h2>
-<div class="command-entry" data-command="ban" data-category="Channel">
+<div id="ban" class="command-entry" data-command="ban" data-category="Channel">
 <h1>/ban</h1>
 <h2>Syntax</h2>
 <pre><code>/ban [mask]
@@ -130,7 +130,7 @@ supports EXTBAN with the account type.</p>
 <h2>See Also</h2>
 <p>/unban, /kick, /kb, /mode</p>
 </div>
-<div class="command-entry" data-command="cycle" data-category="Channel">
+<div id="cycle" class="command-entry" data-command="cycle" data-category="Channel">
 <h1>/cycle</h1>
 <h2>Syntax</h2>
 <pre><code>/cycle [channel] [message]
@@ -149,7 +149,7 @@ be provided.</p>
 <h2>See Also</h2>
 <p>/part, /join</p>
 </div>
-<div class="command-entry" data-command="deop" data-category="Channel">
+<div id="deop" class="command-entry" data-command="deop" data-category="Channel">
 <h1>/deop</h1>
 <h2>Syntax</h2>
 <pre><code>/deop &lt;nick&gt; [nick2 ...]
@@ -164,7 +164,7 @@ channel. You must be a channel operator to use this command.</p>
 <h2>See Also</h2>
 <p>/op, /devoice, /mode</p>
 </div>
-<div class="command-entry" data-command="devoice" data-category="Channel">
+<div id="devoice" class="command-entry" data-command="devoice" data-category="Channel">
 <h1>/devoice</h1>
 <h2>Syntax</h2>
 <pre><code>/devoice &lt;nick&gt; [nick2 ...]
@@ -179,7 +179,7 @@ You must be a channel operator to use this command.</p>
 <h2>See Also</h2>
 <p>/voice, /deop, /mode</p>
 </div>
-<div class="command-entry" data-command="except" data-category="Channel">
+<div id="except" class="command-entry" data-command="except" data-category="Channel">
 <h1>/except</h1>
 <h2>Syntax</h2>
 <pre><code>/except [mask]
@@ -195,7 +195,7 @@ users matching the mask to join even if banned.</p>
 <h2>See Also</h2>
 <p>/unexcept, /ban, /unban</p>
 </div>
-<div class="command-entry" data-command="invex" data-category="Channel">
+<div id="invex" class="command-entry" data-command="invex" data-category="Channel">
 <h1>/invex</h1>
 <h2>Syntax</h2>
 <pre><code>/invex [mask]
@@ -211,7 +211,7 @@ allow users matching the mask to join invite-only channels.</p>
 <h2>See Also</h2>
 <p>/uninvex, /invite</p>
 </div>
-<div class="command-entry" data-command="invite" data-category="Channel">
+<div id="invite" class="command-entry" data-command="invite" data-category="Channel">
 <h1>/invite</h1>
 <h2>Syntax</h2>
 <pre><code>/invite &lt;nick&gt; [channel]
@@ -225,7 +225,7 @@ allow users matching the mask to join invite-only channels.</p>
 <h2>See Also</h2>
 <p>/kick, /ban</p>
 </div>
-<div class="command-entry" data-command="join" data-category="Channel">
+<div id="join" class="command-entry" data-command="join" data-category="Channel">
 <h1>/join</h1>
 <h2>Syntax</h2>
 <pre><code>/join &lt;channel&gt; [key]
@@ -241,7 +241,7 @@ Optionally provide a channel key for key-protected channels.</p>
 <h2>See Also</h2>
 <p>/part, /close</p>
 </div>
-<div class="command-entry" data-command="kb" data-category="Channel">
+<div id="kb" class="command-entry" data-command="kb" data-category="Channel">
 <h1>/kb</h1>
 <h2>Syntax</h2>
 <pre><code>/kb [#channel] &lt;nick&gt; [reason]
@@ -262,7 +262,7 @@ mask, then kicks with the given reason.</p>
 <h2>See Also</h2>
 <p>/kick, /ban, /unban, /mode</p>
 </div>
-<div class="command-entry" data-command="kick" data-category="Channel">
+<div id="kick" class="command-entry" data-command="kick" data-category="Channel">
 <h1>/kick</h1>
 <h2>Syntax</h2>
 <pre><code>/kick [#channel] &lt;nick&gt;[,nick2,...,nick6] [reason]
@@ -286,7 +286,7 @@ reason. You must be a channel operator to use this command.</p>
 <h2>See Also</h2>
 <p>/ban, /kb, /mode</p>
 </div>
-<div class="command-entry" data-command="mode" data-category="Channel">
+<div id="mode" class="command-entry" data-command="mode" data-category="Channel">
 <h1>/mode</h1>
 <h2>Syntax</h2>
 <pre><code>/mode [target] [+/-modes] [params]
@@ -306,7 +306,7 @@ is treated as the target.</p>
 <h2>See Also</h2>
 <p>/op, /deop, /voice, /ban</p>
 </div>
-<div class="command-entry" data-command="names" data-category="Channel">
+<div id="names" class="command-entry" data-command="names" data-category="Channel">
 <h1>/names</h1>
 <h2>Syntax</h2>
 <pre><code>/names [channel]
@@ -321,7 +321,7 @@ is treated as the target.</p>
 <h2>See Also</h2>
 <p>/who, /whois</p>
 </div>
-<div class="command-entry" data-command="op" data-category="Channel">
+<div id="op" class="command-entry" data-command="op" data-category="Channel">
 <h1>/op</h1>
 <h2>Syntax</h2>
 <pre><code>/op &lt;nick&gt; [nick2 ...]
@@ -336,7 +336,7 @@ You must be a channel operator to use this command.</p>
 <h2>See Also</h2>
 <p>/deop, /voice, /mode</p>
 </div>
-<div class="command-entry" data-command="part" data-category="Channel">
+<div id="part" class="command-entry" data-command="part" data-category="Channel">
 <h1>/part</h1>
 <h2>Syntax</h2>
 <pre><code>/part [channel] [message]
@@ -352,7 +352,7 @@ Optionally specify a channel name and part message.</p>
 <h2>See Also</h2>
 <p>/join, /close</p>
 </div>
-<div class="command-entry" data-command="reop" data-category="Channel">
+<div id="reop" class="command-entry" data-command="reop" data-category="Channel">
 <h1>/reop</h1>
 <h2>Syntax</h2>
 <pre><code>/reop [mask]
@@ -368,7 +368,7 @@ automatically re-op users matching the mask when they rejoin.</p>
 <h2>See Also</h2>
 <p>/unreop, /op</p>
 </div>
-<div class="command-entry" data-command="topic" data-category="Channel">
+<div id="topic" class="command-entry" data-command="topic" data-category="Channel">
 <h1>/topic</h1>
 <h2>Syntax</h2>
 <pre><code>/topic
@@ -388,7 +388,7 @@ automatically re-op users matching the mask when they rejoin.</p>
 <h2>See Also</h2>
 <p>/mode, /names</p>
 </div>
-<div class="command-entry" data-command="unban" data-category="Channel">
+<div id="unban" class="command-entry" data-command="unban" data-category="Channel">
 <h1>/unban</h1>
 <h2>Syntax</h2>
 <pre><code>/unban &lt;number|mask|wildcard&gt; [...]
@@ -413,7 +413,7 @@ Use <code>/unban *</code> to remove all bans from the channel.</p>
 <h2>See Also</h2>
 <p>/ban, /kick, /kb, /mode</p>
 </div>
-<div class="command-entry" data-command="unexcept" data-category="Channel">
+<div id="unexcept" class="command-entry" data-command="unexcept" data-category="Channel">
 <h1>/unexcept</h1>
 <h2>Syntax</h2>
 <pre><code>/unexcept &lt;mask&gt;
@@ -426,7 +426,7 @@ Use <code>/unban *</code> to remove all bans from the channel.</p>
 <h2>See Also</h2>
 <p>/except</p>
 </div>
-<div class="command-entry" data-command="uninvex" data-category="Channel">
+<div id="uninvex" class="command-entry" data-command="uninvex" data-category="Channel">
 <h1>/uninvex</h1>
 <h2>Syntax</h2>
 <pre><code>/uninvex &lt;mask&gt;
@@ -439,7 +439,7 @@ Use <code>/unban *</code> to remove all bans from the channel.</p>
 <h2>See Also</h2>
 <p>/invex</p>
 </div>
-<div class="command-entry" data-command="unreop" data-category="Channel">
+<div id="unreop" class="command-entry" data-command="unreop" data-category="Channel">
 <h1>/unreop</h1>
 <h2>Syntax</h2>
 <pre><code>/unreop &lt;mask&gt;
@@ -452,7 +452,7 @@ Use <code>/unban *</code> to remove all bans from the channel.</p>
 <h2>See Also</h2>
 <p>/reop</p>
 </div>
-<div class="command-entry" data-command="voice" data-category="Channel">
+<div id="voice" class="command-entry" data-command="voice" data-category="Channel">
 <h1>/voice</h1>
 <h2>Syntax</h2>
 <pre><code>/voice &lt;nick&gt; [nick2 ...]
@@ -469,7 +469,7 @@ channel operator to use this command.</p>
 <p>/devoice, /op, /mode</p>
 </div>
 <h2 id="cat-configuration">Configuration</h2>
-<div class="command-entry" data-command="alias" data-category="Configuration">
+<div id="alias" class="command-entry" data-command="alias" data-category="Configuration">
 <h1>/alias</h1>
 <h2>Syntax</h2>
 <pre><code>/alias                    List all aliases
@@ -523,7 +523,7 @@ j = &quot;/join $0; /msg $0 hello everyone&quot;
 <h2>See Also</h2>
 <p>/unalias</p>
 </div>
-<div class="command-entry" data-command="autoconnect" data-category="Configuration">
+<div id="autoconnect" class="command-entry" data-command="autoconnect" data-category="Configuration">
 <h1>/autoconnect</h1>
 <h2>Syntax</h2>
 <pre><code>/autoconnect [on|off]
@@ -541,7 +541,7 @@ automatically on startup.</p>
 <h2>See Also</h2>
 <p>/server, /connect</p>
 </div>
-<div class="command-entry" data-command="flood" data-category="Configuration">
+<div id="flood" class="command-entry" data-command="flood" data-category="Configuration">
 <h1>/flood</h1>
 <h2>Syntax</h2>
 <pre><code>/flood
@@ -569,7 +569,7 @@ crate&#39;s outgoing send throttle.</p>
 <h2>See Also</h2>
 <p>/ignore, /set</p>
 </div>
-<div class="command-entry" data-command="ignore" data-category="Configuration">
+<div id="ignore" class="command-entry" data-command="ignore" data-category="Configuration">
 <h1>/ignore</h1>
 <h2>Syntax</h2>
 <pre><code>/ignore [mask] [levels...] [-channels #a,#b]
@@ -606,7 +606,7 @@ ALL       All of the above
 <h2>See Also</h2>
 <p>/unignore</p>
 </div>
-<div class="command-entry" data-command="items" data-category="Configuration">
+<div id="items" class="command-entry" data-command="items" data-category="Configuration">
 <h1>/items</h1>
 <h2>Syntax</h2>
 <pre><code>/items [list|add|remove|move|format|separator|available|reset] [args...]
@@ -671,7 +671,7 @@ ALL       All of the above
 <h2>See Also</h2>
 <p>/set</p>
 </div>
-<div class="command-entry" data-command="log" data-category="Configuration">
+<div id="log" class="command-entry" data-command="log" data-category="Configuration">
 <h1>/log</h1>
 <h2>Syntax</h2>
 <pre><code>/log [status|search] [query]
@@ -738,7 +738,7 @@ read-only database, <code>Q</code> and <code>/quit</code> exit, and scrolling up
 <h2>See Also</h2>
 <p>/set, /ignore</p>
 </div>
-<div class="command-entry" data-command="reload" data-category="Configuration">
+<div id="reload" class="command-entry" data-command="reload" data-category="Configuration">
 <h1>/reload</h1>
 <h2>Syntax</h2>
 <pre><code>/reload
@@ -752,7 +752,7 @@ safe live refresh; otherwise Repartee reports that a restart is required.</p>
 <h2>See Also</h2>
 <p>/set, /items</p>
 </div>
-<div class="command-entry" data-command="script" data-category="Configuration">
+<div id="script" class="command-entry" data-command="script" data-category="Configuration">
 <h1>/script</h1>
 <h2>Syntax</h2>
 <pre><code>/script [list|load|unload|reload|autoload|template] [name]
@@ -858,7 +858,7 @@ api.config.set(&quot;timeout&quot;, 600)
 <h2>See Also</h2>
 <p>/set</p>
 </div>
-<div class="command-entry" data-command="set" data-category="Configuration">
+<div id="set" class="command-entry" data-command="set" data-category="Configuration">
 <h1>/set</h1>
 <h2>Syntax</h2>
 <pre><code>/set [section.field] [value]
@@ -899,7 +899,7 @@ reject empty input.</p>
 <h2>See Also</h2>
 <p>/reload, /server, /items</p>
 </div>
-<div class="command-entry" data-command="spellcheck" data-category="Configuration">
+<div id="spellcheck" class="command-entry" data-command="spellcheck" data-category="Configuration">
 <h1>/spellcheck</h1>
 <p>Spell checker status and control.</p>
 <h2>Description</h2>
@@ -983,7 +983,7 @@ dictionary_dir = &quot;&quot;        # default: ~/.repartee/dicts
 <h2>See also</h2>
 <p><code>/set spellcheck.*</code></p>
 </div>
-<div class="command-entry" data-command="unalias" data-category="Configuration">
+<div id="unalias" class="command-entry" data-command="unalias" data-category="Configuration">
 <h1>/unalias</h1>
 <h2>Syntax</h2>
 <pre><code>/unalias &lt;name&gt;
@@ -996,7 +996,7 @@ dictionary_dir = &quot;&quot;        # default: ~/.repartee/dicts
 <h2>See Also</h2>
 <p>/alias</p>
 </div>
-<div class="command-entry" data-command="unignore" data-category="Configuration">
+<div id="unignore" class="command-entry" data-command="unignore" data-category="Configuration">
 <h1>/unignore</h1>
 <h2>Syntax</h2>
 <pre><code>/unignore &lt;number|mask&gt;
@@ -1013,7 +1013,7 @@ by the exact mask pattern.</p>
 <p>/ignore</p>
 </div>
 <h2 id="cat-connection">Connection</h2>
-<div class="command-entry" data-command="account" data-category="Connection">
+<div id="account" class="command-entry" data-command="account" data-category="Connection">
 <h1>/account</h1>
 <h2>Syntax</h2>
 <pre><code>/account register [-allow-insecure-upstream] &lt;account|*&gt; &lt;email|*&gt; &lt;password-env&gt;
@@ -1046,7 +1046,7 @@ and inspect the account before trying again.</p>
 <h2>See Also</h2>
 <p>/auth, /bouncer, /server</p>
 </div>
-<div class="command-entry" data-command="auth" data-category="Connection">
+<div id="auth" class="command-entry" data-command="auth" data-category="Connection">
 <h1>/auth</h1>
 <h2>Syntax</h2>
 <pre><code>/auth login [-allow-insecure-upstream] &lt;IRC-account&gt; &lt;password-env-name&gt;
@@ -1085,7 +1085,7 @@ an IRC account; those operations are separate.</p>
 <h2>See Also</h2>
 <p>/bouncer, /server, /set</p>
 </div>
-<div class="command-entry" data-command="bcert" data-category="Connection">
+<div id="bcert" class="command-entry" data-command="bcert" data-category="Connection">
 <h1>/bcert</h1>
 <h2>Syntax</h2>
 <pre><code>/bcert [list]
@@ -1121,7 +1121,7 @@ bouncer account, not just the currently selected upstream network.</p>
 <h2>Related</h2>
 <p>/bouncer, /connect, /disconnect</p>
 </div>
-<div class="command-entry" data-command="bmeta" data-category="Connection">
+<div id="bmeta" class="command-entry" data-command="bmeta" data-category="Connection">
 <h1>/bmeta</h1>
 <h2>Syntax</h2>
 <pre><code>/bmeta &lt;target&gt;
@@ -1159,7 +1159,7 @@ operation or <code>sync</code>. Readback failure is reported without retrying in
 <h2>See Also</h2>
 <p>/bouncer, /bsearch</p>
 </div>
-<div class="command-entry" data-command="bouncer" data-category="Connection">
+<div id="bouncer" class="command-entry" data-command="bouncer" data-category="Connection">
 <h1>/bouncer</h1>
 <h2>Syntax</h2>
 <pre><code>/bouncer [list|refresh|connect ID]
@@ -1188,7 +1188,9 @@ a new valid list after reconnect resumes them. Closing the disconnected control
 window removes its generated connections and buffers. Removing a network closes its
 buffers without deleting stored logs. A manually disconnected child remains off;
 use <code>/bouncer connect ID</code> on the control connection or one of its children to
-resume it. The account must support SASL authentication for explicit network binding.</p>
+resume it. Generated connections use explicit network-ID binding with SASL, or
+provider-compatible USER/network selectors with PASS. Repartee confirms the
+returned network ID in both cases; Soju requires SASL for the explicit BIND command.</p>
 <h2>Network management</h2>
 <p>Soju supports adding, changing and deleting networks. Lurker rejects these
 operations and manages networks through its own web UI. These commands work in
@@ -1224,7 +1226,7 @@ reconnecting and deciding whether to repeat the operation.</p>
 <h2>See Also</h2>
 <p>/server, /connect, /set</p>
 </div>
-<div class="command-entry" data-command="bsearch" data-category="Connection">
+<div id="bsearch" class="command-entry" data-command="bsearch" data-category="Connection">
 <h1>/bsearch</h1>
 <h2>Syntax</h2>
 <pre><code>/bsearch &lt;target&gt; [-from nick] [-after timestamp] [-before timestamp] [-limit 1..100] -- &lt;text&gt;
@@ -1273,7 +1275,7 @@ a replacement request. A failed request is reported separately from zero matches
 </code></pre>
 <p>The results use the temporary search view and are not written to local history. <code>/bsearch cancel</code> stops displaying the pending response; wait for its terminal reply or reconnect before starting another request. A timed-out unlabelled history request requires reconnecting before a new range request, so delayed replies cannot be mistaken for new results.</p>
 </div>
-<div class="command-entry" data-command="connect" data-category="Connection">
+<div id="connect" class="command-entry" data-command="connect" data-category="Connection">
 <h1>/connect</h1>
 <h2>Syntax</h2>
 <pre><code>/connect &lt;server-id|label|address&gt;[:&lt;port&gt;] [-tls] [-bind=&lt;ip&gt;]
@@ -1290,7 +1292,7 @@ flags override its settings for this connection only.</p>
 <h2>See Also</h2>
 <p>/server, /disconnect, /quit</p>
 </div>
-<div class="command-entry" data-command="dcc" data-category="Connection">
+<div id="dcc" class="command-entry" data-command="dcc" data-category="Connection">
 <h1>/dcc</h1>
 <h2>Syntax</h2>
 <pre><code>/dcc &lt;chat|close|list|reject&gt; [args...]
@@ -1357,7 +1359,7 @@ discarded without sending REJECT.</p>
 <h2>See Also</h2>
 <p>/msg, /query, /set</p>
 </div>
-<div class="command-entry" data-command="detach" data-category="Connection">
+<div id="detach" class="command-entry" data-command="detach" data-category="Connection">
 <h1>/detach</h1>
 <h2>Syntax</h2>
 <pre><code>/detach
@@ -1391,7 +1393,7 @@ repartee a &lt;pid&gt;     # attach to a specific session by PID
 <li><a href="../sessions.html">Sessions &amp; Detach</a> — full documentation on session management</li>
 </ul>
 </div>
-<div class="command-entry" data-command="disconnect" data-category="Connection">
+<div id="disconnect" class="command-entry" data-command="disconnect" data-category="Connection">
 <h1>/disconnect</h1>
 <h2>Syntax</h2>
 <pre><code>/disconnect [message]
@@ -1407,7 +1409,7 @@ message; switch to a buffer on the intended network before running the command.<
 <h2>See Also</h2>
 <p>/connect, /quit, /server</p>
 </div>
-<div class="command-entry" data-command="monitor" data-category="Connection">
+<div id="monitor" class="command-entry" data-command="monitor" data-category="Connection">
 <h1>/monitor</h1>
 <h2>Syntax</h2>
 <pre><code>/monitor add &lt;nick[,nick...] ...&gt;
@@ -1443,7 +1445,7 @@ reply finishes or the connection is re-established, avoiding ambiguous resends.<
 <h2>See Also</h2>
 <p>/whois, /setname, /bouncer</p>
 </div>
-<div class="command-entry" data-command="quit" data-category="Connection">
+<div id="quit" class="command-entry" data-command="quit" data-category="Connection">
 <h1>/quit</h1>
 <h2>Syntax</h2>
 <pre><code>/quit [message]
@@ -1459,7 +1461,7 @@ version, and project URL.</p>
 <h2>See Also</h2>
 <p>/disconnect, /close</p>
 </div>
-<div class="command-entry" data-command="redact" data-category="Connection">
+<div id="redact" class="command-entry" data-command="redact" data-category="Connection">
 <h1>/redact</h1>
 <h2>Syntax</h2>
 <pre><code>/redact &lt;target&gt; &lt;msgid&gt; [reason]
@@ -1489,7 +1491,7 @@ redaction may retain their original copy.</p>
 <h2>See Also</h2>
 <p>/msg, /bouncer</p>
 </div>
-<div class="command-entry" data-command="server" data-category="Connection">
+<div id="server" class="command-entry" data-command="server" data-category="Connection">
 <h1>/server</h1>
 <h2>Syntax</h2>
 <pre><code>/server [list|add|remove|icon] [args...]
@@ -1567,7 +1569,7 @@ preview. Updates, removals and disconnection follow the current ISUPPORT state.<
 <h2>See Also</h2>
 <p>/wizard, /connect, /disconnect, /set</p>
 </div>
-<div class="command-entry" data-command="setname" data-category="Connection">
+<div id="setname" class="command-entry" data-command="setname" data-category="Connection">
 <h1>/setname</h1>
 <h2>Syntax</h2>
 <pre><code>/setname &lt;real name&gt;
@@ -1590,7 +1592,7 @@ does not advertise SETNAME; use its own configuration interface instead.</p>
 <h2>See Also</h2>
 <p>/nick, /bouncer, /server</p>
 </div>
-<div class="command-entry" data-command="upload" data-category="Connection">
+<div id="upload" class="command-entry" data-command="upload" data-category="Connection">
 <h1>/upload</h1>
 <h2>Syntax</h2>
 <pre><code>/upload &lt;path&gt; [content-type]
@@ -1614,7 +1616,7 @@ HTTPS is required when the IRC connection uses TLS. Upload redirects are refused
 <h2>See Also</h2>
 <p>/bouncer, /msg</p>
 </div>
-<div class="command-entry" data-command="wizard" data-category="Connection">
+<div id="wizard" class="command-entry" data-command="wizard" data-category="Connection">
 <h1>/wizard</h1>
 <h2>Syntax</h2>
 <pre><code>/wizard server [id]
@@ -1661,7 +1663,7 @@ feature).</p>
 <p>/server, /connect, /set</p>
 </div>
 <h2 id="cat-info">Info</h2>
-<div class="command-entry" data-command="admin" data-category="Info">
+<div id="admin" class="command-entry" data-command="admin" data-category="Info">
 <h1>/admin</h1>
 <h2>Syntax</h2>
 <pre><code>/admin [server]
@@ -1675,7 +1677,7 @@ feature).</p>
 <h2>See Also</h2>
 <p>/info, /stats, /time</p>
 </div>
-<div class="command-entry" data-command="help" data-category="Info">
+<div id="help" class="command-entry" data-command="help" data-category="Info">
 <h1>/help</h1>
 <h2>Syntax</h2>
 <pre><code>/help [command] [subcommand]
@@ -1694,7 +1696,7 @@ specific subcommand.</p>
 <h2>See Also</h2>
 <p>/set</p>
 </div>
-<div class="command-entry" data-command="info" data-category="Info">
+<div id="info" class="command-entry" data-command="info" data-category="Info">
 <h1>/info</h1>
 <h2>Syntax</h2>
 <pre><code>/info [server]
@@ -1708,7 +1710,7 @@ specific subcommand.</p>
 <h2>See Also</h2>
 <p>/admin, /stats, /time, /version</p>
 </div>
-<div class="command-entry" data-command="links" data-category="Info">
+<div id="links" class="command-entry" data-command="links" data-category="Info">
 <h1>/links</h1>
 <h2>Syntax</h2>
 <pre><code>/links [remote] [mask]
@@ -1723,7 +1725,7 @@ specific subcommand.</p>
 <h2>See Also</h2>
 <p>/info, /stats, /lusers</p>
 </div>
-<div class="command-entry" data-command="list" data-category="Info">
+<div id="list" class="command-entry" data-command="list" data-category="Info">
 <h1>/list</h1>
 <h2>Syntax</h2>
 <pre><code>/list [pattern]
@@ -1740,7 +1742,7 @@ specific subcommand.</p>
 <h2>See Also</h2>
 <p>/join, /names</p>
 </div>
-<div class="command-entry" data-command="lusers" data-category="Info">
+<div id="lusers" class="command-entry" data-command="lusers" data-category="Info">
 <h1>/lusers</h1>
 <h2>Syntax</h2>
 <pre><code>/lusers [mask] [server]
@@ -1755,7 +1757,7 @@ specific subcommand.</p>
 <h2>See Also</h2>
 <p>/stats, /info, /who</p>
 </div>
-<div class="command-entry" data-command="mentions" data-category="Info">
+<div id="mentions" class="command-entry" data-command="mentions" data-category="Info">
 <h1>/mentions</h1>
 <p>Switch to the Mentions buffer — a persistent buffer pinned at the top of the sidebar that aggregates all highlight mentions from all networks.</p>
 <h2>Syntax</h2>
@@ -1789,7 +1791,7 @@ specific subcommand.</p>
 <h2>See also</h2>
 <p><code>/set display.mentions_buffer</code>, <code>/clear</code></p>
 </div>
-<div class="command-entry" data-command="time" data-category="Info">
+<div id="time" class="command-entry" data-command="time" data-category="Info">
 <h1>/time</h1>
 <h2>Syntax</h2>
 <pre><code>/time [server]
@@ -1803,7 +1805,7 @@ specific subcommand.</p>
 <h2>See Also</h2>
 <p>/info, /stats, /admin</p>
 </div>
-<div class="command-entry" data-command="version" data-category="Info">
+<div id="version" class="command-entry" data-command="version" data-category="Info">
 <h1>/version</h1>
 <h2>Syntax</h2>
 <pre><code>/version [nick]
@@ -1817,7 +1819,7 @@ specific subcommand.</p>
 <h2>See Also</h2>
 <p>/whois</p>
 </div>
-<div class="command-entry" data-command="who" data-category="Info">
+<div id="who" class="command-entry" data-command="who" data-category="Info">
 <h1>/who</h1>
 <h2>Syntax</h2>
 <pre><code>/who &lt;target&gt;
@@ -1833,7 +1835,7 @@ specific subcommand.</p>
 <h2>See Also</h2>
 <p>/whois, /whowas, /names</p>
 </div>
-<div class="command-entry" data-command="whois" data-category="Info">
+<div id="whois" class="command-entry" data-command="whois" data-category="Info">
 <h1>/whois</h1>
 <h2>Syntax</h2>
 <pre><code>/whois &lt;nick&gt;
@@ -1848,7 +1850,7 @@ channels, server, and account status.</p>
 <h2>See Also</h2>
 <p>/wii, /nick</p>
 </div>
-<div class="command-entry" data-command="whowas" data-category="Info">
+<div id="whowas" class="command-entry" data-command="whowas" data-category="Info">
 <h1>/whowas</h1>
 <h2>Syntax</h2>
 <pre><code>/whowas &lt;nick&gt;
@@ -1861,7 +1863,7 @@ channels, server, and account status.</p>
 <h2>See Also</h2>
 <p>/whois, /who</p>
 </div>
-<div class="command-entry" data-command="wii" data-category="Info">
+<div id="wii" class="command-entry" data-command="wii" data-category="Info">
 <h1>/wii</h1>
 <h2>Syntax</h2>
 <pre><code>/wii &lt;nick&gt;
@@ -1876,7 +1878,7 @@ channels, server, and account status.</p>
 <p>/whois, /nick</p>
 </div>
 <h2 id="cat-messaging">Messaging</h2>
-<div class="command-entry" data-command="away" data-category="Messaging">
+<div id="away" class="command-entry" data-command="away" data-category="Messaging">
 <h1>/away</h1>
 <h2>Syntax</h2>
 <pre><code>/away [reason]
@@ -1891,7 +1893,7 @@ channels, server, and account status.</p>
 <h2>See Also</h2>
 <p>/nick, /msg</p>
 </div>
-<div class="command-entry" data-command="me" data-category="Messaging">
+<div id="me" class="command-entry" data-command="me" data-category="Messaging">
 <h1>/me</h1>
 <h2>Syntax</h2>
 <pre><code>/me &lt;action&gt;
@@ -1906,7 +1908,7 @@ as <code>* nick action</code> in the chat.</p>
 <h2>See Also</h2>
 <p>/msg, /notice</p>
 </div>
-<div class="command-entry" data-command="msg" data-category="Messaging">
+<div id="msg" class="command-entry" data-command="msg" data-category="Messaging">
 <h1>/msg</h1>
 <h2>Syntax</h2>
 <pre><code>/msg &lt;target&gt; &lt;message&gt;
@@ -1923,7 +1925,7 @@ channels appear in the channel buffer.</p>
 <h2>See Also</h2>
 <p>/notice, /me</p>
 </div>
-<div class="command-entry" data-command="nick" data-category="Messaging">
+<div id="nick" class="command-entry" data-command="nick" data-category="Messaging">
 <h1>/nick</h1>
 <h2>Syntax</h2>
 <pre><code>/nick &lt;newnick&gt;
@@ -1938,7 +1940,7 @@ change if the nick is already in use or contains invalid characters.</p>
 <h2>See Also</h2>
 <p>/whois, /set</p>
 </div>
-<div class="command-entry" data-command="notice" data-category="Messaging">
+<div id="notice" class="command-entry" data-command="notice" data-category="Messaging">
 <h1>/notice</h1>
 <h2>Syntax</h2>
 <pre><code>/notice &lt;target&gt; &lt;message&gt;
@@ -1953,7 +1955,7 @@ automated replies and should not trigger auto-responses from bots.</p>
 <h2>See Also</h2>
 <p>/msg, /me</p>
 </div>
-<div class="command-entry" data-command="query" data-category="Messaging">
+<div id="query" class="command-entry" data-command="query" data-category="Messaging">
 <h1>/query</h1>
 <h2>Syntax</h2>
 <pre><code>/query &lt;nick&gt; [message]
@@ -1969,7 +1971,7 @@ it is sent immediately. The query buffer is created and switched to.</p>
 <p>/msg, /close</p>
 </div>
 <h2 id="cat-other">Other</h2>
-<div class="command-entry" data-command="clear" data-category="Other">
+<div id="clear" class="command-entry" data-command="clear" data-category="Other">
 <h1>/clear</h1>
 <h2>Syntax</h2>
 <pre><code>/clear
@@ -1985,7 +1987,7 @@ searchable via <code>/log search</code>.</p>
 <h2>See Also</h2>
 <p>/close, /log</p>
 </div>
-<div class="command-entry" data-command="close" data-category="Other">
+<div id="close" class="command-entry" data-command="close" data-category="Other">
 <h1>/close</h1>
 <h2>Syntax</h2>
 <pre><code>/close [reason]
@@ -2024,7 +2026,7 @@ the old <code>/wc going to bed</code> still works. A malformed range such as <co
 <h2>See Also</h2>
 <p>/part, /mentions, /disconnect, /quit</p>
 </div>
-<div class="command-entry" data-command="e2e" data-category="Other">
+<div id="e2e" class="command-entry" data-command="e2e" data-category="Other">
 <h1>/e2e</h1>
 <h2>Syntax</h2>
 <pre><code>/e2e &lt;subcommand&gt; [args]
@@ -2139,7 +2141,7 @@ that matches nothing changes nothing.</p>
 /e2e forget -all ~k@f7a48125c050.cloak.irc.al
 </code></pre>
 </div>
-<div class="command-entry" data-command="emote" data-category="Other">
+<div id="emote" class="command-entry" data-command="emote" data-category="Other">
 <h1>/emote</h1>
 <h2>Syntax</h2>
 <pre><code>/emote [name|search]
@@ -2160,7 +2162,7 @@ colons. The picker can also be opened with <code>Ctrl+G</code>.</p>
 <h2>See Also</h2>
 <p>/set</p>
 </div>
-<div class="command-entry" data-command="image" data-category="Other">
+<div id="image" class="command-entry" data-command="image" data-category="Other">
 <h1>/image</h1>
 <h2>Syntax</h2>
 <pre><code>/image [stats|clear|cleanup|debug]
@@ -2206,7 +2208,7 @@ passthrough status.</p>
 <h2>See Also</h2>
 <p>/preview, /set</p>
 </div>
-<div class="command-entry" data-command="kill" data-category="Other">
+<div id="kill" class="command-entry" data-command="kill" data-category="Other">
 <h1>/kill</h1>
 <h2>Syntax</h2>
 <pre><code>/kill &lt;nick&gt; [reason]
@@ -2221,7 +2223,7 @@ command. If no reason is given, the target&#39;s nick is used as the reason.</p>
 <h2>See Also</h2>
 <p>/oper, /kick, /ban</p>
 </div>
-<div class="command-entry" data-command="oper" data-category="Other">
+<div id="oper" class="command-entry" data-command="oper" data-category="Other">
 <h1>/oper</h1>
 <h2>Syntax</h2>
 <pre><code>/oper &lt;name&gt; &lt;password&gt;
@@ -2236,7 +2238,7 @@ operator commands like /kill and /wallops.</p>
 <h2>See Also</h2>
 <p>/kill, /wallops</p>
 </div>
-<div class="command-entry" data-command="preview" data-category="Other">
+<div id="preview" class="command-entry" data-command="preview" data-category="Other">
 <h1>/preview</h1>
 <h2>Syntax</h2>
 <pre><code>/preview &lt;url&gt;
@@ -2256,7 +2258,7 @@ Works through tmux with DCS passthrough.</p>
 <h2>See Also</h2>
 <p>/image</p>
 </div>
-<div class="command-entry" data-command="quote" data-category="Other">
+<div id="quote" class="command-entry" data-command="quote" data-category="Other">
 <h1>/quote</h1>
 <h2>Syntax</h2>
 <pre><code>/quote &lt;raw command&gt;
@@ -2274,7 +2276,7 @@ commands not yet implemented, testing, or advanced protocol interaction.</p>
 <h2>See Also</h2>
 <p>/stats</p>
 </div>
-<div class="command-entry" data-command="shell" data-category="Other">
+<div id="shell" class="command-entry" data-command="shell" data-category="Other">
 <h1>/shell</h1>
 <h2>Syntax</h2>
 <pre><code>/shell [open|cmd|close|list] [command]
@@ -2331,7 +2333,7 @@ The default <code>$SHELL</code> value is treated as one executable path.</p>
 <h2>See Also</h2>
 <p>/close</p>
 </div>
-<div class="command-entry" data-command="shrink" data-category="Other">
+<div id="shrink" class="command-entry" data-command="shrink" data-category="Other">
 <h1>/shrink</h1>
 <h2>Syntax</h2>
 <pre><code>/shrink &lt;url&gt;
@@ -2397,7 +2399,7 @@ with original URLs).</li>
 <h2>See Also</h2>
 <p>/set, /preview</p>
 </div>
-<div class="command-entry" data-command="stats" data-category="Other">
+<div id="stats" class="command-entry" data-command="stats" data-category="Other">
 <h1>/stats</h1>
 <h2>Syntax</h2>
 <pre><code>/stats [type] [server]
@@ -2419,7 +2421,7 @@ with original URLs).</li>
 <h2>See Also</h2>
 <p>/quote</p>
 </div>
-<div class="command-entry" data-command="translate" data-category="Other">
+<div id="translate" class="command-entry" data-command="translate" data-category="Other">
 <h1>/translate</h1>
 <h2>Syntax</h2>
 <pre><code>/translate list
@@ -2879,7 +2881,7 @@ reporting a plain success you would have no reason to distrust.</p>
 <code>/reload</code> all stop translation immediately: deciding your lines should stop
 leaving for a translator is not a decision that should wait.</p>
 </div>
-<div class="command-entry" data-command="wallops" data-category="Other">
+<div id="wallops" class="command-entry" data-command="wallops" data-category="Other">
 <h1>/wallops</h1>
 <h2>Syntax</h2>
 <pre><code>/wallops &lt;message&gt;

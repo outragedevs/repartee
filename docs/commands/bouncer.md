@@ -36,7 +36,9 @@ a new valid list after reconnect resumes them. Closing the disconnected control
 window removes its generated connections and buffers. Removing a network closes its
 buffers without deleting stored logs. A manually disconnected child remains off;
 use `/bouncer connect ID` on the control connection or one of its children to
-resume it. The account must support SASL authentication for explicit network binding.
+resume it. Generated connections use explicit network-ID binding with SASL, or
+provider-compatible USER/network selectors with PASS. Repartee confirms the
+returned network ID in both cases; Soju requires SASL for the explicit BIND command.
 
 ## Network management
 
