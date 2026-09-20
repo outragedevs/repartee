@@ -37,6 +37,7 @@ def main():
     parser.add_argument("implementation", choices=PINS)
     parser.add_argument("source", type=Path)
     parser.add_argument("--test-filter", default="pinned_bouncer_")
+    parser.add_argument("--daemon-image", help="Run the real daemon/browser lifecycle fixture using this container image")
     args = parser.parse_args()
     source = args.source.resolve()
     head = run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True).stdout.strip()
@@ -52,7 +53,8 @@ def main():
                     process = subprocess.Popen([
                         "node", str(source / "node_modules/tsx/dist/cli.mjs"),
                         str(ROOT / "scripts/fixtures/lurker-binding.mts"), str(source), str(ready),
-                    ], cwd=source, stdout=log, stderr=log)
+                    ], cwd=source, stdout=log, stderr=log,
+                        env=dict(os.environ, REPARTEE_BOUNCER_DAEMON_FIXTURE="1" if args.daemon_image else "0"))
                     wait_ready(process, ready.exists)
                     settings = json.loads(ready.read_text())
                 else:
@@ -96,8 +98,12 @@ def main():
                 test_args = f"{args.test_filter} -- --ignored"
                 if args.test_filter == "pinned_bouncer_":
                     test_args += " --skip pinned_bouncer_presence --skip pinned_bouncer_network_management --skip pinned_bouncer_setname --skip pinned_bouncer_monitor --skip pinned_bouncer_no_monitor --skip pinned_bouncer_invites --skip pinned_bouncer_names --skip pinned_bouncer_channel_context --skip pinned_bouncer_network_icon"
-                run(["make", "test", f"TEST_ARGS={test_args}"],
-                    cwd=ROOT, env=environment)
+                if args.daemon_image:
+                    run(["python3", str(ROOT / "scripts/test_bouncer_daemon_history.py"), args.daemon_image],
+                        cwd=ROOT, env=environment)
+                else:
+                    run(["make", "test", f"TEST_ARGS={test_args}"],
+                        cwd=ROOT, env=environment)
                 print(f"{args.implementation}: {args.test_filter} fixture passed")
             except Exception:
                 log.flush()

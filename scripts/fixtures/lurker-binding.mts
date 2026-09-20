@@ -8,6 +8,7 @@ process.env.SESSION_SECRET = 'disposable-bouncer-binding-test-session-secret';
 process.env.LURKER_BOUNCER_ENABLED = 'true';
 const harnessModule = await import(pathToFileURL(path.join(source, 'server/test-utils/bouncerHarness.ts')).href);
 const account = harnessModule.seedAccount({ password: 'fixture-password', nick: 'tester' });
+if (process.env.REPARTEE_BOUNCER_DAEMON_FIXTURE === '1') account.upstream.state = 'connecting';
 const messages = await import(pathToFileURL(path.join(source, 'server/db/messages.ts')).href);
 for (const target of ['history-peer', '#history-channel']) {
 for (let index = 0; index < 300; index += 1) {

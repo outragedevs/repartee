@@ -144,3 +144,9 @@ regression. It does not claim an operating-system daemon restart,
 actual browser rendering, diagnostic-file inspection, network-delivered live
 messages, server-search persistence, error-path persistence, or Soju without
 history storage. Those remaining full-lifecycle acceptance cases stay open.
+
+The separate real-daemon/browser follow-up is documented in
+`bouncer-daemon-history.md`. It adds actual process restart and rendered browser
+pagination, and fixes diagnostic-file content leaks found by that broader test.
+Its remaining limits are stated separately; this does not retroactively enlarge
+the scope of the in-process fixture above.

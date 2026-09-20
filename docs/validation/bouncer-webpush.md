@@ -26,7 +26,7 @@ through its IRC bouncer. Provider sources are unchanged by the fixture.
 Responses are delivered only to the requesting WebSocket session. No endpoint or
 auth secret is returned, displayed as chat, added to history, or included by the
 request's Debug implementation. Raw IRC trace output is suppressed for both legacy and fork library targets by
-`diagnostics::IrcWireFilter`, even under explicit dependency trace directives.
+`diagnostics::WireContentFilter`, even under explicit dependency trace directives.
 Subscription data remains transient; the browser and bouncer own persistence.
 
 Operations require verified TLS, successful SASL on the current transport,
