@@ -6,12 +6,16 @@ const assert = require('node:assert/strict');
     const context = await browser.newContext({ignoreHTTPSErrors: true, viewport: {width: 1100, height: 800}});
     const page = await context.newPage();
     const cycle = process.env.REPARTEE_DAEMON_TEST_CYCLE;
+    const memoryStore = process.env.REPARTEE_MEMORY_HISTORY === '1';
+    let connected = false;
     const pages = [];
     const live = [];
     const errors = [];
     page.on('pageerror', error => errors.push(String(error)));
     page.on('websocket', socket => socket.on('framereceived', event => {
       const data = JSON.parse(event.payload);
+      if (data.type === 'SyncInit') connected = data.connections.some(connection => connection.id === 'fixture' && connection.connected);
+      if (data.type === 'ConnectionStatus' && data.conn_id === 'fixture') connected = data.connected;
       if (data.type === 'Messages') pages.push(data);
       if (data.type === 'NewMessage') live.push(data.message.text);
     }));
@@ -23,10 +27,18 @@ const assert = require('node:assert/strict');
     const input = page.locator('#chat-input');
     await input.waitFor();
     await page.locator('.buffer-list button:visible').filter({has: page.locator('.name').filter({hasText: /^fixture$/})}).click();
-    await page.locator('.chat-line').filter({hasText: 'This connection does not support CHATHISTORY'}).waitFor();
+    for (let attempt = 0; attempt < 500 && !connected; attempt++) await page.waitForTimeout(20);
+    assert.ok(connected, 'Daemon did not connect to the bouncer');
+    const warning = page.locator('.chat-line').filter({hasText: 'This connection does not support CHATHISTORY'});
+    if (memoryStore) await warning.waitFor();
+    else assert.equal(await warning.count(), 0);
     if (cycle === '1') {
       await page.locator('.buffer-list button:visible').filter({has: page.locator('.name').filter({hasText: /^Alice$/i})}).click();
       await page.locator('.chat-line').filter({hasText: 'fixture-memory-offline'}).waitFor();
+      if (!memoryStore) {
+        await page.locator('.chat-line').filter({hasText: 'fixture-memory-incoming-0'}).waitFor();
+        await page.locator('.chat-line').filter({hasText: 'fixture-memory-outgoing-0'}).waitFor();
+      }
     }
     await input.fill(`/msg FixtureControl memory-history-${cycle}`);
     await input.press('Enter');
@@ -41,18 +53,27 @@ const assert = require('node:assert/strict');
     await input.fill(`fixture-memory-outgoing-${cycle}`);
     await input.press('Enter');
     await page.locator('.chat-line').filter({hasText: `fixture-memory-outgoing-${cycle}`}).waitFor();
+    pages.length = 0;
     await page.reload();
     await input.waitFor();
     await alice.click();
     await page.locator('.chat-line').filter({hasText: `fixture-memory-incoming-${cycle}`}).waitFor();
     await page.locator('.chat-line').filter({hasText: `fixture-memory-outgoing-${cycle}`}).waitFor();
-    const history = pages.filter(event => event.buffer_id.toLowerCase() === 'fixture/alice').at(-1);
-    assert.ok(history, 'Browser did not fetch in-memory messages');
-    if (cycle === '1') assert.ok(history.messages.some(message => message.text === 'fixture-memory-offline'), 'Offline replay was lost after browser reload');
-    assert.equal(history.has_more, false, 'No-CHATHISTORY connection offers unavailable older history');
-    assert.ok(history.messages.some(message => message.text === `fixture-memory-incoming-${cycle}`));
-    assert.ok(history.messages.some(message => message.text === `fixture-memory-outgoing-${cycle}`));
+    const historyPages = () => pages.filter(event => event.buffer_id.toLowerCase() === 'fixture/alice');
+    for (let attempt = 0; attempt < 40 && !historyPages().some(event => !event.has_more); attempt++) {
+      await page.locator('.chat-messages').hover();
+      await page.mouse.wheel(0, -1000);
+      await page.waitForTimeout(100);
+    }
+    assert.ok(historyPages().some(event => !event.has_more), 'Older history did not reach exhaustion');
+    const texts = new Set(historyPages().flatMap(event => event.messages.map(message => message.text)));
+    if (cycle === '1') assert.ok(texts.has('fixture-memory-offline'), 'Offline replay was lost after browser reload');
+    assert.ok(texts.has(`fixture-memory-incoming-${cycle}`));
+    assert.ok(texts.has(`fixture-memory-outgoing-${cycle}`));
+    for (const text of [`fixture-memory-incoming-${cycle}`, `fixture-memory-outgoing-${cycle}`]) {
+      assert.equal(await page.locator('.chat-line').filter({hasText: text}).count(), 1, `Duplicate visible message: ${text}`);
+    }
     assert.deepEqual(errors, []);
-    console.log('PASS: no-CHATHISTORY warning, real incoming/outgoing messages, browser reload, exhausted history page.');
+    console.log('PASS: real incoming/outgoing messages, restart history, browser reload, exhausted history page.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
