@@ -304,3 +304,9 @@ authenticated browser upload route, browser chooser, and actual pinned-provider
 upload/download tests pass. See `docs/validation/bouncer-filehost.md` for evidence
 and the remaining review/integration boundaries. All other requirements remain
 in scope.
+
+FILEHOST merged in https://github.com/outragedevs/repartee/pull/83 after clean
+Sol medium review round 3 and complete browser-to-provider tests for both pinned
+bouncers. Follow-up `fix/redaction-live-isupport` corrects redaction's legacy
+ISUPPORT reads, with a reproduced failure via actual 005 and passing regressions.
+See `docs/validation/redaction-live-isupport.md`; review remains required.

@@ -47,10 +47,7 @@ impl AppState {
         if !conn.server_owns_history() {
             return None;
         }
-        let mapping = conn
-            .isupport
-            .get("CASEMAPPING")
-            .map_or("rfc1459", String::as_str);
+        let mapping = conn.isupport_parsed.casemapping();
         Some((
             conn.network_key().to_string(),
             casefold(target, mapping),
@@ -94,7 +91,7 @@ impl AppState {
         if target.is_empty() || id.is_empty() {
             return None;
         }
-        let mapping = conn.isupport.get("CASEMAPPING").map_or("rfc1459", String::as_str);
+        let mapping = conn.isupport_parsed.casemapping();
         let target = if casefold(target, mapping) == casefold(&conn.nick, mapping) {
             match message.prefix.as_ref()? {
                 Prefix::Nickname(nick, _, _) => nick.as_str(),
@@ -165,16 +162,8 @@ impl AppState {
         let actor = match prefix {
             Prefix::Nickname(nick, _, _) | Prefix::ServerName(nick) => nick,
         };
-        let mapping = conn
-            .isupport
-            .get("CASEMAPPING")
-            .map_or("rfc1459", String::as_str);
-        let channel = target.starts_with(|c| {
-            conn.isupport
-                .get("CHANTYPES")
-                .map_or("#&", String::as_str)
-                .contains(c)
-        });
+        let mapping = conn.isupport_parsed.casemapping();
+        let channel = target.starts_with(|c| conn.isupport_parsed.chan_types().contains(c));
         let peer = if channel || casefold(actor, mapping) == casefold(&conn.nick, mapping) {
             target
         } else if casefold(target, mapping) == casefold(&conn.nick, mapping) {
@@ -524,9 +513,8 @@ mod tests {
             ("rfc1459", "+Test^", "+TEST~", true),
         ] {
             let mut app = setup();
-            let conn = app.state.connections.get_mut("one").unwrap();
-            conn.isupport.insert("CASEMAPPING".into(), mapping.into());
-            conn.isupport.insert("CHANTYPES".into(), "+".into());
+            crate::irc::events::handle_irc_message(&mut app.state, "one",
+                &format!(":server 005 me CASEMAPPING={mapping} CHANTYPES=+ :are supported").parse().unwrap());
             app.state.add_buffer(super::super::buffer::Buffer::for_test(
                 "one",
                 BufferType::Channel,
@@ -548,6 +536,26 @@ mod tests {
                 matches
             );
         }
+    }
+
+    #[test]
+    fn redaction_identity_follows_live_isupport_removal_and_reconnect_reset() {
+        let mut app = setup();
+        let announce = ":server 005 me CASEMAPPING=ascii CHANTYPES=+ :are supported";
+        crate::irc::events::handle_irc_message(&mut app.state, "one", &announce.parse().unwrap());
+        let original = app.state.redaction_key("one/+Test[", "id").unwrap();
+        assert_eq!(original.1, "+test[");
+        let identity = app.state.retain_wire_redaction("one",
+            &"@msgid=wire :alice!u@h PRIVMSG +Test[ :body".parse().unwrap()).unwrap();
+        assert_eq!(identity.key.1, "+test[");
+        crate::irc::events::handle_irc_message(&mut app.state, "one",
+            &":server 005 me -CASEMAPPING -CHANTYPES :are supported".parse().unwrap());
+        assert_eq!(app.state.redaction_key("one/+Test[", "id").unwrap().1, "+test{");
+        assert_eq!(app.state.connections["one"].isupport_parsed.chan_types(), "#&");
+        crate::irc::events::handle_irc_message(&mut app.state, "one", &announce.parse().unwrap());
+        crate::irc::events::handle_connected(&mut app.state, "one");
+        assert_eq!(app.state.redaction_key("one/+Test[", "id").unwrap().1, "+test{");
+        assert_eq!(app.state.connections["one"].isupport_parsed.chan_types(), "#&");
     }
 
     #[test]
