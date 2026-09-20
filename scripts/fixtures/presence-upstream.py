@@ -125,6 +125,14 @@ class PresenceServer:
                     have_user = True
                 elif command == 'PING':
                     send(f':fixture.local PONG fixture.local :{params[-1]}')
+                elif command == 'PRIVMSG' and registered and self.redaction and params == ['FixtureControl', 'search-private']:
+                    send(f'@msgid=search-incoming :Alice!peer@fixture.local PRIVMSG {nick} :private needle incoming')
+                    send(f'@msgid=search-outgoing :{nick}!fixture@localhost PRIVMSG Alice :private needle outgoing')
+                    send(f':{nick}!fixture@localhost NICK renamed')
+                    nick = 'renamed'
+                elif command == 'PRIVMSG' and registered and self.redaction and params == ['FixtureControl', 'search-messages']:
+                    send('@msgid=search-first :Alice!peer@fixture.local PRIVMSG #search :needle first 100%')
+                    send('@msgid=search-second :Bob!peer@fixture.local PRIVMSG #search :needle second')
                 elif command == 'PRIVMSG' and registered and self.redaction and params == ['FixtureControl', 'redaction-message']:
                     send('@msgid=upstream-redaction :Alice!peer@fixture.local PRIVMSG #redaction :fixture secret body')
                 elif command == 'REDACT' and registered and self.redaction and len(params) >= 2:

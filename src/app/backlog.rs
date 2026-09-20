@@ -577,7 +577,20 @@ impl App {
         anchor: Option<(Option<String>, i64)>,
         requested_limit: usize,
     ) -> bool {
+        self.request_chathistory_labeled(conn_id, target, dir, anchor, requested_limit, None)
+    }
+
+    pub(crate) fn request_chathistory_labeled(
+        &mut self,
+        conn_id: &str,
+        target: &str,
+        dir: crate::irc::chathistory::Direction,
+        anchor: Option<(Option<String>, i64)>,
+        requested_limit: usize,
+        label: Option<&str>,
+    ) -> bool {
         use crate::irc::chathistory::{self, HistoryRef, RefKind};
+        if self.search_context_pending(conn_id, target) { return false; }
 
         let (limit, history_ref) = {
             let Some(conn) = self.state.connections.get(conn_id) else {
@@ -612,9 +625,13 @@ impl App {
         let Some(handle) = self.irc_handles.get(conn_id) else {
             return false;
         };
+        let mut message: ::irc::proto::Message = ::irc::proto::Command::Raw(line.clone(), vec![]).into();
+        if let Some(label) = label {
+            message.tags = Some(vec![::irc::proto::message::Tag("label".into(), Some(label.into()))]);
+        }
         if handle
             .sender()
-            .send(::irc::proto::Command::Raw(line.clone(), vec![]))
+            .send(message)
             .is_err()
         {
             return false;

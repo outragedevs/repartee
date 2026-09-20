@@ -87,6 +87,7 @@ pub fn rfc3339_millis(unix_ms: i64) -> String {
 /// to key in-flight tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
+    Around,
     /// Older messages (scroll-up).
     Before,
     /// Newer messages (reconnect gap-fill).
@@ -100,6 +101,7 @@ impl Direction {
     #[must_use]
     pub const fn subcommand(self) -> &'static str {
         match self {
+            Self::Around => "AROUND",
             Self::Before => "BEFORE",
             Self::After => "AFTER",
             Self::Latest => "LATEST",
@@ -121,6 +123,7 @@ pub struct HistoryState {
     /// periodic sweep release requests the server rejected or dropped without
     /// ever opening a batch (see [`HistoryState::clear_stale`]).
     in_flight: HashMap<(String, Direction), (usize, Instant)>,
+    ambiguous_reply: bool,
     /// Targets (lowercased) whose `BEFORE` history the server has exhausted.
     before_exhausted: HashSet<String>,
     /// Per-target oldest point we have pulled via chathistory: the oldest
@@ -180,6 +183,8 @@ impl HistoryState {
     pub fn last_request_succeeded(&self, target: &str) -> Option<bool> {
         self.completion.get(&target.to_ascii_lowercase()).copied()
     }
+
+    pub const fn has_ambiguous_reply(&self) -> bool { self.ambiguous_reply }
 
     pub fn pending_count(&self) -> usize {
         self.in_flight.len()
@@ -264,6 +269,7 @@ impl HistoryState {
             .collect();
         let mut targets: Vec<String> = Vec::new();
         for key in stale {
+            self.ambiguous_reply = true;
             self.completion.insert(key.0.clone(), false);
             if !targets.contains(&key.0) {
                 targets.push(key.0.clone());
@@ -357,6 +363,7 @@ impl HistoryState {
     /// again, even for a target already filled on the previous connection.
     pub fn set_gapfill_cutoff(&mut self, now_ms: i64) {
         self.gapfill_cutoff_ms = Some(now_ms);
+        self.ambiguous_reply = false;
         self.gapfilled_targets.clear();
         self.gapfill_pages.clear();
     }
