@@ -48,8 +48,8 @@ rename without reconnect, deletion with stale events, parent suspension/reconnec
 manual disconnect and reopening closed children. Native/web focus remains stable
 for background discovery, replayed joins and newly arriving DMs; explicit joins
 still activate their target. Web rename/resync tests preserve valid buffer IDs.
-PASS-specific explicit binding and the remaining feature matrix are separate
-pending work. Server-owned history regressions cover memory-only BEFORE ingestion,
+PASS-specific explicit binding is covered by [PASS acceptance](bouncer-pass-authentication.md).
+The remaining feature matrix is tracked separately. Server-owned history regressions cover memory-only BEFORE ingestion,
 reloading after buffer trimming, web page completion and timeout replies, equal
 timestamp cursors, retained local rows that are not implicitly loaded, and
 volatile account-scoped mentions, including seven-day expiration. Unsolicited

@@ -484,12 +484,20 @@ credentials. Alternatively set the network ID with
 <code>/set servers.bouncer_libera.bouncer_network_id 42</code> and reconnect, or use
 <code>-bouncer-network=42</code> with <code>/server add</code>. Set the option to an empty string through
 <code>/set</code> to remove explicit binding.</p>
-<p>The client authenticates first, sends <code>BOUNCER BIND</code> before <code>CAP END</code>, and verifies
-that the server confirms the requested ID. Rejected or unconfirmed binding is a
+<p>The client sends <code>BOUNCER BIND</code> before <code>CAP END</code> and verifies that registration
+succeeds with the requested ID. Rejected or unconfirmed binding is a
 connection error. Configured autojoin channels are suppressed for explicit
-binding: the bouncer restores its joined channels. PASS-only logins can continue
-using the bouncer&#39;s username/network selector without this option; explicit ID
-binding currently requires SASL.</p>
+binding: the bouncer restores its joined channels.</p>
+<p>Lurker also supports explicit IDs with PASS authentication. In that case replace
+<code>sasl_user</code> and <code>sasl_mechanism</code> with <code>username = &quot;your-bouncer-account&quot;</code>, remove
+that server&#39;s SASL credentials, and store the secret in <code>.env</code> as
+<code>BOUNCER_LIBERA_PASSWORD</code>. Lurker validates PASS at <code>CAP END</code>; Repartee waits for
+successful registration and the matching network ID before exposing a connected
+session. Keep TLS enabled. Soju requires successful SASL before explicit <code>BIND</code>
+and rejects this PASS-only variant. Both providers accept PASS for a control
+connection with the account in <code>username</code> and the secret in the server&#39;s
+<code>*_PASSWORD</code> environment setting. If SASL settings are present, SASL must
+succeed; Repartee does not silently fall back to PASS for another account.</p>
 <h2>Bouncer control connection</h2>
 <p>Set <code>bouncer_control = true</code> on a dedicated server entry to discover its networks.
 Authenticate using the account login without a network selector. Do not set

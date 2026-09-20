@@ -105,3 +105,7 @@ fn confirm_identity(message: &Message, tracker: &mut super::batch::BatchTracker,
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "bouncer/pass_tests.rs"]
+mod pass_tests;

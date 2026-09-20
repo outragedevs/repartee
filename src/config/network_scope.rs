@@ -23,6 +23,19 @@ pub fn network_scope(account_id: &str, server: &ServerConfig, default_username: 
         digest.update((component.len() as u64).to_be_bytes());
         digest.update(component.as_bytes());
     }
+    if [
+        &server.sasl_user, &server.sasl_pass, &server.sasl_key_path,
+        &server.client_cert_path, &server.sasl_mechanism,
+    ].iter().all(|setting| setting.is_none())
+        && let Some((login, _)) = server.password.as_deref().and_then(|pass| pass.split_once(':'))
+    {
+        let account = login.split(['/', '@']).next().unwrap_or_default();
+        if !account.is_empty() {
+            digest.update(b"\0pass-account\0");
+            digest.update((account.len() as u64).to_be_bytes());
+            digest.update(account.as_bytes());
+        }
+    }
     let network = server.bouncer_network_id.as_deref().map_or_else(
         || "control".to_string(),
         |id| {
@@ -91,6 +104,46 @@ mod tests {
         server.bouncer_network_id = None;
         assert_eq!(network_scope("account", &server, "default"), "Renamed");
     }
+    #[test]
+    fn combined_pass_accounts_never_share_sensitive_network_state() {
+        let mut server: ServerConfig = toml::from_str(
+            "label='same'\naddress='bnc.example.org'\nport=6697\ntls=true\nchannels=[]\nbouncer_network_id='42'\nusername='unchanged'",
+        ).unwrap();
+        server.password = Some("alice:old-secret".into());
+        let alice = network_scope("same-entry", &server, "default");
+        server.password = Some("bob:old-secret".into());
+        assert_ne!(network_scope("same-entry", &server, "default"), alice);
+        server.password = Some("alice/new-name@other-client:new:secret".into());
+        assert_eq!(network_scope("same-entry", &server, "default"), alice);
+        server.password = Some("alice:rotated-secret".into());
+        assert_eq!(network_scope("same-entry", &server, "default"), alice);
+        server.password = Some("secret-only".into());
+        assert_ne!(network_scope("same-entry", &server, "default"), alice);
+        server.username = Some("alice".into());
+        let plain_alice = network_scope("same-entry", &server, "default");
+        server.username = Some("bob".into());
+        assert_ne!(network_scope("same-entry", &server, "default"), plain_alice);
+        server.bouncer_control = true;
+        server.bouncer_network_id = None;
+        server.password = Some("alice:secret".into());
+        let control_alice = network_scope("same-entry", &server, "default");
+        server.password = Some("bob:secret".into());
+        assert_ne!(network_scope("same-entry", &server, "default"), control_alice);
+    }
+
+    #[test]
+    fn successful_sasl_scope_does_not_depend_on_unused_pass() {
+        let mut server: ServerConfig = toml::from_str(
+            "label='same'\naddress='bnc.example.org'\nport=6697\ntls=true\nchannels=[]\nbouncer_network_id='42'\nsasl_user='alice'",
+        ).unwrap();
+        server.sasl_pass = Some("sasl-secret".into());
+        let original = network_scope("same-entry", &server, "default");
+        server.password = Some("bob:secret".into());
+        assert_eq!(network_scope("same-entry", &server, "default"), original);
+        server.password = Some("charlie:rotated".into());
+        assert_eq!(network_scope("same-entry", &server, "default"), original);
+    }
+
     #[test]
     fn invalid_network_ids_are_rejected_before_config_can_reach_keyring() {
         for id in ["foo", "0", "-1", "9223372036854775808", "42\u{1f}#channel"] {

@@ -441,12 +441,21 @@ credentials. Alternatively set the network ID with
 `-bouncer-network=42` with `/server add`. Set the option to an empty string through
 `/set` to remove explicit binding.
 
-The client authenticates first, sends `BOUNCER BIND` before `CAP END`, and verifies
-that the server confirms the requested ID. Rejected or unconfirmed binding is a
+The client sends `BOUNCER BIND` before `CAP END` and verifies that registration
+succeeds with the requested ID. Rejected or unconfirmed binding is a
 connection error. Configured autojoin channels are suppressed for explicit
-binding: the bouncer restores its joined channels. PASS-only logins can continue
-using the bouncer's username/network selector without this option; explicit ID
-binding currently requires SASL.
+binding: the bouncer restores its joined channels.
+
+Lurker also supports explicit IDs with PASS authentication. In that case replace
+`sasl_user` and `sasl_mechanism` with `username = "your-bouncer-account"`, remove
+that server's SASL credentials, and store the secret in `.env` as
+`BOUNCER_LIBERA_PASSWORD`. Lurker validates PASS at `CAP END`; Repartee waits for
+successful registration and the matching network ID before exposing a connected
+session. Keep TLS enabled. Soju requires successful SASL before explicit `BIND`
+and rejects this PASS-only variant. Both providers accept PASS for a control
+connection with the account in `username` and the secret in the server's
+`*_PASSWORD` environment setting. If SASL settings are present, SASL must
+succeed; Repartee does not silently fall back to PASS for another account.
 
 ## Bouncer control connection
 
