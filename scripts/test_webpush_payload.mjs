@@ -56,7 +56,7 @@ test('channel-context messages route and format as channel notifications', () =>
         assert.equal(result.body, 'Alice: hello');
         assert.equal(fold(result.target), notification('MARKREAD #room{ :timestamp=2026-09-20T10:00:00Z', config).target);
     }
-    for (const context of ['Alice', '#bad\\sroom', '#one,#two', '#bad\\nroom', '#bad:room', '#' + 'x'.repeat(512)]) {
+    for (const context of ['Alice', '#bad\\sroom', '#one,#two', '#bad\\nroom', '#' + 'x'.repeat(512)]) {
         assert.equal(notification(`@+draft/channel-context=${context} :Alice!u@h PRIVMSG Me :hello`, config).target, 'Alice');
     }
     assert.equal(notification('@+draft/channel-context=+local :Alice!u@h PRIVMSG Me :hello', {...config, chantypes:'#&+'}).target, '+local');
@@ -83,5 +83,27 @@ test('final channel-context tag takes precedence without falling back from inval
     assert.equal(notification(both, config).target, '#final');
     for (const context of ['', 'Bob', '#bad\\sroom']) {
         assert.equal(notification(`@+channel-context=${context};+draft/channel-context=#draft :Alice!u@h PRIVMSG Me :hello`, config).target, 'Alice');
+    }
+});
+
+
+test('channel context accepts optional userhost prefixes and colon channel names', () => {
+    for (const tag of ['+channel-context', '+draft/channel-context']) {
+        for (const prefix of ['Alice', 'Alice!user', 'Alice@host', 'Alice!user@host']) {
+            for (const command of ['PRIVMSG', 'NOTICE']) {
+                const result = notification(`@${tag}=#channel:scope :${prefix} ${command} Me :hello`, config);
+                assert.equal(result.target, '#channel:scope');
+                assert.equal(result.body, 'Alice: hello');
+                const url = new URL(navigation('https://client.example', 'a'.repeat(64), result.target));
+                assert.equal(new URLSearchParams(url.hash.slice(1)).get('push_target'), '#channel:scope');
+            }
+        }
+    }
+});
+
+
+test('private channel context does not impose extra nickname restrictions', () => {
+    for (const target of ['Me', 'Me$part', 'M\u00a0e']) {
+        assert.equal(notification(`@+channel-context=#room :Alice NOTICE ${target} :hello`, config).target, '#room');
     }
 });

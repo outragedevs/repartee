@@ -125,8 +125,8 @@ const crypto = require('node:crypto');
         assert.equal(first.data.scope, scope);
         await push('MARKREAD Alice :timestamp=2026-09-20T10:00:00.000Z');
         await until(async () => (await notifications()).length === 0);
-        for (const [tag, channel] of [['+channel-context', '#Final['], ['+draft/channel-context', '#Draft[']]) {
-            await push(`@time=2026-09-20T10:00:00.000Z;${tag}=${channel};msgid=context-${channel} :Alice!u@host PRIVMSG Me :channel context`);
+        for (const [tag, channel] of [['+channel-context', '#Final['], ['+draft/channel-context', '#Draft['], ['+channel-context', '#Colon:scope']]) {
+            await push(`@time=2026-09-20T10:00:00.000Z;${tag}=${channel};msgid=context-${channel} :Alice PRIVMSG Me :channel context`);
             await until(async () => (await notifications()).length === 1);
             assert.equal((await notifications())[0].data.target, channel);
             await push(`MARKREAD ${channel.toLowerCase().replace('[', '{')} :timestamp=2026-09-20T10:00:00.000Z`);

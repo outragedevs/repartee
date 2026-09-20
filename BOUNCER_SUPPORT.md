@@ -456,10 +456,10 @@ The current IRCv3 tag is `+channel-context`; the pinned Soju source still handle
 `+draft/channel-context`. The push payload parser accepts both, with the current
 name taking precedence when both are present. Context applies only to private
 user PRIVMSG/NOTICE traffic. Public channel messages, status-targeted channel
-messages, broadcasts, recipient lists and server prefixes retain their original
+messages, broadcasts, recipient lists and unambiguous server prefixes retain their original
 routing. Notification clicks and MARKREAD use the resulting channel consistently.
 
-Source: https://ircv3.net/specs/client-tags/channel-context.html . Eight payload
+Source: https://ircv3.net/specs/client-tags/channel-context.html . Ten payload
 tests and a Chromium module-service-worker fixture cover both aliases, invalid
 values, public-message isolation and matching read-marker routing. The worker
 fixture injects push events and does not claim to exercise push delivery over
