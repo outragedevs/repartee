@@ -216,8 +216,14 @@ message IDs to server timestamps; background terminal focus and history scrollin
 do not advance markers. Pending updates retry and are isolated by network scope.
 The pinned integration fixture now checks server persistence and notification of
 a second client for `draft/read-marker`. Legacy Soju `READ` has isolated protocol
-regressions. Aggregate presence remains a separate pending part of stage 6.
+regressions. Presence implementation followed in PR 71.
 
 
-Presence implementation is on `feat/bouncer-presence`. Its acceptance checks are
-tracked in `docs/validation/bouncer-presence.md`; the presence row is not complete.
+Presence implementation merged in https://github.com/outragedevs/repartee/pull/71
+following a clean second gpt-5.6-sol medium review. Actual App/two-client upstream
+fixtures pass for Lurker and Soju with AutoAway enabled and disabled. Validation
+and the remaining browser focus-delivery gap are recorded in
+`docs/validation/bouncer-presence.md`; this does not close the full matrix.
+
+Soju network management is next on `feat/soju-network-management`, with source
+findings and acceptance cases in `docs/validation/bouncer-network-management.md`.

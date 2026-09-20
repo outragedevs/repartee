@@ -539,6 +539,7 @@ impl App {
                 // limits/ref types and could be rejected for non-membership.
             }
             IrcEvent::Disconnected(conn_id, error) => {
+                self.disconnect_bouncer_mutation(&conn_id);
 
                 self.history_discovery.remove(&conn_id);
                 self.suspend_bouncer_children(&conn_id);
@@ -592,6 +593,7 @@ impl App {
                 self.channel_query_sent_at.remove(&conn_id);
             }
             IrcEvent::Message(conn_id, msg) => {
+                if self.handle_bouncer_mutation(&conn_id, &msg) { return; }
                 if self.handle_bouncer_network_message(&conn_id, &msg) {
                     return;
                 }

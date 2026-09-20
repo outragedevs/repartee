@@ -1,7 +1,8 @@
 # Bouncer presence validation
 
-Status: implementation under review. Read-marker PR 70 is merged.
-Application-level real-bouncer integration passes; clean review is pending.
+Status: merged in PR 71 after the second pinned Sol medium review returned no
+actionable findings. Application-level real-bouncer integration passes. Remaining
+validation limits are recorded below.
 
 ## Pinned-source behavior
 

@@ -5,6 +5,7 @@ use irc::proto::{Command, Message, Response};
 pub const NETWORKS_CAP: &str = "soju.im/bouncer-networks";
 pub const NETWORKS_NOTIFY_CAP: &str = "soju.im/bouncer-networks-notify";
 
+pub mod mutations;
 mod networks;
 pub use networks::{Network, NetworkRegistry, RegistryEvent};
 
