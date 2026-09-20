@@ -54,6 +54,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use irc::proto::{Command, Message, Response};
@@ -212,6 +213,7 @@ pub struct IrcSender {
     /// of. Held outside the mutex so that case costs neither a lock nor a
     /// serialization.
     threshold_ms: u64,
+    saferate: Arc<AtomicBool>,
 }
 
 impl IrcSender {
@@ -228,6 +230,17 @@ impl IrcSender {
             wire: Wire::Live(sender),
             budget: Arc::new(Mutex::new(FloodEstimate::new())),
             threshold_ms: penalty_threshold_ms,
+            saferate: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn set_saferate(&self, enabled: bool) {
+        let _budget = self.budget_mut();
+        if self.saferate.swap(enabled, Ordering::AcqRel) == enabled { return; }
+        match &self.wire {
+            Wire::Live(sender) => sender.set_flood_protection_enabled(!enabled),
+            #[cfg(test)]
+            _ => {}
         }
     }
 
@@ -310,7 +323,7 @@ impl IrcSender {
     /// origin rather than the wall clock.
     #[must_use]
     pub(crate) fn has_typing_headroom_at(&self, now: Instant) -> bool {
-        if self.threshold_ms == 0 {
+        if self.threshold_ms == 0 || self.saferate.load(Ordering::Acquire) {
             return true;
         }
         self.budget_mut()
@@ -694,6 +707,7 @@ impl IrcSender {
             wire: Wire::Capture(Arc::new(Mutex::new(Vec::new()))),
             budget: Arc::new(Mutex::new(FloodEstimate::new())),
             threshold_ms: penalty_threshold_ms,
+            saferate: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -710,6 +724,7 @@ impl IrcSender {
             },
             budget: Arc::new(Mutex::new(FloodEstimate::new())),
             threshold_ms: 0,
+            saferate: Arc::new(AtomicBool::new(false)),
         }
     }
 

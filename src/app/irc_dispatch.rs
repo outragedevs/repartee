@@ -150,12 +150,21 @@ impl App {
         self.drain_pending_web_events();
     }
 
+    pub(crate) fn refresh_saferate(&self, conn_id: &str) {
+        if let Some(handle) = self.irc_handles.get(conn_id) {
+            let enabled = self.state.connections.get(conn_id)
+                .is_some_and(|connection| connection.isupport_parsed.has_saferate());
+            handle.sender().set_saferate(enabled);
+        }
+    }
+
     fn receive_isupport_batch(&mut self, conn_id: &str, batch: &crate::irc::batch::BatchInfo, clean_end: bool) {
         if batch.parent_ref().is_some_and(|parent| !self.batch_trackers.get(conn_id).is_some_and(|tracker| tracker.is_open(parent))) { return; }
         let Some(updates) = batch.isupport_tokens(clean_end) else { return; };
         if let Some(conn) = self.state.connections.get_mut(conn_id) {
             conn.isupport_parsed.parse_tokens(&updates);
         }
+        self.refresh_saferate(conn_id);
         crate::irc::events::refresh_isupport_label(&mut self.state, conn_id);
         self.drain_pending_buffer_rekeys();
     }
@@ -405,6 +414,9 @@ impl App {
             self.state.suppress_event_display = true;
         }
         crate::irc::events::handle_irc_message(&mut self.state, conn_id, msg);
+        if matches!(msg.command, ::irc::proto::Command::Response(::irc::proto::Response::RPL_ISUPPORT, _)) {
+            self.refresh_saferate(conn_id);
+        }
         if suppress_display {
             self.state.suppress_event_display = false;
         }
