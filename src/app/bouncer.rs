@@ -57,6 +57,10 @@ pub fn command(app: &mut super::App, args: &[String]) {
         return;
     };
     let id = app.bouncer_children.get(&id).map_or_else(|| id.clone(), |child| child.parent.clone());
+    if args.first().is_some_and(|action| matches!(action.as_str(), "add" | "change" | "delete")) {
+        app.submit_bouncer_mutation(&id, &args[0], &args[1..].join(" "));
+        return;
+    }
     if args.first().is_some_and(|arg| arg == "connect") && args.len() == 2 {
         if app.reconnect_bouncer_child(&id, &args[1]) {
             add_local_event(app, "Connecting to the bouncer network");
@@ -101,7 +105,7 @@ pub fn command(app: &mut super::App, args: &[String]) {
                 add_local_event(app, "Could not request the bouncer network list");
             }
         }
-        _ => add_local_event(app, "Usage: /bouncer [list|refresh|connect ID]"),
+        _ => add_local_event(app, "Usage: /bouncer [list|refresh|connect ID|add ATTRS|change ID ATTRS|delete ID]"),
     }
 }
 

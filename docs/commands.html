@@ -1017,6 +1017,9 @@ by the exact mask pattern.</p>
 <h1>/bouncer</h1>
 <h2>Syntax</h2>
 <pre><code>/bouncer [list|refresh|connect ID]
+/bouncer add host=HOST [ATTRIBUTE=VALUE ...]
+/bouncer change ID ATTRIBUTE=VALUE [...]
+/bouncer delete ID
 </code></pre>
 <h2>Description</h2>
 <p>Show the networks belonging to the active bouncer account, including their
@@ -1040,10 +1043,37 @@ window removes its generated connections and buffers. Removing a network closes 
 buffers without deleting stored logs. A manually disconnected child remains off;
 use <code>/bouncer connect ID</code> on the control connection or one of its children to
 resume it. The account must support SASL authentication for explicit network binding.</p>
+<h2>Network management</h2>
+<p>Soju supports adding, changing and deleting networks. Lurker rejects these
+operations and manages networks through its own web UI. These commands work in
+both terminal and web input, on the control connection or one of its generated
+children. They always target that account&#39;s control connection.</p>
+<p>Attributes are <code>host</code>, <code>port</code>, <code>tls</code> (<code>1</code> or <code>0</code>), <code>name</code>, <code>nickname</code>, <code>username</code>
+and <code>realname</code>. Quote values containing spaces; single quotes preserve literal
+backslashes. Repartee encodes semicolons, spaces and backslashes for the bouncer.
+An empty value clears the attribute. A new network requires <code>host</code>.</p>
+<p>For the upstream server password, put the value in the credentials file <code>.env</code>
+and use <code>pass-env=KEY</code>. The command history contains the key, not the resolved
+password. Use <code>pass=</code> to clear an existing password. Literal nonempty <code>pass=</code>
+values are rejected. These are upstream network credentials, separate from the
+login used to authenticate to the bouncer itself. Raw IRC client trace frames are
+excluded from diagnostic logs even when <code>RUST_LOG</code> enables trace, to keep resolved
+credentials out of persistent logs.</p>
+<p><code>delete</code> removes the upstream network from the bouncer account, affecting other
+clients too. To close only a local child connection, use <code>/disconnect</code> instead.</p>
+<p>A submitted operation is pending until the bouncer acknowledges or rejects it.
+Only one operation may be pending per account. Successful replies trigger a
+fresh network list; notifications update the generated connections and buffers.
+If a reply times out or the connection breaks, the result is unknown and Repartee
+does not retry automatically. Inspect <code>/bouncer list</code> or <code>/bouncer refresh</code> before
+reconnecting and deciding whether to repeat the operation.</p>
 <h2>Examples</h2>
 <pre><code>/bouncer
 /bouncer refresh
 /bouncer connect 42
+/bouncer add host=irc.example.org name=&quot;Work Network&quot; tls=1
+/bouncer change 42 realname=&quot;Example User&quot; pass-env=WORK_IRC_PASSWORD
+/bouncer delete 42
 </code></pre>
 <h2>See Also</h2>
 <p>/server, /connect, /set</p>

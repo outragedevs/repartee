@@ -36,6 +36,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("implementation", choices=PINS)
     parser.add_argument("source", type=Path)
+    parser.add_argument("--test-filter", default="pinned_bouncer_")
     args = parser.parse_args()
     source = args.source.resolve()
     head = run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True).stdout.strip()
@@ -90,10 +91,14 @@ def main():
                     "REPARTEE_BOUNCER_TEST_PORT": str(settings["port"]),
                     "REPARTEE_BOUNCER_TEST_NETID": str(settings["network"]),
                     "REPARTEE_BOUNCER_TEST_USER": settings["user"],
+                    "REPARTEE_BOUNCER_TEST_PROVIDER": args.implementation,
                 })
-                run(["make", "test", "TEST_ARGS=pinned_bouncer_ -- --ignored"],
+                test_args = f"{args.test_filter} -- --ignored"
+                if args.test_filter == "pinned_bouncer_":
+                    test_args += " --skip pinned_bouncer_presence --skip pinned_bouncer_network_management"
+                run(["make", "test", f"TEST_ARGS={test_args}"],
                     cwd=ROOT, env=environment)
-                print(f"{args.implementation}: binding, reconnect, discovery, generated child, 300-message server history and cross-client read markers passed")
+                print(f"{args.implementation}: {args.test_filter} fixture passed")
             except Exception:
                 log.flush()
                 log.seek(0)
