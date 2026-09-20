@@ -90,6 +90,8 @@ pub enum WebEvent {
     },
     /// Nick-related event (join, part, quit, nick change, mode, away).
     NickEvent {
+        #[serde(default)]
+        realname: Option<String>,
         buffer_id: String,
         kind: NickEventKind,
         nick: String,
@@ -415,6 +417,8 @@ pub struct WireMessage {
 /// Wire-format nick entry for transport over WebSocket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireNick {
+    #[serde(default)]
+    pub realname: Option<String>,
     pub nick: String,
     pub prefix: String,
     pub modes: String,

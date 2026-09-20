@@ -64,7 +64,10 @@ pub fn NickList() -> impl IntoView {
                                 });
                             }
                         };
-                        let query_title = format!("Open query with {}", n.nick);
+                        let query_title = n.realname.as_ref().map_or_else(
+                            || format!("Open query with {}", n.nick),
+                            |realname| format!("{} — {realname}", n.nick),
+                        );
                         view! {
                             <button type="button" class=class on:click=on_click
                                 title=query_title>

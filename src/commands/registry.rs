@@ -24,6 +24,12 @@ use super::types::{CommandCategory, CommandDef};
 
 static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
     vec![
+        ("setname", CommandDef {
+            handler: crate::irc::setname::command,
+            description: "Change your real name on the current connection",
+            aliases: &[],
+            category: CommandCategory::Connection,
+        }),
         // === Connection ===
         (
             "bouncer",

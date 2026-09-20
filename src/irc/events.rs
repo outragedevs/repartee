@@ -187,6 +187,13 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         Command::WALLOPS(text) => {
             handle_wallops(state, conn_id, msg.prefix.as_ref(), text);
         }
+        Command::Raw(command, args) if command.eq_ignore_ascii_case("SETNAME") => {
+            crate::irc::setname::handle(state, conn_id, msg.prefix.as_ref(), args, tags.as_ref());
+        }
+        Command::Raw(command, args) if command.eq_ignore_ascii_case("FAIL")
+            && args.first().is_some_and(|arg| arg.eq_ignore_ascii_case("SETNAME")) => {
+            crate::irc::setname::failure(state, conn_id, args);
+        }
         Command::ACCOUNT(account) => {
             handle_account(state, conn_id, msg.prefix.as_ref(), account, tags);
         }
@@ -377,6 +384,7 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
     // entirely, and `handle_disconnected` already emptied it when the previous
     // session ended, so stale caps are gone either way.
     if let Some(conn) = state.connections.get_mut(conn_id) {
+        conn.own_realname = None;
         conn.reconnect_attempts = 0;
         conn.next_reconnect = None;
         conn.error = None;
@@ -894,7 +902,7 @@ fn extract_tags(msg: &IrcMessage) -> Option<HashMap<String, String>> {
 /// If a valid RFC 3339 timestamp is present, use it; otherwise fall back to
 /// `Utc::now()`.  This is critical for bouncer/relay playback where messages
 /// arrive with historical timestamps.
-fn message_timestamp(tags: Option<&HashMap<String, String>>) -> DateTime<Utc> {
+pub(super) fn message_timestamp(tags: Option<&HashMap<String, String>>) -> DateTime<Utc> {
     tags.and_then(|t| t.get("time"))
         .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
         .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc))
@@ -2109,6 +2117,7 @@ fn handle_join(
         state.add_nick(
             &buffer_id,
             NickEntry {
+                realname: fields.realname.map(str::to_string),
                 nick: nick.clone(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -2182,6 +2191,7 @@ fn handle_join(
         state.add_nick(
             &buffer_id,
             NickEntry {
+                realname: fields.realname.map(str::to_string),
                 nick: nick.clone(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -2194,6 +2204,7 @@ fn handle_join(
         state
             .pending_web_events
             .push(crate::web::protocol::WebEvent::NickEvent {
+                realname: fields.realname.map(str::to_string),
                 buffer_id: buffer_id.clone(),
                 kind: crate::web::protocol::NickEventKind::Join,
                 nick: nick.clone(),
@@ -2402,6 +2413,7 @@ fn handle_away(state: &mut AppState, conn_id: &str, prefix: Option<&Prefix>, rea
         state
             .pending_web_events
             .push(crate::web::protocol::WebEvent::NickEvent {
+                realname: None,
                 buffer_id: buf_id,
                 kind: crate::web::protocol::NickEventKind::AwayChange,
                 nick: nick.clone(),
@@ -2806,6 +2818,7 @@ fn handle_part(
         state
             .pending_web_events
             .push(crate::web::protocol::WebEvent::NickEvent {
+                realname: None,
                 buffer_id: buffer_id.clone(),
                 kind: crate::web::protocol::NickEventKind::Part,
                 nick: nick.clone(),
@@ -2895,6 +2908,7 @@ fn handle_quit(
         state
             .pending_web_events
             .push(crate::web::protocol::WebEvent::NickEvent {
+                realname: None,
                 buffer_id: buf_id.clone(),
                 kind: crate::web::protocol::NickEventKind::Quit,
                 nick: nick.clone(),
@@ -3193,6 +3207,7 @@ fn handle_nick_change(
         state
             .pending_web_events
             .push(crate::web::protocol::WebEvent::NickEvent {
+                realname: None,
                 buffer_id: buf_id.clone(),
                 kind: crate::web::protocol::NickEventKind::NickChange,
                 nick: old_nick.clone(),
@@ -3571,6 +3586,7 @@ fn apply_channel_mode(
         state
             .pending_web_events
             .push(crate::web::protocol::WebEvent::NickEvent {
+                realname: None,
                 buffer_id: buffer_id.to_string(),
                 kind: crate::web::protocol::NickEventKind::ModeChange,
                 nick: target_nick.to_string(),
@@ -3915,7 +3931,11 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
                     );
 
                 for nick_with_prefix in nicks_str.split_whitespace() {
-                    let entry = parse_names_entry(nick_with_prefix, &prefix_map, has_userhost);
+                    let mut entry = parse_names_entry(nick_with_prefix, &prefix_map, has_userhost);
+                    entry.realname = state.buffers.get(&buffer_id)
+                        .and_then(|buffer| buffer.users.get(&entry.nick.to_lowercase()))
+                        .and_then(|existing| existing.realname.clone())
+                        .or_else(|| state.connections.get(conn_id).filter(|conn| conn.nick.eq_ignore_ascii_case(&entry.nick)).and_then(|conn| conn.own_realname.clone()));
                     state.add_nick(&buffer_id, entry);
                 }
             }
@@ -4382,8 +4402,7 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
                     state,
                     &buffer_id,
                     nick,
-                    user,
-                    host,
+                    WhoUser { ident: user, host, realname: whoreply_realname(&args[7], ircnet) },
                     flags.starts_with('G'),
                     WhoAccount::Keep,
                 );
@@ -4873,6 +4892,7 @@ fn parse_names_entry(raw: &str, prefix_map: &[(char, char)], has_userhost: bool)
     };
 
     NickEntry {
+        realname: None,
         nick,
         prefix,
         modes,
@@ -5006,8 +5026,7 @@ fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
         state,
         &buffer_id,
         nick,
-        user,
-        host,
+        WhoUser { ident: user, host, realname },
         flags.starts_with('G'),
         WhoAccount::Set(account.clone()),
     );
@@ -5035,14 +5054,20 @@ enum WhoAccount {
     Set(Option<String>),
 }
 
+#[derive(Clone, Copy)]
+struct WhoUser<'a> {
+    ident: &'a str,
+    host: &'a str,
+    realname: &'a str,
+}
+
 /// Update a channel nick entry from a WHO (352) or WHOX (354) reply. Both
 /// reply paths share this so the field writes can never drift apart.
 fn update_who_nick_entry(
     state: &mut AppState,
     buffer_id: &str,
     nick: &str,
-    ident: &str,
-    host: &str,
+    user: WhoUser<'_>,
     away: bool,
     account: WhoAccount,
 ) {
@@ -5055,9 +5080,18 @@ fn update_who_nick_entry(
         && let Some(entry) = buf.users.get_mut(&nick.to_lowercase())
     {
         tracing::trace!(%nick, %buffer_id, %away, "WHO: updating nick entry");
-        entry.ident = Some(ident.to_string());
-        entry.host = Some(host.to_string());
+        entry.ident = Some(user.ident.to_string());
+        entry.host = Some(user.host.to_string());
+        entry.realname = Some(user.realname.to_string());
         entry.away = away;
+        state.pending_web_events.push(crate::web::protocol::WebEvent::NickEvent {
+            buffer_id: buffer_id.to_string(),
+            kind: crate::web::protocol::NickEventKind::AwayChange,
+            nick: nick.to_string(),
+            realname: Some(user.realname.to_string()),
+            new_nick: None, prefix: None, modes: None,
+            away: Some(away), message: None,
+        });
         if let WhoAccount::Set(account) = account {
             entry.account = account;
         }
@@ -5980,6 +6014,7 @@ mod tests {
     fn make_test_state() -> AppState {
         let mut state = AppState::new();
         state.add_connection(Connection {
+            own_realname: None,
             id: "test".to_string(),
             label: "TestServer".to_string(),
             network_scope: None,
@@ -6087,6 +6122,7 @@ mod tests {
         state.add_nick(
             &chan_id,
             NickEntry {
+                realname: None,
                 nick: "me".to_string(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -6302,6 +6338,7 @@ mod tests {
         state.add_nick(
             "test/#test",
             NickEntry {
+                realname: None,
                 nick: "dave".to_string(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -6337,6 +6374,7 @@ mod tests {
         state.add_nick(
             "test/#test",
             NickEntry {
+                realname: None,
                 nick: "eve".to_string(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -6377,6 +6415,7 @@ mod tests {
         state.add_nick(
             "test/#test",
             NickEntry {
+                realname: None,
                 nick: "frank".to_string(),
                 prefix: "@".to_string(),
                 modes: "o".to_string(),
@@ -6713,6 +6752,7 @@ mod tests {
         state.add_nick(
             "test/#test",
             NickEntry {
+                realname: None,
                 nick: "troll".to_string(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -7458,6 +7498,7 @@ mod tests {
         state.add_nick(
             "test/#test",
             NickEntry {
+                realname: None,
                 nick: "alice".to_string(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -7494,6 +7535,7 @@ mod tests {
         state.add_nick(
             "test/#test",
             NickEntry {
+                realname: None,
                 nick: "alice".to_string(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -7554,6 +7596,7 @@ mod tests {
             state.add_nick(
                 buf_id,
                 NickEntry {
+                    realname: None,
                     nick: "alice".to_string(),
                     prefix: String::new(),
                     modes: String::new(),
@@ -7599,6 +7642,7 @@ mod tests {
         state.add_nick(
             "test/#test",
             NickEntry {
+                realname: None,
                 nick: "alice".to_string(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -7635,6 +7679,7 @@ mod tests {
         state.add_nick(
             "test/#test",
             NickEntry {
+                realname: None,
                 nick: "alice".to_string(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -7695,6 +7740,7 @@ mod tests {
             state.add_nick(
                 buf_id,
                 NickEntry {
+                    realname: None,
                     nick: "alice".to_string(),
                     prefix: String::new(),
                     modes: String::new(),
@@ -7737,6 +7783,7 @@ mod tests {
         state.add_nick(
             "test/#test",
             NickEntry {
+                realname: None,
                 nick: "alice".to_string(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -8434,6 +8481,7 @@ mod tests {
         state.add_nick(
             "test/#test",
             NickEntry {
+                realname: None,
                 nick: "alice".to_string(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -8497,6 +8545,7 @@ mod tests {
             state.add_nick(
                 buf_id,
                 NickEntry {
+                    realname: None,
                     nick: "alice".to_string(),
                     prefix: String::new(),
                     modes: String::new(),
@@ -8548,6 +8597,7 @@ mod tests {
         state.add_nick(
             "test/#test",
             NickEntry {
+                realname: None,
                 nick: "alice".to_string(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -9164,6 +9214,7 @@ mod tests {
         state.add_nick(
             &chan_id,
             NickEntry {
+                realname: None,
                 nick: "alice".to_string(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -9176,6 +9227,7 @@ mod tests {
         state.add_nick(
             &chan_id,
             NickEntry {
+                realname: None,
                 nick: "bob".to_string(),
                 prefix: "@".to_string(),
                 modes: "o".to_string(),
@@ -10686,6 +10738,7 @@ mod tests {
         state.add_nick(
             "test/#active",
             NickEntry {
+                realname: None,
                 nick: "me".into(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -10785,6 +10838,7 @@ mod tests {
         state.add_nick(
             &chan_id,
             NickEntry {
+                realname: None,
                 nick: "alice".into(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -10816,6 +10870,7 @@ mod tests {
         let mut state = make_test_state();
         // Second connection with its own channel
         state.add_connection(Connection {
+            own_realname: None,
             id: "other".into(),
             label: "Other".into(),
             network_scope: None,
@@ -10848,6 +10903,7 @@ mod tests {
         state.add_nick(
             &other_chan,
             NickEntry {
+                realname: None,
                 nick: "bob".into(),
                 prefix: String::new(),
                 modes: String::new(),

@@ -67,6 +67,8 @@ pub enum WebEvent {
         set_by: Option<String>,
     },
     NickEvent {
+        #[serde(default)]
+        realname: Option<String>,
         buffer_id: String,
         kind: NickEventKind,
         nick: String,
@@ -378,6 +380,8 @@ pub enum LinkPreviewKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireNick {
+    #[serde(default)]
+    pub realname: Option<String>,
     pub nick: String,
     pub prefix: String,
     pub modes: String,
