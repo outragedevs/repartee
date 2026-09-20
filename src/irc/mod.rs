@@ -67,6 +67,7 @@ pub enum IrcEvent {
 
 /// Result of `IRCv3` capability negotiation.
 struct NegotiateResult {
+    bouncer_detected: bool,
     sasl_authenticated: bool,
     account_registration_rules: Option<String>,
     /// Capabilities successfully enabled via `CAP REQ` / `CAP ACK`.
@@ -743,7 +744,7 @@ pub async fn connect_server(
 
     // Everything the crate will auto-send from, mirrored so the flood budget can
     // charge frames that never pass through `IrcSender`.
-    let echo_config = crate::irc::handle::CrateEchoConfig {
+    let mut echo_config = crate::irc::handle::CrateEchoConfig {
         ctcp_version: general.ctcp_version.clone(),
         username: username.to_string(),
         realname: realname.to_string(),
@@ -801,10 +802,18 @@ pub async fn connect_server(
         bouncer_control: server_config.bouncer_control,
     };
 
+    let mut bouncer_identity = None;
     let negotiation = async {
         let mut neg = negotiate_caps(&sender, &mut stream, &reg_params).await?;
-        if bouncer_network_id.is_some() || server_config.bouncer_control {
-            bouncer::confirm_registration(&mut stream, bouncer_network_id.as_deref(), &mut neg.early_messages).await?;
+        if neg.bouncer_detected {
+            let selection = bouncer_network_id.as_deref().map_or_else(
+                || if server_config.bouncer_control { bouncer::Selection::Control } else { bouncer::Selection::Automatic },
+                bouncer::Selection::Network,
+            );
+            bouncer_identity = Some(tokio::time::timeout(
+                std::time::Duration::from_mins(1),
+                bouncer::confirm_registration(&mut stream, selection, &mut neg.early_messages),
+            ).await.map_err(|_| eyre!("Bouncer registration timed out"))??);
         }
         Ok::<_, color_eyre::Report>(neg)
     };
@@ -830,6 +839,10 @@ pub async fn connect_server(
     // it under-reads and we hand typing to a queue that is already throttling.
     // The clone shares the budget: it IS this connection. See `crate::irc::handle`.
     let echo_sender = sender.clone();
+    if bouncer_identity.is_some() {
+        echo_config.channels.clear();
+        echo_config.channel_keys.clear();
+    }
     let mut echo = crate::irc::handle::CrateEcho::new(echo_config);
 
     // Spawn reader task
@@ -934,6 +947,7 @@ pub async fn connect_server(
     handle.reader_handle = Some(reader);
     handle.account_registration_rules = account_registration_rules;
     handle.sasl_authenticated = sasl_authenticated;
+    handle.bouncer_identity = bouncer_identity;
     Ok((handle, rx))
 }
 
@@ -1070,6 +1084,10 @@ async fn negotiate_caps(
     {
         return Err(eyre!("Server does not support bouncer network binding"));
     }
+    let bouncer_detected = cap_supported && server_caps.has(bouncer::NETWORKS_CAP);
+    if bouncer_detected {
+        sender.set_autojoin_enabled(false);
+    }
     let mut enabled_caps: HashSet<String> = HashSet::new();
     let mut authenticated = false;
 
@@ -1101,14 +1119,14 @@ async fn negotiate_caps(
         // Compute capabilities to request
         let mut caps_to_request = server_caps.negotiate(DESIRED_CAPS);
         caps_to_request.retain(|cap| cap != "draft/extended-isupport");
-        if params.bouncer_network_id.is_some() && !params.bouncer_control {
+        if bouncer_detected && !params.bouncer_control {
             caps_to_request.extend(cap::bouncer_network_caps(&server_caps));
             caps_to_request.extend(server_caps.negotiate(&["draft/pre-away", webpush::CAP]));
         }
-        if params.bouncer_network_id.is_some() || params.bouncer_control {
+        if bouncer_detected {
             caps_to_request.extend(server_caps.negotiate(&["soju.im/client-cert"]));
             caps_to_request.push(bouncer::NETWORKS_CAP.to_string());
-            if params.bouncer_control && server_caps.has(bouncer::NETWORKS_NOTIFY_CAP) {
+            if params.bouncer_network_id.is_none() && server_caps.has(bouncer::NETWORKS_NOTIFY_CAP) {
                 caps_to_request.push(bouncer::NETWORKS_NOTIFY_CAP.to_string());
             }
         }
@@ -1257,7 +1275,7 @@ async fn negotiate_caps(
             }
         }
 
-        if (params.bouncer_control || params.bouncer_network_id.is_some())
+        if bouncer_detected
             && !authenticated
             && params.password.is_some_and(|password| !password.is_empty())
             && (params.sasl_user.is_some() || params.sasl_pass.is_some()
@@ -1267,7 +1285,7 @@ async fn negotiate_caps(
             return Err(eyre!("Bouncer SASL authentication did not succeed; remove SASL settings to use PASS-only authentication"));
         }
 
-        if params.bouncer_control && (!enabled_caps.contains(bouncer::NETWORKS_CAP) || !enabled_caps.contains("batch")) {
+        if bouncer_detected && (!enabled_caps.contains(bouncer::NETWORKS_CAP) || !enabled_caps.contains("batch")) {
             return Err(eyre!("Bouncer control mode requires acknowledged network and batch capabilities"));
         }
         if let Some(network_id) = params.bouncer_network_id {
@@ -1303,6 +1321,7 @@ async fn negotiate_caps(
     };
 
     Ok(NegotiateResult {
+        bouncer_detected,
         sasl_authenticated: authenticated,
         account_registration_rules: enabled_caps.contains("draft/account-registration").then(|| server_caps.value("draft/account-registration").unwrap_or("").to_string()),
         enabled_caps,

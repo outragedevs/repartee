@@ -2842,6 +2842,7 @@ pub mod submit_typing_tests {
             network_label: None,
             id: "net".to_string(),
             label: "NetServer".to_string(),
+            bouncer_identity: None,
             network_scope: None,
             status: ConnectionStatus::Connected,
             own_handle: None,

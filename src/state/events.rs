@@ -2748,6 +2748,7 @@ pub mod tests {
             network_label: None,
             id: "libera".to_string(),
             label: "Libera".to_string(),
+            bouncer_identity: None,
             network_scope: None,
             status: ConnectionStatus::Connected,
             own_handle: None,

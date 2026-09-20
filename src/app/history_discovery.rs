@@ -58,7 +58,7 @@ impl App {
             return false;
         };
         if !conn.server_owns_history()
-            || conn.origin_config.bouncer_control
+            || conn.bouncer_control()
             || !conn.enabled_caps.contains("draft/chathistory")
         {
             return false;

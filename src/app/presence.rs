@@ -194,7 +194,7 @@ impl App {
             let Some(conn) = self.state.connections.get(id) else {
                 continue;
             };
-            if conn.origin_config.bouncer_control
+            if conn.bouncer_control()
                 || conn.status != crate::state::connection::ConnectionStatus::Connected
             {
                 continue;

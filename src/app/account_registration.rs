@@ -54,7 +54,7 @@ fn command_with_secret(app: &mut super::App, args: &[String], load: impl FnOnce(
     let Some(id) = app.active_conn_id().map(str::to_string) else { add_local_event(app, "No active connection"); return; };
     let Some(conn) = app.state.connections.get(&id).filter(|conn| {
         conn.status == crate::state::connection::ConnectionStatus::Connected
-            && conn.origin_config.bouncer_network_id.is_some() && !conn.origin_config.bouncer_control
+            && conn.bouncer_network_id().is_some() && !conn.bouncer_control()
             && conn.origin_config.tls && conn.origin_config.tls_verify && conn.enabled_caps.contains(CAP)
     }) else { add_local_event(app, "Account registration requires a bound bouncer network, verified TLS and acknowledged account-registration support"); return; };
     let Some(session) = app.account_registration.get(&id).filter(|session| session.rules.is_some()) else {

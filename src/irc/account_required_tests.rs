@@ -46,7 +46,7 @@ async fn registration(case: Case) {
             return;
         }
         let required = if case.required { " soju.im/account-required" } else { "" };
-        write.write_all(format!(":fixture CAP * LS :batch sasl=PLAIN soju.im/bouncer-networks{required}\r\n").as_bytes()).await.unwrap();
+        write.write_all(format!(":fixture CAP * LS :batch sasl=PLAIN{}{required}\r\n", if case.bound { " soju.im/bouncer-networks" } else { "" }).as_bytes()).await.unwrap();
         let request = lines.next_line().await.unwrap().unwrap();
         let requested = request.strip_prefix("CAP REQ ").unwrap().trim_start_matches(':');
         assert!(!requested.contains(CAP));

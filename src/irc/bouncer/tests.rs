@@ -83,6 +83,8 @@ async fn registration(reply: Reply, bound: bool) {
         }
         let advertised = if matches!(reply, Reply::NoCapability) {
             "sasl=PLAIN"
+        } else if !bound && !control {
+            "sasl=PLAIN batch draft/account-registration=email-required,min-password-length=8"
         } else {
             "sasl=PLAIN batch soju.im/bouncer-networks soju.im/bouncer-networks-notify draft/pre-away draft/account-registration=email-required,min-password-length=8"
         };
@@ -548,22 +550,54 @@ async fn dropping_registered_connection_closes_an_idle_socket() {
 #[test]
 fn extended_isupport_identity_requires_a_complete_valid_burst() {
     let mut tracker = crate::irc::batch::BatchTracker::default();
-    let mut confirmed = false;
+    let mut confirmed = None;
     for line in [":s BATCH +a draft/isupport", "@batch=a :s 005 me BOUNCER_NETID=1 :supported tokens"] {
-        super::confirm_identity(&line.parse().unwrap(), &mut tracker, Some("1"), &mut confirmed).unwrap();
-        assert!(!confirmed);
+        super::confirm_identity(&line.parse().unwrap(), &mut tracker, super::Selection::Network("1"), &mut confirmed).unwrap();
+        assert!(confirmed.is_none());
     }
-    super::confirm_identity(&":s BATCH -a".parse().unwrap(), &mut tracker, Some("1"), &mut confirmed).unwrap();
-    assert!(confirmed);
-    super::confirm_identity(&":s 005 me -BOUNCER_NETID :supported tokens".parse().unwrap(), &mut tracker, Some("1"), &mut confirmed).unwrap();
-    assert!(!confirmed);
+    super::confirm_identity(&":s BATCH -a".parse().unwrap(), &mut tracker, super::Selection::Network("1"), &mut confirmed).unwrap();
+    assert_eq!(confirmed, Some(super::Identity::Network("1".into())));
+    super::confirm_identity(&":s 005 me -BOUNCER_NETID :supported tokens".parse().unwrap(), &mut tracker, super::Selection::Network("1"), &mut confirmed).unwrap();
+    assert!(confirmed.is_none());
     for line in [":s BATCH +a draft/isupport", "@batch=a :s 005 me BOUNCER_NETID=1 :supported tokens", "@batch=a :s NOTICE me :bad", ":s BATCH -a"] {
-        super::confirm_identity(&line.parse().unwrap(), &mut tracker, Some("1"), &mut confirmed).unwrap();
+        super::confirm_identity(&line.parse().unwrap(), &mut tracker, super::Selection::Network("1"), &mut confirmed).unwrap();
     }
-    assert!(!confirmed);
+    assert!(confirmed.is_none());
 }
 
 #[tokio::test]
 async fn extended_isupport_negotiates_after_sasl_and_replays_early_bursts() {
     tokio::time::timeout(Duration::from_secs(5), registration(Reply::ExtendedSuccess, true)).await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_selector_confirms_identity_without_bind_or_autojoin() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let (read, mut write) = socket.into_split();
+            let mut lines = BufReader::new(read).lines();
+            assert_eq!(next_command(&mut lines, &mut write).await.as_deref(), Some("CAP LS 302"));
+            assert!(next_command(&mut lines, &mut write).await.unwrap().starts_with("PASS "));
+            assert!(next_command(&mut lines, &mut write).await.unwrap().starts_with("NICK "));
+            assert!(next_command(&mut lines, &mut write).await.unwrap().starts_with("USER account/network "));
+            write.write_all(b":s CAP * LS :batch soju.im/bouncer-networks\r\n").await.unwrap();
+            let request = next_command(&mut lines, &mut write).await.unwrap();
+            let caps = request.strip_prefix("CAP REQ :").unwrap();
+            assert!(caps.split_whitespace().any(|cap| cap == super::NETWORKS_CAP));
+            write.write_all(format!(":s CAP * ACK :{caps}\r\n").as_bytes()).await.unwrap();
+            assert_eq!(next_command(&mut lines, &mut write).await.as_deref(), Some("CAP END"));
+            write.write_all(b":s 001 me :Welcome\r\n:s 005 me BOUNCER_NETID=42 :supported tokens\r\n:s 422 me :No MOTD\r\n").await.unwrap();
+            assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("PING verify"));
+        });
+        let mut config: ServerConfig = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=['#must-not-join']\nnick='me'\nusername='account/network'\npassword='fixture-only'").unwrap();
+        config.port = port;
+        let general = GeneralConfig { flood_protection: false, ..GeneralConfig::default() };
+        let (handle, _events) = connect_server("fixture", &config, &general).await.unwrap();
+        assert_eq!(handle.bouncer_identity, Some(super::Identity::Network("42".into())));
+        handle.sender().send(irc::proto::Command::PING("verify".into(), None)).unwrap();
+        peer.await.unwrap();
+    }).await.unwrap();
 }

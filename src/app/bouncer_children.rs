@@ -56,7 +56,7 @@ impl super::App {
                 .state
                 .connections
                 .get(id)
-                .is_some_and(|connection| connection.origin_config.bouncer_control);
+                .is_some_and(crate::state::connection::Connection::bouncer_control);
         if !is_bouncer {
             return;
         }
@@ -112,7 +112,7 @@ impl super::App {
             return;
         };
         if connection.status != ConnectionStatus::Connected
-            || !connection.origin_config.bouncer_control
+            || !connection.bouncer_control()
         {
             return;
         }

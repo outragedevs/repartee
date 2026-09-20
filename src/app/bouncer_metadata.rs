@@ -55,7 +55,7 @@ pub fn command(app: &mut super::App, args: &[String]) {
 impl super::App {
     fn metadata_available(&self, id: &str) -> bool {
         self.state.connections.get(id).is_some_and(|conn| conn.status == ConnectionStatus::Connected
-            && conn.origin_config.bouncer_network_id.is_some() && !conn.origin_config.bouncer_control
+            && conn.bouncer_network_id().is_some() && !conn.bouncer_control()
             && conn.enabled_caps.contains(metadata::CAP)) && self.irc_handles.contains_key(id)
     }
 

@@ -4,7 +4,7 @@ use super::AppState;
 
 impl AppState {
     pub fn metadata_flags(&self, conn_id: &str, target: &str) -> Flags {
-        let Some(conn) = self.connections.get(conn_id).filter(|conn| conn.origin_config.bouncer_network_id.is_some() && !conn.origin_config.bouncer_control) else { return Flags::default(); };
+        let Some(conn) = self.connections.get(conn_id).filter(|conn| conn.bouncer_network_id().is_some() && !conn.bouncer_control()) else { return Flags::default(); };
         if self.metadata_casemappings.get(conn.network_key()).is_some_and(|mapping| mapping != conn.isupport_parsed.casemapping()) { return Flags::default(); }
         self.bouncer_metadata.get(&(conn.network_key().to_string(), casefold(target, conn.isupport_parsed.casemapping()))).copied().unwrap_or_default()
     }
@@ -39,7 +39,7 @@ impl AppState {
     }
 
     pub(crate) fn set_metadata(&mut self, conn_id: &str, target: &str, key: Key, value: bool) {
-        let Some(conn) = self.connections.get(conn_id).filter(|conn| conn.origin_config.bouncer_network_id.is_some() && !conn.origin_config.bouncer_control) else { return; };
+        let Some(conn) = self.connections.get(conn_id).filter(|conn| conn.bouncer_network_id().is_some() && !conn.bouncer_control()) else { return; };
         let mapping = conn.isupport_parsed.casemapping();
         let target = casefold(target, mapping);
         let flags = self.bouncer_metadata.entry((conn.network_key().to_string(), target.clone())).or_default();

@@ -105,7 +105,7 @@ impl super::App {
     fn certificates_available(&self, id: &str) -> bool {
         self.state.connections.get(id).is_some_and(|conn| conn.status == ConnectionStatus::Connected
             && conn.origin_config.tls && conn.origin_config.tls_verify
-            && (conn.origin_config.bouncer_control || conn.origin_config.bouncer_network_id.is_some())
+            && (conn.bouncer_control() || conn.bouncer_network_id().is_some())
             && conn.enabled_caps.contains(CAP) && conn.enabled_caps.contains("batch"))
             && self.irc_handles.get(id).is_some_and(|handle| handle.sasl_authenticated)
     }

@@ -13,7 +13,7 @@ pub fn command(app: &mut crate::app::App, args: &[String]) {
     let supported = app.state.connections.get(&conn_id).is_some_and(|conn| {
         conn.status == crate::state::connection::ConnectionStatus::Connected
             && conn.server_owns_history()
-            && !conn.origin_config.bouncer_control
+            && !conn.bouncer_control()
             && conn.enabled_caps.contains("draft/message-redaction")
             && conn.enabled_caps.contains("message-tags")
     });

@@ -78,8 +78,8 @@ pub fn command(app: &mut super::App, args: &[String]) {
         return;
     }
     if app.server_search.contains_key(&id) { add_local_event(app, "A search is unresolved; wait for its reply or reconnect"); return; }
-    if !app.state.connections.get(&id).is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some()
-        && !conn.origin_config.bouncer_control && conn.status == crate::state::connection::ConnectionStatus::Connected
+    if !app.state.connections.get(&id).is_some_and(|conn| conn.bouncer_network_id().is_some()
+        && !conn.bouncer_control() && conn.status == crate::state::connection::ConnectionStatus::Connected
         && [CAP, "batch", "server-time", "message-tags"].iter().all(|cap| conn.enabled_caps.contains(*cap))) {
         add_local_event(app, "Server search requires a connected bouncer network with acknowledged search, batch, server-time and message-tags support"); return;
     }

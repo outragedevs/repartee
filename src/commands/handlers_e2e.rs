@@ -473,7 +473,7 @@ fn confirmed_e2e_context(app: &App) -> crate::e2e::error::Result<Option<String>>
         return Ok(None);
     }
     let Some(connection) = app.state.connections.get(&buffer.connection_id) else { return Ok(None) };
-    if connection.origin_config.bouncer_network_id.is_none() && !connection.origin_config.bouncer_control {
+    if connection.bouncer_network_id().is_none() && !connection.bouncer_control() {
         return Ok(None);
     }
     let Some(manager) = app.state.e2e_manager.as_ref() else { return Ok(None) };

@@ -21,6 +21,7 @@ pub struct Connection {
     pub id: String,
     pub label: String,
     pub network_scope: Option<String>,
+    pub bouncer_identity: Option<crate::irc::bouncer::Identity>,
     pub status: ConnectionStatus,
     pub nick: String,
     /// Our own server-stamped `ident@host` on this connection, learned from
@@ -74,8 +75,21 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub const fn server_owns_history(&self) -> bool {
-        self.origin_config.bouncer_control || self.origin_config.bouncer_network_id.is_some()
+    pub fn server_owns_history(&self) -> bool {
+        self.bouncer_control() || self.bouncer_network_id().is_some()
+    }
+
+    pub const fn bouncer_control(&self) -> bool {
+        self.origin_config.bouncer_control || matches!(self.bouncer_identity, Some(crate::irc::bouncer::Identity::Control))
+    }
+
+    pub fn bouncer_network_id(&self) -> Option<&str> {
+        self.origin_config.bouncer_network_id.as_deref().or({
+            match self.bouncer_identity.as_ref() {
+                Some(crate::irc::bouncer::Identity::Network(id)) => Some(id.as_str()),
+                _ => None,
+            }
+        })
     }
 
     pub fn network_key(&self) -> &str {

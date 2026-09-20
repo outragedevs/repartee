@@ -1303,6 +1303,7 @@ impl App {
             network_label: None,
             id: Self::DEFAULT_CONN_ID.to_string(),
             label: "Status".to_string(),
+            bouncer_identity: None,
             network_scope: None,
             status: ConnectionStatus::Disconnected,
             own_handle: None,
