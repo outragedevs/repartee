@@ -56,10 +56,13 @@ def main():
     parser.add_argument("source", type=Path)
     parser.add_argument("--test-filter", default="pinned_bouncer_")
     parser.add_argument("--daemon-image", help="Run the real daemon/browser lifecycle fixture using this container image")
+    parser.add_argument("--history-range", action="store_true", help="Probe BETWEEN against the real provider")
     parser.add_argument("--tls-case", choices=("valid", "untrusted", "wrong-host"))
     parser.add_argument("--pass-auth", nargs="?", const="user", choices=("user", "combined"))
     parser.add_argument("--target-tie", action="store_true", help="Seed 1001 conversations sharing a timestamp")
     args = parser.parse_args()
+    if args.history_range and (args.tls_case or args.pass_auth or args.daemon_image or args.target_tie or args.test_filter != "pinned_bouncer_"):
+        parser.error("--history-range is a standalone provider protocol scenario")
     if args.tls_case:
         if args.pass_auth or args.daemon_image or args.target_tie or args.test_filter not in ("pinned_bouncer_", "pinned_bouncer_tls_validation"):
             parser.error("--tls-case is a standalone TLS validation scenario")
@@ -143,13 +146,16 @@ def main():
                 test_args = f"{args.test_filter} -- --ignored"
                 if args.test_filter == "pinned_bouncer_":
                     test_args += " --skip pinned_bouncer_tls_validation --skip pinned_bouncer_discovery_limit --skip pinned_bouncer_service --skip pinned_bouncer_presence --skip pinned_bouncer_network_management --skip pinned_bouncer_setname --skip pinned_bouncer_monitor --skip pinned_bouncer_no_monitor --skip pinned_bouncer_invites --skip pinned_bouncer_names --skip pinned_bouncer_channel_context --skip pinned_bouncer_network_icon"
-                if args.daemon_image:
+                if args.history_range:
+                    from probe_bouncer_history_ranges import probe
+                    print(json.dumps(probe(settings, args.implementation), indent=2))
+                elif args.daemon_image:
                     run(["python3", str(ROOT / "scripts/test_bouncer_daemon_history.py"), args.daemon_image],
                         cwd=ROOT, env=environment)
                 else:
                     run(["make", "test", f"TEST_ARGS={test_args}"],
                         cwd=ROOT, env=environment)
-                print(f"{args.implementation}: {args.test_filter} fixture passed")
+                print(f"{args.implementation}: {'history-range' if args.history_range else args.test_filter} fixture passed")
             except Exception:
                 log.flush()
                 log.seek(0)
