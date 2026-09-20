@@ -371,6 +371,7 @@ impl App {
                     conn.enabled_caps = enabled_caps;
                     conn.multiline = multiline_limits;
                 }
+                self.reconnect_bouncer_presence(&conn_id);
                 if self.state.connections.get(&conn_id).is_some_and(|conn| conn.origin_config.bouncer_control) {
                     self.bouncer_networks.insert(conn_id.clone(), crate::irc::bouncer::NetworkRegistry::default());
                     if !self.state.connections[&conn_id].enabled_caps.contains(crate::irc::bouncer::NETWORKS_NOTIFY_CAP)
@@ -763,6 +764,7 @@ impl App {
                         tracker.add_message(*msg);
                     }
                 } else {
+                    self.observe_bouncer_presence(&conn_id, &msg);
                     if self.handle_read_marker(&conn_id, &msg) {
                         return;
                     }

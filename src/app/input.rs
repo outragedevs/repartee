@@ -2946,6 +2946,7 @@ pub mod submit_typing_tests {
             pending_history_pages: Vec::new(),
             history_discovery: HashMap::new(),
             read_markers: HashMap::new(),
+            bouncer_presence: crate::app::presence::BouncerPresence::default(),
             volatile_mentions: std::collections::VecDeque::new(),
             last_event_purge: Instant::now(),
             last_mention_purge: Instant::now(),

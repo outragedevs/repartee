@@ -1351,6 +1351,11 @@ pub(crate) fn cmd_quote(app: &mut App, args: &[String]) {
 // === Away ===
 
 pub(crate) fn cmd_away(app: &mut App, args: &[String]) {
+    if let Some(conn_id) = app.active_conn_id().map(str::to_string)
+        && app.set_bouncer_away(&conn_id, args.first().map(String::as_str))
+    {
+        return;
+    }
     let Some(sender) = app.active_irc_sender().cloned() else {
         add_local_event(app, "Not connected");
         return;

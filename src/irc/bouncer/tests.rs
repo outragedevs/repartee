@@ -83,7 +83,7 @@ async fn registration(reply: Reply, bound: bool) {
         let advertised = if matches!(reply, Reply::NoCapability) {
             "sasl=PLAIN"
         } else {
-            "sasl=PLAIN batch soju.im/bouncer-networks soju.im/bouncer-networks-notify"
+            "sasl=PLAIN batch soju.im/bouncer-networks soju.im/bouncer-networks-notify draft/pre-away"
         };
         write
             .write_all(format!(":fixture CAP * LS :{advertised}\r\n").as_bytes())
@@ -100,6 +100,7 @@ async fn registration(reply: Reply, bound: bool) {
             .trim_start_matches(':');
         assert_eq!(requested.contains(super::NETWORKS_CAP), bound || control);
         assert_eq!(requested.contains(super::NETWORKS_NOTIFY_CAP), control);
+        assert_eq!(requested.contains("draft/pre-away"), bound && !control);
         let ack = if matches!(reply, Reply::Nak) {
             "NAK"
         } else {
@@ -145,6 +146,10 @@ async fn registration(reply: Reply, bound: bool) {
                 next_command(&mut lines, &mut write).await.unwrap(),
                 "BOUNCER BIND 42"
             );
+        }
+        if bound && !control {
+            let away: irc::proto::Message = next_command(&mut lines, &mut write).await.unwrap().parse().unwrap();
+            assert_eq!(away.command, irc::proto::Command::AWAY(Some("*".into())));
         }
         assert_eq!(
             next_command(&mut lines, &mut write).await.unwrap(),
