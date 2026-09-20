@@ -303,6 +303,7 @@ pub fn build_router(handle: Arc<AppHandle>) -> Router {
         .route("/api/login_info", get(login_info_handler))
         .route("/api/logout", post(logout_handler))
         .route("/api/health", get(health_handler))
+        .route("/api/upload", post(super::upload::handler))
         .route("/api/preview", get(super::preview::preview_handler))
         .route("/ws", get(super::ws::ws_handler))
         .route("/favicon.ico", get(favicon_handler))
@@ -597,4 +598,39 @@ mod tests {
         let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     }
+    #[tokio::test]
+    async fn upload_requires_session_and_explicit_browser_intent_then_passes_only_bytes() {
+        let mut handle = make_test_handle();
+        let (tx, mut rx) = mpsc::channel(1);
+        Arc::get_mut(&mut handle).unwrap().web_cmd_tx = tx;
+        let token = handle.session_store.lock().await.create("upload test");
+        let cookie = format!("{}={token}", session_cookie_name());
+        let app = test_app(handle);
+        for authenticated in [false, true] {
+            let mut request = axum::http::Request::builder().method("POST")
+                .uri("/api/upload?buffer_id=test%2F%23one&filename=photo.png");
+            if authenticated { request = request.header("Cookie", &cookie); }
+            let response = tower::ServiceExt::oneshot(app.clone(), request.body(axum::body::Body::from("bytes")).unwrap()).await.unwrap();
+            assert_eq!(response.status(), if authenticated { StatusCode::FORBIDDEN } else { StatusCode::UNAUTHORIZED });
+            assert!(rx.try_recv().is_err());
+        }
+        let request = axum::http::Request::builder().method("POST")
+            .uri("/api/upload?buffer_id=test%2F%23one&filename=photo.png")
+            .header("Cookie", cookie).header("X-Upload-Intent", "1")
+            .header("Content-Type", "image/png")
+            .body(axum::body::Body::from("bytes")).unwrap();
+        let task = tokio::spawn(async move { tower::ServiceExt::oneshot(app, request).await.unwrap() });
+        let (command, _) = rx.recv().await.unwrap();
+        let WebCommand::UploadFile { submission } = command else { panic!("wrong command") };
+        let submission = submission.lock().unwrap().take().unwrap();
+        assert_eq!(submission.buffer_id, "test/#one");
+        assert_eq!(submission.filename, "photo.png");
+        assert_eq!(submission.body, b"bytes");
+        submission.response.send(Ok("https://example.invalid/file.png".into())).unwrap();
+        let response = task.await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(axum::body::to_bytes(response.into_body(), 1024).await.unwrap().as_ref(), b"https://example.invalid/file.png");
+        assert!(serde_json::from_str::<WebCommand>(r#"{"type":"UploadFile"}"#).is_err());
+    }
+
 }

@@ -296,3 +296,11 @@ Selective bouncer capability negotiation, native/web command and event paths,
 derived-message retention, and actual Soju live deletion/history replay now pass
 validation. Pinned Lurker correctly rejects the unsupported feature. Full review
 rounds 1–5 returned findings, all fixed; round 6 is clean and local validation passes; see the redaction audit for the remaining acceptance gates.
+
+Confirmed message redaction merged in
+https://github.com/outragedevs/repartee/pull/82 after clean full Sol medium review
+round 6. FILEHOST is now implemented on `feat/bouncer-filehost`: native command,
+authenticated browser upload route, browser chooser, and actual pinned-provider
+upload/download tests pass. See `docs/validation/bouncer-filehost.md` for evidence
+and the remaining review/integration boundaries. All other requirements remain
+in scope.

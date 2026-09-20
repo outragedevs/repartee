@@ -24,6 +24,12 @@ use super::types::{CommandCategory, CommandDef};
 
 static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
     vec![
+        ("upload", CommandDef {
+            handler: crate::app::filehost::command,
+            description: "Upload a file through the bouncer: /upload <path> [content-type]",
+            aliases: &[],
+            category: CommandCategory::Connection,
+        }),
         ("redact", CommandDef {
             handler: crate::irc::redaction::command,
             description: "Request message deletion: /redact <target> <msgid> [reason]",

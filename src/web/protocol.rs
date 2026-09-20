@@ -239,6 +239,8 @@ pub enum WebEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WebCommand {
+    #[serde(skip)]
+    UploadFile { submission: std::sync::Arc<std::sync::Mutex<Option<super::upload::Submission>>> },
     /// Send a message to a buffer (plain text or /command).
     SendMessage { buffer_id: String, text: String },
     /// Switch the session-local active buffer (does NOT affect terminal).

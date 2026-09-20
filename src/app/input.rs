@@ -2908,6 +2908,7 @@ pub mod submit_typing_tests {
 
         let config = crate::config::AppConfig::default();
         let (irc_tx, irc_rx) = mpsc::channel(16);
+        let (upload_tx, upload_rx) = mpsc::channel(1);
         let (preview_tx, preview_rx) = mpsc::channel(16);
         let (dict_tx, dict_rx) = mpsc::channel(16);
         let (web_cmd_tx, web_cmd_rx) = mpsc::channel(16);
@@ -2969,6 +2970,9 @@ pub mod submit_typing_tests {
             chat_rows: None,
             inline_previews: crate::image_preview::inline::InlinePreviews::default(),
             image_clear_rect: None,
+            upload_pending: false,
+            upload_tx,
+            upload_rx,
             preview_rx,
             preview_tx,
             http_client: reqwest::Client::new(),

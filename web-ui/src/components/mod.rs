@@ -12,3 +12,5 @@ pub mod status_line;
 pub mod styled;
 pub mod topic_bar;
 pub mod wizard;
+
+pub mod upload;
