@@ -325,7 +325,7 @@ pub fn process_completed_batch(
             // buffer_id resolved during ingest (channel messages and PM echoes
             // may route to different buffers).
             if !outcome.display_rows.is_empty() {
-                let mut by_buffer: HashMap<String, Vec<Message>> = HashMap::new();
+                let mut by_buffer: HashMap<(String, String), Vec<Message>> = HashMap::new();
                 for (buf_id, msg) in outcome.display_rows {
                     let redirected = request_started.and_then(|started| {
                         match state.redirected_buffer_id(&buf_id, started) {
@@ -333,10 +333,11 @@ pub fn process_completed_batch(
                             _ => None,
                         }
                     });
+                    let origin = buf_id.clone();
                     let buf_id = redirected.unwrap_or(buf_id);
-                    by_buffer.entry(buf_id).or_default().push(msg);
+                    by_buffer.entry((buf_id, origin)).or_default().push(msg);
                 }
-                for (buf_id, msgs) in by_buffer {
+                for ((buf_id, origin), msgs) in by_buffer {
                     if server_owned && direction.is_none() && !state.buffers.contains_key(&buf_id)
                         && let Some((_, target)) = buf_id.split_once('/')
                         && !state.connections.get(conn_id).is_some_and(|conn| conn.chathistory.was_closed(target))
@@ -350,7 +351,7 @@ pub fn process_completed_batch(
                         };
                         state.add_buffer_with_focus(crate::state::buffer::Buffer::empty(conn_id, buffer_type, name), false);
                     }
-                    state.surface_history_page(&buf_id, msgs, server_owned && is_before);
+                    state.surface_history_page_from_target(&buf_id, msgs, server_owned && is_before, &origin);
                     if server_owned && is_before
                         && let Some(buf) = state.buffers.get(&buf_id)
                         && !buf.pin_backlog
@@ -1542,7 +1543,7 @@ mod tests {
         assert_eq!(query.buffer_type, crate::state::buffer::BufferType::Query);
         assert_eq!(query.name, "Peer");
         assert_eq!(query.messages[0].text, "replayed");
-        assert_eq!(query.unread_count, 0);
+        assert_eq!(query.unread_count, 1);
         assert_eq!(state.active_buffer_id.as_deref(), Some(active.as_str()));
         assert!(log_rx.try_recv().is_err());
         assert!(state.pending_web_events.iter().any(|event| matches!(event,

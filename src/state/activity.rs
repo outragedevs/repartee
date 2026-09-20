@@ -22,6 +22,19 @@ impl AppState {
         if old_id == new_id {
             return;
         }
+        if let Some(mut state) = self.read_activity.remove(old_id) {
+            let destination = self.read_activity.entry(new_id.to_string()).or_default();
+            destination.unread.extend(std::mem::take(&mut state.unread));
+            destination.origins.extend(std::mem::take(&mut state.origins));
+            if let Some(timestamp) = destination.through.and_then(chrono::DateTime::from_timestamp_millis)
+                && let Some(buffer) = self.buffers.get_mut(new_id)
+            {
+                buffer.last_read = timestamp;
+            }
+            if state.through.is_some() {
+                self.read_activity.insert(old_id.to_string(), state);
+            }
+        }
         if let Some(order) = self.activity_order.remove(old_id) {
             self.activity_order.insert(new_id.to_string(), order);
         } else if self
@@ -34,7 +47,15 @@ impl AppState {
     }
 
     pub fn clear_activity(&mut self, buffer_id: &str) {
+        if self.buffer_uses_server_history(buffer_id) { return; }
+        self.clear_visible_activity(buffer_id);
+    }
+
+    pub(crate) fn clear_visible_activity(&mut self, buffer_id: &str) {
         self.activity_order.remove(buffer_id);
+        if let Some(state) = self.read_activity.get_mut(buffer_id) {
+            state.unread.clear();
+        }
         if let Some(buffer) = self.buffers.get_mut(buffer_id) {
             buffer.activity = ActivityLevel::None;
             buffer.unread_count = 0;

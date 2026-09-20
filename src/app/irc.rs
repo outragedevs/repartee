@@ -33,7 +33,7 @@ impl App {
         let default_buf_id = make_buffer_id(Self::DEFAULT_CONN_ID, "Status");
         if self.state.buffers.contains_key(&default_buf_id) {
             self.state.remove_buffer(&default_buf_id);
-            self.state.connections.remove(Self::DEFAULT_CONN_ID);
+            self.state.remove_connection(Self::DEFAULT_CONN_ID);
         }
 
         self.state.add_connection(Connection {
@@ -363,6 +363,7 @@ impl App {
                 }
             }
             IrcEvent::Connected(conn_id, enabled_caps, multiline_limits) => {
+                self.reconnect_read_markers(&conn_id);
                 self.history_discovery.remove(&conn_id);
                 self.bouncer_networks.remove(&conn_id);
                 // Store negotiated caps on connection
@@ -537,6 +538,7 @@ impl App {
                 // limits/ref types and could be rejected for non-membership.
             }
             IrcEvent::Disconnected(conn_id, error) => {
+
                 self.history_discovery.remove(&conn_id);
                 self.suspend_bouncer_children(&conn_id);
                 if let Some(requested) = self.state.background_join_connections.get_mut(&conn_id) { requested.clear(); }
@@ -761,6 +763,9 @@ impl App {
                         tracker.add_message(*msg);
                     }
                 } else {
+                    if self.handle_read_marker(&conn_id, &msg) {
+                        return;
+                    }
                     // Normal message processing
 
                     // Extract channel from RPL_ENDOFNAMES (for auto-WHO/MODE batch).

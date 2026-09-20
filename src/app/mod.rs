@@ -17,6 +17,7 @@ pub mod bouncer;
 mod bouncer_children;
 mod server_history;
 mod history_discovery;
+mod read_markers;
 mod connection_attempt;
 mod log_browser;
 mod maintenance;
@@ -402,6 +403,7 @@ pub struct App {
     pub(crate) volatile_mentions: VecDeque<(String, crate::web::protocol::WireMention)>,
     pub(crate) pending_history_pages: Vec<server_history::PendingHistoryPage>,
     pub(crate) history_discovery: HashMap<String, history_discovery::HistoryDiscovery>,
+    pub(crate) read_markers: HashMap<String, read_markers::ReadMarkers>,
     pub(crate) last_event_purge: Instant,
     pub(crate) last_mention_purge: Instant,
     pub quit_message: Option<String>,
@@ -462,6 +464,7 @@ pub struct App {
     pub(crate) shim_event_rx:
         Option<tokio::sync::mpsc::Receiver<crate::session::protocol::ShimMessage>>,
     pub is_socket_attached: bool,
+    pub terminal_focused: bool,
     pub(crate) term_reader_stop: Arc<AtomicBool>,
     pub(crate) term_rx: Option<tokio::sync::mpsc::Receiver<crossterm::event::Event>>,
     pub(crate) shim_output_handle: Option<tokio::task::JoinHandle<()>>,
@@ -865,6 +868,7 @@ impl App {
             storage,
             pending_history_pages: Vec::new(),
             history_discovery: HashMap::new(),
+            read_markers: HashMap::new(),
             volatile_mentions: VecDeque::new(),
             last_event_purge: Instant::now(),
             last_mention_purge: Instant::now(),
@@ -912,6 +916,7 @@ impl App {
             socket_output: None,
             shim_event_rx: None,
             is_socket_attached: false,
+            terminal_focused: false,
             term_reader_stop: Arc::new(AtomicBool::new(false)),
             term_rx: None,
             shim_output_handle: None,
@@ -1618,6 +1623,7 @@ impl App {
                     self.purge_expired_batches();
                     self.purge_stale_chathistory_requests();
                     self.tick_history_discovery();
+                    self.tick_read_markers();
                     self.check_reconnects();
                     self.measure_lag();
                     self.check_day_changed();

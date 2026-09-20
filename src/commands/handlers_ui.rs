@@ -516,7 +516,7 @@ fn close_one(app: &mut App, buf_id: &str, reason: Option<&str>, confirmed: bool,
                 for id in to_remove {
                     app.state.remove_buffer(&id);
                 }
-                app.state.connections.remove(&conn_id);
+                app.state.remove_connection(&conn_id);
             } else {
                 add_local_event(
                     app,

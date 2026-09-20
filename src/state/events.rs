@@ -38,6 +38,8 @@ impl AppState {
             message_counter: 0,
             activity_counter: 0,
             activity_order: std::collections::HashMap::new(),
+            read_activity: std::collections::HashMap::new(),
+            read_identities: std::collections::HashMap::new(),
             flood_state: crate::irc::flood::FloodState::new(),
             netsplit_state: crate::irc::netsplit::NetsplitState::new(),
             flood_protection: true,
@@ -88,11 +90,9 @@ impl AppState {
         self.connections.insert(conn.id.clone(), conn);
     }
 
-    #[expect(
-        dead_code,
-        reason = "reserved for future reconnect/disconnect commands"
-    )]
     pub fn remove_connection(&mut self, id: &str) {
+        self.reset_connection_read_markers(id);
+        self.read_activity.retain(|buffer_id, _| buffer_id.split_once('/').is_none_or(|(conn_id, _)| conn_id != id));
         self.connections.remove(id);
     }
 
@@ -109,7 +109,13 @@ impl AppState {
         self.add_buffer_with_focus(buffer, activate);
     }
 
-    pub(crate) fn add_buffer_with_focus(&mut self, buffer: Buffer, activate: bool) {
+    pub(crate) fn add_buffer_with_focus(&mut self, mut buffer: Buffer, activate: bool) {
+        if let Some(timestamp) = self.read_activity.get(&buffer.id)
+            .and_then(|read| read.through)
+            .and_then(chrono::DateTime::from_timestamp_millis)
+        {
+            buffer.last_read = timestamp;
+        }
         let mut meta = crate::web::protocol::BufferMeta {
             id: buffer.id.clone(),
             connection_id: buffer.connection_id.clone(),
@@ -214,6 +220,13 @@ impl AppState {
             conn.chathistory.close_target(&buffer.name);
         }
         self.activity_order.remove(id);
+        if let Some(mut read) = self.read_activity.remove(id)
+            && read.through.is_some()
+        {
+            read.unread = std::collections::HashMap::new();
+            read.origins = std::collections::HashMap::new();
+            self.read_activity.insert(id.to_string(), read);
+        }
         self.web_history_buffers.retain(|_, buffer_id| buffer_id != id);
         self.typing.remove_buffer(id);
         // Clean up per-buffer flood tracking to prevent unbounded map growth.
@@ -1967,10 +1980,16 @@ impl AppState {
         message: Message,
         level: ActivityLevel,
     ) {
+        let server_owned = self.buffer_uses_server_history(buffer_id);
+        self.record_read_origin(buffer_id, &message, buffer_id);
+        let already_read = server_owned && self.message_already_read(buffer_id, &message);
+        if server_owned {
+            self.record_read_activity(buffer_id, &message, level);
+        }
         // Queue web events for broadcast.
         let wire =
             crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref());
-        if message.highlight {
+        if message.highlight && !already_read {
             self.pending_web_events
                 .push(crate::web::protocol::WebEvent::MentionAlert {
                     buffer_id: buffer_id.to_string(),
@@ -1982,7 +2001,7 @@ impl AppState {
                 buffer_id: buffer_id.to_string(),
                 message: wire,
             });
-        if self.active_buffer_id.as_deref() != Some(buffer_id) {
+        if !already_read && (server_owned || self.active_buffer_id.as_deref() != Some(buffer_id)) {
             self.record_activity(buffer_id, level);
         }
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
@@ -1991,7 +2010,7 @@ impl AppState {
             enforce_scrollback(buf, self.scrollback_limit);
             // Only escalate activity if this is not the active buffer
             let is_active = self.active_buffer_id.as_deref() == Some(buffer_id);
-            if !is_active && level > buf.activity {
+            if !server_owned && !already_read && !is_active && level > buf.activity {
                 buf.activity = level;
                 buf.unread_count += 1;
                 self.pending_web_events
@@ -2001,6 +2020,9 @@ impl AppState {
                         unread_count: buf.unread_count,
                     });
             }
+        }
+        if server_owned {
+            self.refresh_read_activity(buffer_id);
         }
     }
 
@@ -2121,7 +2143,12 @@ impl AppState {
         self.surface_history_page(buffer_id, rows, false);
     }
 
-    pub(crate) fn surface_history_page(&mut self, buffer_id: &str, mut rows: Vec<Message>, before: bool) {
+    #[cfg(test)]
+    pub(crate) fn surface_history_page(&mut self, buffer_id: &str, rows: Vec<Message>, before: bool) {
+        self.surface_history_page_from_target(buffer_id, rows, before, buffer_id);
+    }
+
+    pub(crate) fn surface_history_page_from_target(&mut self, buffer_id: &str, mut rows: Vec<Message>, before: bool, origin: &str) {
         if before {
             rows.reverse();
         }
@@ -2187,6 +2214,8 @@ impl AppState {
             }
             spliced_ts.push(msg.timestamp);
             msg.id = self.next_message_id();
+            self.record_read_origin(buffer_id, &msg, origin);
+            self.record_history_read_activity(buffer_id, &msg, own_nick.as_deref());
             // Splicing into buf.messages bypasses add_message's web-event queue,
             // so broadcast the row ourselves — these gap-fill rows are not
             // reachable by the web client's older-only pagination, so without
@@ -2270,6 +2299,7 @@ impl AppState {
                     message_ids: swept_ids,
                 });
         }
+        self.finish_history_read_activity(buffer_id);
     }
 
     #[allow(dead_code, reason = "reserved for scripting API; used in tests")]

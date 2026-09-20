@@ -90,3 +90,142 @@ always orders TARGETS descending and groups messages inside the requested window
 Soju selects the direction and tests the latest message per target. Both filter
 closed/detached targets after their store query. These cases remain explicit
 acceptance gaps for the full bouncer-support contract.
+
+## Read-marker validation
+
+The generated-child fixture also negotiates `draft/read-marker`, advances the
+query marker to the exact server timestamp of history row 149, and verifies the
+server acknowledgment. A second independently authenticated client on the same
+network must receive that update. A fresh query must return the stored marker.
+Both checks use disposable users and messages; the normal no-local-log assertions
+remain enabled.
+
+Native regressions cover focus loss/return, headless rendering, delayed messages,
+partial reads, precise millisecond timestamps, legacy `READ`, retransmission,
+and network-scope isolation. Browser read requests carry a displayed message ID;
+the server derives the IRC timestamp from the retained message's `time` tag.
+Focus, modal visibility and following the conversation tail gate browser requests.
+
+This stage is still under review. These tests do not establish completion of
+aggregate presence or the full bouncer feature matrix.
+
+The read-marker fixture additionally asserts 300 unread hydrated query messages
+before marking, then 150 after the server confirms the middle message. Unit
+regressions cover marker-before-history and history-before-marker ordering,
+reconnect gap rows, older-page insertion, deduplication and own-message exclusion.
+History contributes unread counts but emits no live-message or mention alerts.
+
+A web-dispatch regression sends `FetchMessages` through `handle_web_command` with
+an empty bouncer buffer and seeded stale SQLite rows. The response remains empty
+and the stored rows remain untouched: this route uses `fetch_server_history_page`,
+not the direct-IRC SQLite fallback in `web_fetch_messages`.
+
+Pending read updates retain their original IRC target even if a query buffer is
+renamed locally. Retry scheduling includes pending targets without a current
+buffer; the renamed target is queried separately. This follows the pinned
+bouncers' target-keyed storage (`GetReadReceipt(networkID, target)` in Soju and
+`newestIdAtOrBefore(networkId, target, ...)` in Lurker), rather than applying an
+old target's timestamp to a different server-side history.
+
+Untimed local rows (including encrypted-message placeholders) clear only through
+the displayed message ID without manufacturing a server timestamp. Terminal
+rendering includes an untimed tail; a later arrival remains unread. Partial reads
+recompute activity navigation from the arrival order of the remaining messages
+at the highest unread priority. Legacy browser commands without a displayed ID
+receive a session-targeted reload requirement and preserve unread state.
+Repeated terminal draws leave unchanged read counts silent. If the final marker
+capability disappears, visible terminal buffers clear locally only after a
+focused tail render; background and genuinely scrolled views preserve unread
+rows. The regression uses sixty messages to exercise actual scrollback.
+
+Query renames retain unread message bookkeeping but discard the old target's
+watermark, allowing the new target's lower marker to apply. Standard MARKREAD/READ
+FAIL replies are matched by target or the rejected timestamp criterion used by
+both pinned implementations. Permanent failures suppress the rejected update;
+newer displayed timestamps can proceed. INTERNAL_ERROR retries use increasing
+delays and stop after three rejections. Failures are visible in the connection's
+server buffer, and reconnect resets failed-attempt state.
+
+Pending marker requests retain wire order. An unscoped FAIL consumes only one
+request rather than rejecting all buffers; timestamp and target contexts select
+the first matching request. Rejected queries are tracked separately from rejected
+write timestamps, so a subsequent displayed message can still advance its marker.
+The pending request window is bounded to prevent unlimited queue growth.
+
+Startup and shim attachment begin with unconfirmed terminal focus. A background
+terminal does not advance read markers merely because its output renders. Focus
+reporting, a key press/repeat, or a paste confirms interactive focus; key release
+alone does not. A socket-pair regression exercises the real shim attach path and
+waits for queued terminal output before checking the rendered read boundary.
+
+Closing a buffer drops its unread rows but retains the target watermark. Reopening
+restores both the read threshold and last-read timestamp before server history
+is hydrated, preventing already-read rows from regaining unread activity. Active
+mouse actions also confirm terminal focus; pointer motion alone does not.
+
+A confirming marker retires every pending retransmission whose timestamp it
+covers, while newer requests remain pending. Changing a connection's network
+scope discards both read thresholds and old unread entries. Query nick changes
+move unread rows but leave thresholds at their original server targets; returning
+to a previous nick restores its threshold instead of inheriting another target's.
+
+Every retained bouncer row carries its original target in volatile read metadata,
+including history pages redirected after a query rename. Remote markers clear
+only rows from that target across renamed buffers, and visible reads send each
+origin's own timestamp. Pending requests expire after 45 seconds; updates and
+previously unqueried targets take priority over repeated queries. Regressions
+cover a full unanswered request window followed by a new user read position.
+Historical self-message classification uses a known upstream account tag when
+available and records nick ownership intervals from live self-NICK events, so
+old self messages stay read while later reuse of the old nick remains unread.
+
+Server read thresholds only compare valid server-time tags. Missing or invalid
+time tags retain unread activity despite local clock skew until the row is
+visibly read and cleared by message ID. The authenticated upstream account is
+retained independently of channel membership using 900/901, live account-notify,
+extended JOIN, account tags and WHOX. Lurker bouncer-login numerics are excluded
+because their account names are not upstream IRC identities. Tests cover a
+query-only connection, nickname reuse, account login/logout, and local clock skew.
+
+Marker scheduling, acknowledgments and FAIL correlation use the same Unicode
+lowercase keys as buffer IDs, while active buffers retain their wire spelling.
+A regression covers non-ASCII query/channel names with both MARKREAD and legacy
+READ, ensuring acknowledgments retire pending writes and failures match queries.
+
+The web Appearance dialog participates in the same read guard and reactive
+close-to-tail refresh as the other modal dialogs. Incoming messages and font
+changes behind that dialog cannot advance read markers.
+
+Each reconnect discards session-specific nick ownership and account identity,
+including reconnects to the same network. Network-scoped read thresholds remain.
+A regression changes the own nick, reconnects under the original nick, and
+verifies that new holders of the previous nick/account remain unread while old
+rows covered by the preserved marker remain read.
+
+Logging out or switching upstream accounts during one session retains the set
+of positively observed own accounts for history classification. Historical rows
+from those accounts remain self-authored; unrelated account tags remain unread.
+Reconnect still discards this session-specific evidence. A hydration regression
+covers two own accounts followed by logout and one unrelated account.
+
+Permanent connection removal clears retained read thresholds and identity
+records, including thresholds belonging to already closed buffers. Dynamic
+bouncer child removal also drops its pending marker scheduler immediately.
+Regressions cover unrelated-connection isolation and eight successive real
+registry create/delete events without retained child read-state allocations.
+
+Server-owned buffers retain unread arrivals even when the final read-marker
+capability disappears. Buffer selection alone does not clear activity; focused
+native tail rendering or an explicit browser read boundary does. Browser reads
+without marker support still preserve later arrivals beyond the displayed ID.
+The first marker response after reconnect reconciles an existing retained
+threshold with server state, including an unknown marker, while pending local
+writes remain effective. Timed retained rows are reclassified without playback
+notifications; a scope reset without a retained threshold does not reintroduce
+old rows. Regressions cover cap-loss arrivals, web read boundaries, and unknown
+server markers with and without pending local updates.
+
+Pending marker writes retain their original wire target independently of
+normalized lookup keys. Retries after query rename, closure and same-scope
+reconnect use that spelling; changing network scope drops the cached names.
+A non-ASCII target regression verifies both rename and closure paths.
