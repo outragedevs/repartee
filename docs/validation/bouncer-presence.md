@@ -95,3 +95,26 @@ survive deletion while a sibling network remained and leak into a reused network
 ID. Intent now records the identified provider. Only Lurker retains intent through
 a surviving sibling; Soju requires the exact network scope. A regression deletes
 and reuses the original scope for both providers and checks the resulting AWAY.
+
+
+## Real browser focus and visibility acceptance
+
+`scripts/fixtures/presence-browser.cjs` starts a separate headed Chromium process
+with a disposable profile, then attaches Playwright with `noDefaults: true`.
+This matters: Playwright's normal Chromium connection enables focus emulation,
+which makes background tabs report `document.hasFocus() == true`. Sending a
+second CDP session's disable command does not undo the first session's override.
+The successful scenario therefore starts without those default overrides.
+
+With `REPARTEE_PRESENCE_BROWSER_SCRIPT` pointing to this script, the existing
+presence provider runner serves the compiled WASM frontend through the real App
+web server. Two browser tabs open independent WebSocket clients. Actual tab
+activation, backgrounding, hiding and closing are checked against both native
+document properties and outgoing Presence frames. The local upstream IRC server
+then verifies AWAY state through the real bouncer. No focus event or Presence
+command is injected, and document properties are not overridden.
+
+This passes for Soju with AutoAway enabled and disabled, and for Lurker with
+AutoAway enabled. It closes the earlier browser event-delivery gap. Native
+terminal attach/detach acceptance is separate; attempted GUI control of Ghostty
+was rejected by the computer-use tool and provides no evidence for that path.

@@ -98,6 +98,15 @@ async fn expect(apps: &mut [&mut App], path: &Path, expected: Option<&str>) {
 #[tokio::test]
 #[ignore = "requires disposable pinned bouncers and an IRC upstream"]
 async fn pinned_bouncer_presence() {
+    if let Ok(script) = std::env::var("REPARTEE_PRESENCE_BROWSER_SCRIPT") {
+        let mut app = client();
+        connected(&mut [&mut app]).await;
+        app.web_broadcaster = std::sync::Arc::new(crate::web::broadcast::WebBroadcaster::new(128));
+        super::filehost_browser_fixture::run_with_tick(&mut app, &script, App::tick_bouncer_presence).await;
+        app.cancel_connection_attempt("fixture");
+        app.irc_handles.remove("fixture");
+        return;
+    }
     let path = std::path::PathBuf::from(std::env::var("REPARTEE_PRESENCE_EVENTS").unwrap());
     let lurker = std::env::var("REPARTEE_PRESENCE_PROVIDER").unwrap() == "lurker";
     let auto = std::env::var("REPARTEE_PRESENCE_AUTO_AWAY").unwrap() == "true";

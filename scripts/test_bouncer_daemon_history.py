@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from bouncer_fault_proxy import FaultProxy
+from bouncer_partial_batch_proxy import PartialBatchProxy
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_NAME = re.search(r'pub const APP_NAME: &str = "([^"]+)"', (ROOT / 'src/constants.rs').read_text()).group(1)
@@ -27,7 +28,10 @@ def main():
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='bouncer-daemon-', dir='/tmp') as directory, ExitStack() as resources:
         provider_port = int(os.environ['REPARTEE_BOUNCER_TEST_PORT'])
-        proxy = resources.enter_context(FaultProxy(provider_port)) if os.environ.get('REPARTEE_DAEMON_LIVE_HISTORY') else None
+        partial = os.environ.get('REPARTEE_DAEMON_PARTIAL_HISTORY') == '1'
+        history_proxy = resources.enter_context(PartialBatchProxy(provider_port)) if partial else None
+        search_proxy = resources.enter_context(PartialBatchProxy(history_proxy.port, search=True)) if partial and os.environ.get('REPARTEE_BOUNCER_TEST_PROVIDER') == 'soju' else None
+        proxy = search_proxy or history_proxy or (resources.enter_context(FaultProxy(provider_port)) if os.environ.get('REPARTEE_DAEMON_LIVE_HISTORY') else None)
         data = Path(directory)
         (data / 'config.toml').write_text(f'''
 [general]
@@ -70,6 +74,10 @@ bouncer_network_id = '{os.environ['REPARTEE_BOUNCER_TEST_NETID']}'
                                    REPARTEE_DAEMON_TEST_CYCLE=str(cycle))
                 if proxy:
                     environment["REPARTEE_FAULT_CONTROL_URL"] = proxy.control_url
+                if partial and cycle == 0:
+                    environment["REPARTEE_HISTORY_FAULT_CONTROL"] = history_proxy.control_url
+                    if search_proxy:
+                        environment["REPARTEE_SEARCH_FAULT_CONTROL"] = search_proxy.control_url
                 deadline = time.monotonic() + 30
                 while time.monotonic() < deadline:
                     if run(['docker', 'inspect', '-f', '{{.State.Running}}', container], capture_output=True).stdout.strip() != 'true':
