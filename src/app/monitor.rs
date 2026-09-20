@@ -432,6 +432,12 @@ async fn pinned_bouncer_monitor() {
             .contains("account-notify")
     })
     .await;
+    control(&first, "account-change");
+    until(&mut [&mut first], |app| {
+        app.monitors["fixture"].peers["alice"].account.as_deref() == Some("restored-account")
+    })
+    .await;
+    assert!(!second.monitors["fixture"].peers.contains_key("alice"));
     control(&first, "monitor-off");
     if std::env::var("REPARTEE_PRESENCE_PROVIDER").unwrap() == "soju" {
         until(&mut [&mut first, &mut second], |app| {
