@@ -34,5 +34,5 @@ if (httpPort) {
 const harness = await harnessModule.startHarness();
 const connection = manager.startNetwork(account.user.id, account.network.id);
 if (!connection) throw new Error('Connection refused by test account configuration');
-fs.writeFileSync(ready, JSON.stringify({ port: harness.port, user: account.user.username }));
+fs.writeFileSync(ready, JSON.stringify({ port: harness.port, user: account.user.username, network: account.network.id }));
 process.on('SIGTERM', () => { harness.stop(); connection.dispose(); process.exit(0); });

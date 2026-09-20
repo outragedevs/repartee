@@ -84,3 +84,44 @@ native tests ignored), with no project Clippy warnings. Review round one found
 an unintended Lurker upstream restart and an outgoing-command observation race;
 the fixture now uses a stable non-writable fake and waits for the server's
 BufferCreated response. Both provider runs passed again with those corrections.
+
+## Real upstream traffic and restart hydration
+
+The presence fixture now provides a separate `--live-history` mode for both
+pinned providers. It starts a real local TCP IRC upstream; Lurker creates its
+normal upstream connection instead of retaining the binding fixture's fake.
+Soju uses its database message store. Build the same daemon image as above, then
+run:
+
+```sh
+python3 scripts/test_bouncer_presence.py lurker /path/to/pinned/lurker \
+  --live-history --daemon-image repartee-daemon-acceptance
+python3 scripts/test_bouncer_presence.py soju /path/to/pinned/soju \
+  --live-history --daemon-image repartee-daemon-acceptance
+```
+
+The direct capability probe requires CHATHISTORY. Through the compiled browser,
+the daemon receives an incoming private message and sends a private message
+through the actual provider to the upstream. The upstream records that delivery
+and sends its echo. Browser reload must retrieve both messages, without duplicate
+visible rows. Older-page requests are driven through the UI until `has_more`
+becomes false; assertions combine all received pages because the final older
+page may be empty.
+
+After the first daemon stops cleanly, the upstream sends an offline private
+message and a PING barrier. The runner waits for the provider's PONG before
+starting the second daemon. Before generating new traffic, its browser must
+display the offline message and the first daemon's incoming and outgoing rows.
+This checks server-backed history hydration across actual daemon processes.
+Both cycles inspect the copied SQLite database and TRACE diagnostic file using
+the same persistent-exclusion assertions as the earlier scenario.
+
+The existing Soju `--memory-history` mode uses this shared browser fixture while
+retaining its different contract: no CHATHISTORY, a visible limitation, and only
+missed-message replay after restart. It does not require replaying messages the
+previous connection already acknowledged. See
+[bouncer-memory-history.md](bouncer-memory-history.md).
+
+These scenarios close the live-upstream delivery gap of the earlier fake/disabled
+upstream fixture. They do not cover provider process restart, server-search
+persistence, all transport failures, or the unresolved TARGETS enumeration gaps.

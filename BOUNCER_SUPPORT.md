@@ -532,3 +532,10 @@ warning, actual upstream traffic, offline replay between daemon processes,
 browser reload and disk/diagnostic exclusion. See
 `docs/validation/bouncer-memory-history.md` for its exact scope. Provider restart
 retention and the remaining history matrix are not covered by this scenario.
+
+Both providers now also have a real-upstream daemon scenario with CHATHISTORY:
+`--live-history` in `scripts/test_bouncer_presence.py`. The browser proves live
+delivery, hydration of prior and offline messages after daemon restart, and
+exhaustion of older pages. SQLite and diagnostic exclusion are checked after each
+process lifecycle. The evidence and remaining boundaries are described in
+`docs/validation/bouncer-daemon-history.md`.
