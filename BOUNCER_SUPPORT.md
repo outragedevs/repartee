@@ -497,3 +497,13 @@ Provider forwarding, backend HTTP/state tests and compiled-WASM Chromium checks
 are described in `docs/validation/bouncer-network-icon.md`. This completes the
 web presentation follow-up above; SAFERATE publication and the complete
 acceptance matrix remain required.
+
+## History completion audit: open evidence gaps
+
+The source/runtime audit in `docs/validation/bouncer-history-acceptance.md`
+reproduces incomplete TARGETS discovery on pinned Soju when 1001 conversations
+share one timestamp. It also identifies the difference between checking the log
+queue and proving persistent-history exclusion after restart. Provider-filtered
+empty pages, the corresponding Lurker runtime cases and full storage lifecycle
+checks remain required. Existing history progress entries do not close these
+acceptance gates.
