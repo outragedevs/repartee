@@ -29,6 +29,7 @@ async fn next_command(
 #[derive(Clone, Copy, Debug)]
 enum Reply {
     Success,
+    ExtendedSuccess,
     ControlSuccess,
     ControlUnexpectedBound,
     NoCapability,
@@ -85,8 +86,9 @@ async fn registration(reply: Reply, bound: bool) {
         } else {
             "sasl=PLAIN batch soju.im/bouncer-networks soju.im/bouncer-networks-notify draft/pre-away draft/account-registration=email-required,min-password-length=8"
         };
+        let extended = if matches!(reply, Reply::ExtendedSuccess) { " draft/extended-isupport" } else { "" };
         write
-            .write_all(format!(":fixture CAP * LS :{advertised}\r\n").as_bytes())
+            .write_all(format!(":fixture CAP * LS :{advertised}{extended}\r\n").as_bytes())
             .await
             .unwrap();
         if matches!(reply, Reply::NoCapability) {
@@ -95,6 +97,8 @@ async fn registration(reply: Reply, bound: bool) {
         }
         let request = next_command(&mut lines, &mut write).await.unwrap();
         assert!(request.starts_with("CAP REQ "));
+        assert!(!request.contains("draft/extended-isupport"));
+        assert!(request.len() + 2 <= 512);
         let requested = request
             .trim_start_matches("CAP REQ ")
             .trim_start_matches(':');
@@ -141,6 +145,11 @@ async fn registration(reply: Reply, bound: bool) {
             .write_all(b":fixture 903 tester :Authentication successful\r\n")
             .await
             .unwrap();
+        if matches!(reply, Reply::ExtendedSuccess) {
+            let request = next_command(&mut lines, &mut write).await.unwrap();
+            assert!(request.starts_with("CAP REQ ") && request.ends_with("draft/extended-isupport"));
+            write.write_all(b":fixture BATCH +early draft/isupport\r\n@batch=early :fixture 005 * NICKLEN=31 :supported tokens\r\n:fixture BATCH -early\r\n:fixture CAP * ACK :draft/extended-isupport\r\n").await.unwrap();
+        }
         if bound {
             assert_eq!(
                 next_command(&mut lines, &mut write).await.unwrap(),
@@ -178,7 +187,7 @@ async fn registration(reply: Reply, bound: bool) {
             }
         };
         write.write_all(burst.as_bytes()).await.unwrap();
-        if matches!(reply, Reply::Success | Reply::ControlSuccess) {
+        if matches!(reply, Reply::Success | Reply::ExtendedSuccess | Reply::ControlSuccess) {
             if bound || control {
                 assert!(
                     tokio::time::timeout(
@@ -220,26 +229,30 @@ async fn registration(reply: Reply, bound: bool) {
         return;
     }
     let result = attempt.await;
-    if matches!(reply, Reply::Success | Reply::ControlSuccess) {
+    if matches!(reply, Reply::Success | Reply::ExtendedSuccess | Reply::ControlSuccess) {
         let (handle, mut events) = result.unwrap();
         assert_eq!(handle.account_registration_rules.as_deref(), (bound && !control).then_some("email-required,min-password-length=8"));
         let mut connected = false;
         let mut confirmed = false;
+        let mut early_isupport = false;
         while let Some(event) = events.recv().await {
             match event {
                 IrcEvent::Connected(_, caps, _) => {
                     assert!(!connected);
+                    assert_eq!(caps.contains("draft/extended-isupport"), matches!(reply, Reply::ExtendedSuccess));
                     assert_eq!(caps.contains(super::NETWORKS_CAP), bound || control);
                     connected = true;
                 }
                 IrcEvent::Message(_, message) => {
                     confirmed |= message.to_string().contains("BOUNCER_NETID=42");
+                    early_isupport |= message.to_string().contains("NICKLEN=31");
                 }
                 IrcEvent::Disconnected(..) => break,
                 _ => {}
             }
         }
         assert!(connected);
+        assert_eq!(early_isupport, matches!(reply, Reply::ExtendedSuccess));
         assert_eq!(confirmed, !control);
         drop(handle);
     } else {
@@ -530,4 +543,27 @@ async fn dropping_registered_connection_closes_an_idle_socket() {
         assert!(writer.is_finished());
         peer.await.unwrap();
     }).await.expect("cancelled idle reader or writer retained its socket");
+}
+
+#[test]
+fn extended_isupport_identity_requires_a_complete_valid_burst() {
+    let mut tracker = crate::irc::batch::BatchTracker::default();
+    let mut confirmed = false;
+    for line in [":s BATCH +a draft/isupport", "@batch=a :s 005 me BOUNCER_NETID=1 :supported tokens"] {
+        super::confirm_identity(&line.parse().unwrap(), &mut tracker, Some("1"), &mut confirmed).unwrap();
+        assert!(!confirmed);
+    }
+    super::confirm_identity(&":s BATCH -a".parse().unwrap(), &mut tracker, Some("1"), &mut confirmed).unwrap();
+    assert!(confirmed);
+    super::confirm_identity(&":s 005 me -BOUNCER_NETID :supported tokens".parse().unwrap(), &mut tracker, Some("1"), &mut confirmed).unwrap();
+    assert!(!confirmed);
+    for line in [":s BATCH +a draft/isupport", "@batch=a :s 005 me BOUNCER_NETID=1 :supported tokens", "@batch=a :s NOTICE me :bad", ":s BATCH -a"] {
+        super::confirm_identity(&line.parse().unwrap(), &mut tracker, Some("1"), &mut confirmed).unwrap();
+    }
+    assert!(!confirmed);
+}
+
+#[tokio::test]
+async fn extended_isupport_negotiates_after_sasl_and_replays_early_bursts() {
+    tokio::time::timeout(Duration::from_secs(5), registration(Reply::ExtendedSuccess, true)).await.unwrap();
 }

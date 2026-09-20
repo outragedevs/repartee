@@ -103,6 +103,7 @@ impl App {
     ) {
         if batch.batch_type == "CHATHISTORY" && self.receive_search_context(conn_id, batch, clean_end) { return; }
         match batch.batch_type.as_str() {
+            "DRAFT/ISUPPORT" => self.receive_isupport_batch(conn_id, batch, clean_end),
             "SOJU.IM/SEARCH" => self.receive_search_results(conn_id, batch, clean_end),
             "DRAFT/CHATHISTORY-TARGETS" if clean_end => {
                 self.receive_history_targets(conn_id, batch);
@@ -147,6 +148,16 @@ impl App {
             }
         }
         self.drain_pending_web_events();
+    }
+
+    fn receive_isupport_batch(&mut self, conn_id: &str, batch: &crate::irc::batch::BatchInfo, clean_end: bool) {
+        if batch.parent_ref().is_some_and(|parent| !self.batch_trackers.get(conn_id).is_some_and(|tracker| tracker.is_open(parent))) { return; }
+        let Some(updates) = batch.isupport_tokens(clean_end) else { return; };
+        if let Some(conn) = self.state.connections.get_mut(conn_id) {
+            conn.isupport_parsed.parse_tokens(&updates);
+        }
+        crate::irc::events::refresh_isupport_label(&mut self.state, conn_id);
+        self.drain_pending_buffer_rekeys();
     }
 
     pub(crate) fn dispatch_live_irc_message(&mut self, conn_id: &str, msg: &::irc::proto::Message) {
@@ -550,3 +561,7 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "isupport_tests.rs"]
+mod isupport_tests;

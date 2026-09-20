@@ -1086,6 +1086,7 @@ async fn negotiate_caps(
 
         // Compute capabilities to request
         let mut caps_to_request = server_caps.negotiate(DESIRED_CAPS);
+        caps_to_request.retain(|cap| cap != "draft/extended-isupport");
         if params.bouncer_network_id.is_some() && !params.bouncer_control {
             caps_to_request.extend(cap::bouncer_network_caps(&server_caps));
             caps_to_request.extend(server_caps.negotiate(&["draft/pre-away", webpush::CAP]));
@@ -1218,6 +1219,18 @@ async fn negotiate_caps(
             diag.push("SASL: requested but server did not ACK".to_string());
         } else if !sasl_requested && have.password {
             diag.push("SASL: credentials available but server does not advertise sasl".to_string());
+        }
+
+        if server_caps.has("draft/extended-isupport") {
+            sender.send(Command::CAP(None, CapSubCommand::REQ, None, Some("draft/extended-isupport".into())))?;
+            while let Some(result) = stream.next().await {
+                let message = result?;
+                if let Command::CAP(_, CapSubCommand::ACK | CapSubCommand::NAK, _, _) = &message.command {
+                    cap::update_registration_caps(&mut enabled_caps, &message);
+                    break;
+                }
+                early_messages.push(message);
+            }
         }
 
         if params.bouncer_control && (!enabled_caps.contains(bouncer::NETWORKS_CAP) || !enabled_caps.contains("batch")) {

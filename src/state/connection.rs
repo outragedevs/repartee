@@ -17,6 +17,7 @@ pub enum ConnectionStatus {
 #[allow(dead_code)]
 pub struct Connection {
     pub own_realname: Option<String>,
+    pub network_label: Option<String>,
     pub id: String,
     pub label: String,
     pub network_scope: Option<String>,

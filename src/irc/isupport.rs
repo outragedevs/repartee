@@ -18,6 +18,21 @@ pub struct Isupport {
     tokens: HashMap<String, String>,
 }
 
+pub fn response_tokens(args: &[String]) -> Option<Vec<&str>> {
+    let (_, rest) = args.split_first()?;
+    if rest.is_empty() { return None; }
+    let rest = if rest.last().is_some_and(|value| value.contains(' ')) {
+        &rest[..rest.len() - 1]
+    } else { rest };
+    rest.iter().map(|token| {
+        if token.starts_with('-') && token.contains('=') { return None; }
+        let key = token.strip_prefix('-').unwrap_or(token).split('=').next()?;
+        (!key.is_empty() && key.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"./-_".contains(&byte))
+            && !token.chars().any(|ch| ch.is_whitespace() || ch.is_control()))
+            .then_some(token.as_str())
+    }).collect()
+}
+
 #[allow(dead_code)]
 impl Isupport {
     /// Create a new, empty `Isupport`.

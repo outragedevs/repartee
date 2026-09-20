@@ -1119,6 +1119,7 @@ mod tests {
         let mut state = crate::state::AppState::new();
         state.add_connection(crate::state::connection::Connection {
             own_realname: None,
+            network_label: None,
             id: "test".to_string(),
             label: "TestServer".to_string(),
             network_scope: None,

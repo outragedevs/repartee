@@ -419,3 +419,18 @@ ISUPPORT/identity, channel-context live/history routing, or full acceptance audi
 Full Sol medium review round 13 is clean. Six payload tests, Chromium settings
 and worker regressions, and the final actual Soju/WASM/browser-push run pass;
 Clippy and 2657 native/145 web tests cover the native bridge.
+
+### Extended ISUPPORT (clean review completed)
+
+`draft/isupport` is an atomic incremental update, not a replacement snapshot.
+Omitted keys remain; explicit `-KEY` removes a key. The original audit's
+replacement-snapshot assumption is superseded by the IRCv3 specification.
+Implementation and evidence: `docs/validation/bouncer-extended-isupport.md`.
+
+The negotiated extension applies complete validated bursts atomically, preserves
+pre-registration parameters and confirms binding only after complete identity
+updates. Automatically derived labels follow NETWORK updates/removals in native
+and web views, preserving explicit names and conversation buffers. Clippy has
+no project warnings; 2666 native/145 web tests and pinned Soju/Lurker integration
+pass. Full Sol medium review round 3 is clean. Remaining identity extensions,
+channel-context routing and the complete acceptance audit remain in scope.
