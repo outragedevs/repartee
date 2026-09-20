@@ -301,3 +301,77 @@ async fn pinned_bouncer_bounded_history() {
         .map(|(_, text)| text).collect();
     assert_eq!(rows, ["preserved legacy row", "Connecting to direct...", "direct persistence control"]);
 }
+
+#[tokio::test]
+#[ignore = "requires a disposable pinned bouncer and partial-batch proxy"]
+async fn pinned_bouncer_partial_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("messages.db");
+    let control = std::env::var("REPARTEE_BOUNCER_FAULT_CONTROL").unwrap();
+    let http = reqwest::Client::new();
+    let mut app = prepare(&path, true);
+    until(&mut app, "settled history", |app| {
+        app.state.connections["fixture"].status == crate::state::connection::ConnectionStatus::Connected
+            && app.state.buffers.contains_key("fixture/history-peer")
+            && app.state.connections["fixture"].chathistory.pending_count() == 0
+    }).await;
+    let baseline: Vec<_> = app.state.buffers["fixture/history-peer"].messages.iter().map(|row| row.id).collect();
+    let armed: serde_json::Value = http.post(format!("{control}/arm")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(armed["armed"], true);
+    let command = "/bsearch between history-peer 2024-01-01T00:00:10Z 2024-01-01T00:00:20Z 3";
+    app.state.set_active_buffer("fixture/history-peer");
+    app.handle_submit(command);
+    assert!(app.server_search.contains_key("fixture"));
+    let mut partial_seen = false;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            while let Ok(event) = app.irc_rx.try_recv() {
+                let mut inner = &event;
+                while let crate::irc::IrcEvent::Attempt(_, _, nested) = inner { inner = nested; }
+                let partial = if let crate::irc::IrcEvent::Message(_, message) = inner
+                    && matches!(&message.command, irc::proto::Command::PRIVMSG(_, text) if text == "fixture-history-11") {
+                    crate::irc::batch::BatchTracker::get_batch_tag_owned(message)
+                } else { None };
+                app.handle_irc_event(event);
+                if let Some(tag) = partial {
+                    assert!(app.batch_trackers["fixture"].is_open(&tag));
+                    assert!(app.server_search.contains_key("fixture"));
+                    assert!(!app.state.buffers["fixture/*search*"].messages.iter().any(|row| row.nick.is_some()));
+                    partial_seen = true;
+                }
+            }
+            if app.state.connections["fixture"].status != crate::state::connection::ConnectionStatus::Connected
+                && !app.server_search.contains_key("fixture") { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("partial history connection did not terminate");
+    assert!(partial_seen);
+    assert!(!app.batch_trackers.contains_key("fixture"));
+    let status: serde_json::Value = http.post(format!("{control}/status")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(status["requested"], true);
+    assert_eq!(status["batch_opened"], true);
+    assert_eq!(status["forwarded_rows"], 1);
+    assert_eq!(status["faulted"], true);
+    assert!(!app.state.buffers["fixture/*search*"].messages.iter().any(|row| row.nick.is_some()));
+    assert_eq!(app.state.buffers["fixture/history-peer"].messages.iter().map(|row| row.id).collect::<Vec<_>>(), baseline);
+    assert!(http.post(format!("{control}/resume")).send().await.unwrap().status().is_success());
+    let config = app.state.connections["fixture"].origin_config.clone();
+    app.start_connection_attempt("fixture", config);
+    until(&mut app, "reconnected history", |app| {
+        app.state.connections["fixture"].status == crate::state::connection::ConnectionStatus::Connected
+            && app.state.connections["fixture"].chathistory.pending_count() == 0
+    }).await;
+    app.state.set_active_buffer("fixture/history-peer");
+    app.handle_submit(command);
+    assert!(app.server_search.contains_key("fixture"));
+    until(&mut app, "retried range complete", |app| !app.server_search.contains_key("fixture")).await;
+    let rows: Vec<_> = app.state.buffers["fixture/*search*"].messages.iter().filter(|row| row.nick.is_some()).map(|row| row.text.as_str()).collect();
+    assert_eq!(rows, ["fixture-history-11", "fixture-history-12", "fixture-history-13"]);
+    direct_irc_control(&mut app);
+    Box::pin(close(app)).await;
+    let database = crate::storage::db::open_readonly_at(path.to_str().unwrap()).unwrap();
+    let count = |pattern: &str| database.query_row("SELECT COUNT(*) FROM messages WHERE text LIKE ?1", [pattern], |row| row.get::<_, i64>(0)).unwrap();
+    assert_eq!(count("fixture-history-%"), 0);
+    assert_eq!(count("preserved legacy row"), 1);
+    assert_eq!(count("direct persistence control"), 1);
+}
