@@ -652,7 +652,7 @@ pub fn handle_cap_new(
         .filter(|cap| {
             (DESIRED_CAPS.iter().any(|d| d.eq_ignore_ascii_case(cap))
                 || (state.connections.get(conn_id).is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some() && !conn.origin_config.bouncer_control)
-                    && matches!(cap.as_str(), "draft/read-marker" | "soju.im/read" | "draft/message-redaction")))
+                    && matches!(cap.as_str(), "draft/read-marker" | "soju.im/read" | "draft/message-redaction" | "draft/account-registration")))
                 && enabled.is_none_or(|set| !set.contains(cap.as_str()))
         })
         .cloned()

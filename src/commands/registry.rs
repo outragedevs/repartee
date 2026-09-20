@@ -24,6 +24,12 @@ use super::types::{CommandCategory, CommandDef};
 
 static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
     vec![
+        ("account", CommandDef {
+            handler: crate::app::account_registration::command,
+            description: "Register or verify an upstream IRC account",
+            aliases: &[],
+            category: CommandCategory::Connection,
+        }),
         ("auth", CommandDef {
             handler: crate::app::upstream_auth::command,
             description: "Authenticate an upstream IRC account using a password secret reference",

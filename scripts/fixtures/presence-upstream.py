@@ -6,8 +6,10 @@ from pathlib import Path
 
 
 class PresenceServer:
-    def __init__(self, events, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, upstream_auth=False):
-        self.upstream_auth = upstream_auth
+    def __init__(self, events, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, upstream_auth=False, account_registration=False):
+        self.account_registration = account_registration
+        self.accounts = {}
+        self.upstream_auth = upstream_auth or account_registration
         self.redaction = redaction
         self.setname = setname
         self.invites = invites
@@ -34,6 +36,8 @@ class PresenceServer:
         capabilities = {"setname"} if self.setname else set()
         if self.upstream_auth:
             capabilities.add("sasl")
+        if self.account_registration:
+            capabilities.add("draft/account-registration")
         if self.invites:
             capabilities.add("invite-notify")
         if self.redaction:
@@ -64,7 +68,7 @@ class PresenceServer:
                 if command == 'CAP' and params:
                     if params[0].upper() == 'LS':
                         negotiating = True
-                        send(f':fixture.local CAP {nick} LS :{" ".join("sasl=PLAIN" if cap == "sasl" else cap for cap in sorted(capabilities))}')
+                        send(f':fixture.local CAP {nick} LS :{" ".join("sasl=PLAIN" if cap == "sasl" else "draft/account-registration=custom-account-name,email-required,min-password-length=8,max-password-length=100" if cap == "draft/account-registration" else cap for cap in sorted(capabilities))}')
                     elif params[0].upper() == 'REQ':
                         reply = 'ACK' if set(params[-1].split()) <= capabilities else 'NAK'
                         send(f':fixture.local CAP {nick} {reply} :{params[-1]}')
@@ -84,15 +88,37 @@ class PresenceServer:
                         if len(chunk) < 400:
                             try:
                                 fields = base64.b64decode(sasl_payload, validate=True).decode().split('\0')
-                                success = len(fields) == 3 and fields[1:] == ['irc-account', 'disposable password']
+                                success = len(fields) == 3 and (fields[1:] == ['irc-account', 'disposable password'] or self.accounts.get(fields[1]) == (fields[2], True))
                             except (ValueError, UnicodeError):
                                 success = False
                             with self.events.open('a') as output:
                                 output.write(json.dumps({'connection': connection, 'upstream_auth': success}) + '\n')
                             if success:
-                                send(f':fixture.local 900 {nick} {nick}!fixture@localhost irc-account :Logged in')
+                                send(f':fixture.local 900 {nick} {nick}!fixture@localhost {fields[1]} :Logged in')
                             send(f':fixture.local {903 if success else 904} {nick} :Authentication result')
                             sasl_payload = ''
+                elif command == 'REGISTER' and self.account_registration and len(params) == 3:
+                    account, email, password = params
+                    if account == '*':
+                        account = nick
+                    if account in self.accounts:
+                        send(f':fixture.local FAIL REGISTER ACCOUNT_EXISTS {account} :Account exists')
+                    elif email == '*':
+                        send(f':fixture.local FAIL REGISTER INVALID_EMAIL {account} :Email required')
+                    else:
+                        immediate = account == 'instant-account'
+                        self.accounts[account] = (password, immediate)
+                        status = 'SUCCESS' if immediate else 'VERIFICATION_REQUIRED'
+                        send(f':fixture.local REGISTER {status} {account} :100% complete; https://example.org/verify')
+                elif command == 'VERIFY' and self.account_registration and len(params) == 2:
+                    account, code = params
+                    if account == '*':
+                        account = nick
+                    if account not in self.accounts or code != 'fixture-code':
+                        send(f':fixture.local FAIL VERIFY INVALID_CODE {account} :Invalid verification code')
+                    else:
+                        self.accounts[account] = (self.accounts[account][0], True)
+                        send(f':fixture.local VERIFY SUCCESS {account} :Account verified')
                 elif command == 'NICK' and params:
                     nick = params[0]
                 elif command == 'USER':
@@ -216,8 +242,9 @@ async def main():
     parser.add_argument('--names', action='store_true')
     parser.add_argument('--redaction', action='store_true')
     parser.add_argument('--upstream-auth', action='store_true')
+    parser.add_argument('--account-registration', action='store_true')
     args = parser.parse_args()
-    fixture = PresenceServer(args.events, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.upstream_auth)
+    fixture = PresenceServer(args.events, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.upstream_auth, args.account_registration)
     server = await asyncio.start_server(fixture.client, '127.0.0.1', 0)
     args.ready.write_text(json.dumps({'port': server.sockets[0].getsockname()[1]}))
     async with server:

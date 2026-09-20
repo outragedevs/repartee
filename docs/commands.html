@@ -1013,6 +1013,39 @@ by the exact mask pattern.</p>
 <p>/ignore</p>
 </div>
 <h2 id="cat-connection">Connection</h2>
+<div class="command-entry" data-command="account" data-category="Connection">
+<h1>/account</h1>
+<h2>Syntax</h2>
+<pre><code>/account register [-allow-insecure-upstream] &lt;account|*&gt; &lt;email|*&gt; &lt;password-env&gt;
+/account verify [-allow-insecure-upstream] &lt;account|*&gt; &lt;code-env&gt;
+</code></pre>
+<h2>Description</h2>
+<p>Create or verify an IRC account through a connected bouncer network advertising
+<code>draft/account-registration</code>. This concerns the IRC network account, not the
+bouncer login. The capability must be acknowledged before the request is sent.
+Soju forwards these operations when the upstream supports them; Lurker does not.</p>
+<p>Use <code>*</code> as the account to choose your current nickname, or as the email when the
+server permits registration without an email address. Server-advertised account
+naming, required-email and password byte-length constraints are checked locally.
+The password and verification code are read from the named variables in <code>.env</code>;
+do not enter the secret values as command arguments.</p>
+<p>Both operations require verified TLS to the bouncer and a discovered TLS-enabled
+upstream. The optional <code>-allow-insecure-upstream</code> explicitly accepts exposure of
+the password or verification code on a plaintext or unknown upstream transport;
+it does not disable downstream TLS checks.</p>
+<p>Replies appear in the originating connection&#39;s server buffer. Registration can
+succeed immediately or require a subsequent verification step; follow the server&#39;s
+instructions and then use <code>verify</code>. Soju can retain the registration password
+for reconnects even while verification is pending. A timeout has an unknown
+outcome, so no automatic retry is attempted. Wait for the response or reconnect
+and inspect the account before trying again.</p>
+<h2>Examples</h2>
+<pre><code>/account register * user@example.org IRC_NEW_PASSWORD
+/account verify * IRC_VERIFICATION_CODE
+</code></pre>
+<h2>See Also</h2>
+<p>/auth, /bouncer, /server</p>
+</div>
 <div class="command-entry" data-command="auth" data-category="Connection">
 <h1>/auth</h1>
 <h2>Syntax</h2>

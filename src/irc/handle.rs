@@ -621,6 +621,7 @@ fn build_batched_joins(
 /// Handle to a connected IRC client, holding the connection ID and send half.
 #[derive(Debug)]
 pub struct IrcHandle {
+    pub(crate) account_registration_rules: Option<String>,
     pub conn_id: String,
     /// Private on purpose: the only way out is [`IrcSender`], which charges.
     sender: IrcSender,
@@ -662,6 +663,7 @@ impl IrcHandle {
             local_ip,
             outgoing_handle,
             reader_handle: None,
+            account_registration_rules: None,
         }
     }
 
