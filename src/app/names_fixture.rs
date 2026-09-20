@@ -109,6 +109,43 @@ async fn labeled_whois(app: &mut App) {
     app.state.log_tx = None;
 }
 
+async fn unlabeled_whois(app: &mut App) {
+    if !app.state.connections.contains_key("other") {
+        let config =
+            toml::from_str("label='other'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]")
+                .unwrap();
+        app.setup_connection("other", &config);
+    }
+    app.state.set_active_buffer("fixture/#one");
+    let (tx, mut log_rx) = tokio::sync::mpsc::channel(64);
+    app.state.log_tx = Some(tx);
+    app.web_broadcaster = std::sync::Arc::new(crate::web::broadcast::WebBroadcaster::new(128));
+    let mut web_rx = app.web_broadcaster.subscribe();
+    app.irc_handles["fixture"]
+        .sender()
+        .send(irc::proto::Command::WHOIS(None, "Alice".into()))
+        .unwrap();
+    app.state.set_active_buffer("other/other");
+    until(app, "unlabeled WHOIS origin", |app| {
+        app.state.buffers["fixture/fixture"]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("fixture-labeled-whois"))
+    })
+    .await;
+    assert_eq!(app.state.active_buffer_id.as_deref(), Some("other/other"));
+    assert!(
+        !app.state.buffers["other/other"]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("fixture-labeled-whois"))
+    );
+    let events: Vec<_> = std::iter::from_fn(|| web_rx.try_recv().ok()).collect();
+    assert!(events.iter().any(|event| matches!(event, crate::web::protocol::WebEvent::NewMessage { buffer_id, message } if buffer_id == "fixture/fixture" && message.text.contains("fixture-labeled-whois"))));
+    assert!(log_rx.try_recv().is_err());
+    app.state.log_tx = None;
+}
+
 #[tokio::test]
 #[ignore = "requires a disposable pinned bouncer fixture"]
 async fn pinned_bouncer_names() {
@@ -145,6 +182,7 @@ async fn pinned_bouncer_names() {
         labeled_names(&mut app).await;
         labeled_whois(&mut app).await;
     }
+    unlabeled_whois(&mut app).await;
     app.irc_handles["fixture"]
         .sender()
         .send_quit("fixture reconnect")

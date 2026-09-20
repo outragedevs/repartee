@@ -263,12 +263,19 @@ Live batch dispatch merged in https://github.com/outragedevs/repartee/pull/78,
 including nested history protection, receive-order preservation, bounded folding
 and expiration. See `docs/validation/bouncer-live-batches.md`.
 
-The current `feat/bouncer-labeled-responses` increment negotiates labels and
-correlates manual WHOIS/WHO/WHOWAS/NAMES/LIST with their originating buffer.
+Labeled responses merged in https://github.com/outragedevs/repartee/pull/79.
+Manual WHOIS/WHO/WHOWAS/NAMES/LIST replies correlate with their originating buffer.
 Native/web routing, ACK, cleanup and a real forwarded Soju WHOIS passed, followed
 by a clean full Sol medium review. See `docs/validation/bouncer-labeled-responses.md`.
-Next, verify and repair unlabeled cross-network reply fallback, especially for
-Lurker, and audit remaining specialized-batch/request variants.
- Remaining increments must still
-cover other dynamic capability behavior, redaction, ISUPPORT and upstream account
-operations, as well as every other acceptance row above; no remaining row is dropped.
+
+The `fix/bouncer-unlabeled-reply-routing` increment confines unlabeled replies to
+the originating connection and prevents automatic local writes for bouncer server
+buffers. Direct IRC and DCC retain local logging. Both pinned bouncers passed a
+forwarded WHOIS after switching networks; native/web destinations, unit tests and
+a clean full Sol medium review are recorded in
+`docs/validation/bouncer-unlabeled-replies.md`.
+
+Next, implement message redaction and audit remaining specialized-batch/request
+variants and older server-buffer backlog reads. Remaining increments must still
+cover other dynamic capability behavior, ISUPPORT and upstream account operations,
+as well as every other acceptance row above; no remaining row is dropped.

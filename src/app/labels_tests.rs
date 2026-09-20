@@ -196,3 +196,99 @@ async fn web_command_keeps_its_buffer_context_independent_of_terminal_selection(
         Some("second/#origin")
     );
 }
+
+#[tokio::test]
+async fn unlabeled_replies_never_cross_networks_and_preserve_direct_irc_logging() {
+    for bouncer in [true, false] {
+        let mut app = setup();
+        let conn = app.state.connections.get_mut("first").unwrap();
+        conn.enabled_caps.remove("labeled-response");
+        if !bouncer {
+            conn.origin_config.bouncer_network_id = None;
+        }
+        app.state
+            .connections
+            .get_mut("second")
+            .unwrap()
+            .origin_config
+            .bouncer_network_id = None;
+        app.state.set_active_buffer("second/#origin");
+        let (tx, mut log_rx) = tokio::sync::mpsc::channel(64);
+        app.state.log_tx = Some(tx);
+        app.web_broadcaster = std::sync::Arc::new(crate::web::broadcast::WebBroadcaster::new(128));
+        let mut web_rx = app.web_broadcaster.subscribe();
+        receive(
+            &mut app,
+            "first",
+            ":server 311 me Alice user host * :unlabeled-reply",
+        );
+        receive(&mut app, "first", ":server 318 me Alice :End");
+        assert!(
+            app.state.buffers["first/first"]
+                .messages
+                .iter()
+                .any(|message| message.text.contains("unlabeled-reply"))
+        );
+        assert!(
+            !app.state.buffers["second/#origin"]
+                .messages
+                .iter()
+                .any(|message| message.text.contains("Alice"))
+        );
+        assert_eq!(
+            app.state.active_buffer_id.as_deref(),
+            Some("second/#origin")
+        );
+        let events: Vec<_> = std::iter::from_fn(|| web_rx.try_recv().ok()).collect();
+        assert!(events.iter().any(|event| matches!(event, crate::web::protocol::WebEvent::NewMessage { buffer_id, message } if buffer_id == "first/first" && message.text.contains("unlabeled-reply"))));
+        assert_eq!(log_rx.try_recv().is_err(), bouncer);
+    }
+}
+
+#[tokio::test]
+async fn bouncer_server_replies_are_not_persisted_without_labels() {
+    for control in [true, false] {
+        let mut app = setup();
+        let config = &mut app
+            .state
+            .connections
+            .get_mut("first")
+            .unwrap()
+            .origin_config;
+        config.bouncer_control = control;
+        if control {
+            config.bouncer_network_id = None;
+        }
+        app.state.set_active_buffer("first/first");
+        let (tx, mut log_rx) = tokio::sync::mpsc::channel(64);
+        app.state.log_tx = Some(tx);
+        receive(
+            &mut app,
+            "first",
+            ":server 311 me Alice user host * :server-buffer-reply",
+        );
+        assert!(
+            app.state.buffers["first/first"]
+                .messages
+                .iter()
+                .any(|message| message.text.contains("server-buffer-reply"))
+        );
+        assert!(log_rx.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn unlabeled_replies_keep_the_active_buffer_on_the_same_network() {
+    let mut app = setup();
+    receive(
+        &mut app,
+        "first",
+        ":server 311 me Alice user host * :same-network-reply",
+    );
+    assert!(
+        app.state.buffers["first/#origin"]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("same-network-reply"))
+    );
+}
