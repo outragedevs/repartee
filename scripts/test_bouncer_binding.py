@@ -32,15 +32,38 @@ def wait_ready(process, predicate):
     raise TimeoutError("Bouncer fixture did not become ready")
 
 
+def tls_material(directory, case):
+    for name in ("trusted", "unrelated"):
+        run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+             "-keyout", str(directory / f"{name}-key.pem"), "-out", str(directory / f"{name}-ca.pem"),
+             "-days", "1", "-subj", f"/CN=Disposable {name} fixture CA",
+             "-addext", "basicConstraints=critical,CA:TRUE"], capture_output=True)
+    run(["openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes",
+         "-keyout", str(directory / "server-key.pem"), "-out", str(directory / "server.csr"),
+         "-subj", "/CN=Disposable bouncer"], capture_output=True)
+    address = "192.0.2.1" if case == "wrong-host" else "127.0.0.1"
+    (directory / "extensions").write_text(
+        f"basicConstraints=critical,CA:FALSE\nsubjectAltName=IP:{address}\nextendedKeyUsage=serverAuth\n")
+    run(["openssl", "x509", "-req", "-in", str(directory / "server.csr"),
+         "-CA", str(directory / "trusted-ca.pem"), "-CAkey", str(directory / "trusted-key.pem"),
+         "-CAcreateserial", "-out", str(directory / "server-cert.pem"), "-days", "1",
+         "-extfile", str(directory / "extensions")], capture_output=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("implementation", choices=PINS)
     parser.add_argument("source", type=Path)
     parser.add_argument("--test-filter", default="pinned_bouncer_")
     parser.add_argument("--daemon-image", help="Run the real daemon/browser lifecycle fixture using this container image")
+    parser.add_argument("--tls-case", choices=("valid", "untrusted", "wrong-host"))
     parser.add_argument("--pass-auth", nargs="?", const="user", choices=("user", "combined"))
     parser.add_argument("--target-tie", action="store_true", help="Seed 1001 conversations sharing a timestamp")
     args = parser.parse_args()
+    if args.tls_case:
+        if args.pass_auth or args.daemon_image or args.target_tie or args.test_filter not in ("pinned_bouncer_", "pinned_bouncer_tls_validation"):
+            parser.error("--tls-case is a standalone TLS validation scenario")
+        args.test_filter = "pinned_bouncer_tls_validation"
     if args.pass_auth and (args.implementation != "lurker" or args.test_filter != "pinned_bouncer_persistent_history" or args.daemon_image or args.target_tie):
         parser.error("--pass-auth requires Lurker and --test-filter pinned_bouncer_persistent_history")
     source = args.source.resolve()
@@ -50,6 +73,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="bouncer-binding-", dir="/tmp") as directory:
         temporary = Path(directory)
         process = None
+        if args.tls_case:
+            tls_material(temporary, args.tls_case)
         with (temporary / "server.log").open("w+") as log:
             try:
                 if args.implementation == "lurker":
@@ -59,7 +84,10 @@ def main():
                         str(ROOT / "scripts/fixtures/lurker-binding.mts"), str(source), str(ready),
                     ], cwd=source, stdout=log, stderr=log,
                         env=dict(os.environ, REPARTEE_BOUNCER_DAEMON_FIXTURE="1" if args.daemon_image else "0",
-                                 REPARTEE_BOUNCER_TARGET_TIE="1" if args.target_tie else "0"))
+                                 REPARTEE_BOUNCER_TARGET_TIE="1" if args.target_tie else "0",
+                                 REPARTEE_BOUNCER_TLS_FIXTURE="1" if args.tls_case else "0",
+                                 LURKER_BOUNCER_TLS_CERT=str(temporary / "server-cert.pem") if args.tls_case else "",
+                                 LURKER_BOUNCER_TLS_KEY=str(temporary / "server-key.pem") if args.tls_case else ""))
                     wait_ready(process, ready.exists)
                     settings = json.loads(ready.read_text())
                 else:
@@ -70,8 +98,9 @@ def main():
                     admin = temporary / "admin"
                     config.write_text(
                         f"hostname fixture.local\ndb sqlite3 {temporary}/main.db\n"
-                        f"listen irc+insecure://127.0.0.1:{port}\n"
+                        f"listen {'ircs' if args.tls_case else 'irc+insecure'}://127.0.0.1:{port}\n"
                         f"listen unix+admin://{admin}\nmessage-store db\n"
+                        + (f"tls {temporary}/server-cert.pem {temporary}/server-key.pem\n" if args.tls_case else "")
                     )
                     run([str(source / "sojudb"), "-config", str(config), "create-user", "fixture"],
                         input="fixture-password\n", capture_output=True)
@@ -107,9 +136,13 @@ def main():
                     "REPARTEE_BOUNCER_TEST_PROVIDER": args.implementation,
                     "REPARTEE_BOUNCER_TEST_PASS": args.pass_auth or "0",
                 })
+                if args.tls_case:
+                    environment["REPARTEE_BOUNCER_TLS_CASE"] = args.tls_case
+                    authority = "unrelated" if args.tls_case == "untrusted" else "trusted"
+                    environment["REPARTEE_OAUTH_TEST_CA"] = str(temporary / f"{authority}-ca.pem")
                 test_args = f"{args.test_filter} -- --ignored"
                 if args.test_filter == "pinned_bouncer_":
-                    test_args += " --skip pinned_bouncer_discovery_limit --skip pinned_bouncer_service --skip pinned_bouncer_presence --skip pinned_bouncer_network_management --skip pinned_bouncer_setname --skip pinned_bouncer_monitor --skip pinned_bouncer_no_monitor --skip pinned_bouncer_invites --skip pinned_bouncer_names --skip pinned_bouncer_channel_context --skip pinned_bouncer_network_icon"
+                    test_args += " --skip pinned_bouncer_tls_validation --skip pinned_bouncer_discovery_limit --skip pinned_bouncer_service --skip pinned_bouncer_presence --skip pinned_bouncer_network_management --skip pinned_bouncer_setname --skip pinned_bouncer_monitor --skip pinned_bouncer_no_monitor --skip pinned_bouncer_invites --skip pinned_bouncer_names --skip pinned_bouncer_channel_context --skip pinned_bouncer_network_icon"
                 if args.daemon_image:
                     run(["python3", str(ROOT / "scripts/test_bouncer_daemon_history.py"), args.daemon_image],
                         cwd=ROOT, env=environment)
