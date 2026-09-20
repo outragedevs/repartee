@@ -35,6 +35,8 @@ mod bouncer_children;
 mod server_history;
 #[cfg(test)]
 mod history_storage_fixture;
+#[cfg(test)]
+mod history_discovery_fixture;
 mod history_discovery;
 mod read_markers;
 mod presence;

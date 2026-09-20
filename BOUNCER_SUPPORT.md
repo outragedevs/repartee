@@ -520,3 +520,9 @@ SQLite: tungstenite frame TRACE and the application's web-command DEBUG dump.
 The fix and repeatable two-process acceptance procedure are documented in
 `docs/validation/bouncer-daemon-history.md`. This adds process restart and actual
 browser/diagnostic coverage without closing the remaining history matrix.
+
+Timestamp-tie detection now emits one native/web warning while continuing older
+TARGETS pages. Both actual-provider App fixtures prove that the omitted query is
+retrievable by a known name. This is not complete automatic enumeration; the
+remaining server-cursor and filtered-empty-page gaps are retained in
+`docs/validation/bouncer-history-acceptance.md`.

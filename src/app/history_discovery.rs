@@ -16,6 +16,7 @@ pub struct HistoryDiscovery {
     hydration_attempts: HashMap<String, usize>,
     seen: HashSet<String>,
     pub(super) finished: bool,
+    pub(super) incomplete: bool,
     attempts: usize,
     retry_at: Instant,
 }
@@ -76,6 +77,7 @@ impl App {
                 hydration_attempts: HashMap::new(),
                 seen: HashSet::new(),
                 finished: false,
+                incomplete: false,
                 attempts: 0,
                 retry_at: Instant::now(),
             });
@@ -188,8 +190,14 @@ impl App {
         {
             discovery.finished = true;
         }
+        let mut report_incomplete = false;
         if let Some(oldest) = targets.iter().map(|(_, time)| *time).min() {
             let overlapping_upper = oldest.saturating_add(1);
+            if !discovery.finished && overlapping_upper == discovery.upper_ms
+                && targets.len() >= discovery.limit && !discovery.incomplete {
+                discovery.incomplete = true;
+                report_incomplete = true;
+            }
             discovery.upper_ms = if overlapping_upper < discovery.upper_ms {
                 overlapping_upper
             } else {
@@ -225,6 +233,11 @@ impl App {
                 );
             }
             discovery.queue.push_back(target);
+        }
+        if report_incomplete && let Some(conn) = self.state.connections.get(conn_id) {
+            let buffer_id = make_buffer_id(conn_id, &conn.label);
+            crate::irc::events::emit(&mut self.state, &buffer_id,
+                "Some conversations may be missing because the bouncer's history limit was reached. Open a known conversation by name to retrieve its history.");
         }
         self.tick_history_discovery();
     }
@@ -514,11 +527,52 @@ mod tests {
         let overlap = batch(&[":bnc CHATHISTORY TARGETS Peer 2024-01-01T00:00:00.000Z"]);
         app.receive_history_targets("account", &overlap);
         assert_eq!(app.history_discovery["account"].upper_ms, 1_704_067_200_000);
+        assert!(app.history_discovery["account"].incomplete);
         assert_eq!(app.history_discovery["account"].seen.len(), 1);
         assert_eq!(app.history_discovery["account"].active.len(), 1);
+        app.receive_history_targets("account", &batch(&[
+            ":bnc CHATHISTORY TARGETS Older 2023-01-01T00:00:00.000Z",
+        ]));
+        app.receive_history_targets("account", &batch(&[
+            ":bnc CHATHISTORY TARGETS Older 2023-01-01T00:00:00.000Z",
+        ]));
+        assert_eq!(app.history_discovery["account"].seen.len(), 2);
+        assert!(app.state.buffers.contains_key("account/older"));
+        assert_eq!(app.state.buffers.values().flat_map(|buffer| &buffer.messages)
+            .filter(|message| message.text.contains("Some conversations may be missing")).count(), 1);
         let empty = batch(&[]);
         app.receive_history_targets("account", &empty);
         assert!(app.history_discovery["account"].finished);
+    }
+
+    #[tokio::test]
+    async fn overlapping_pages_below_the_limit_do_not_warn() {
+        let mut app = app();
+        app.start_history_discovery("account");
+        app.history_discovery.get_mut("account").unwrap().limit = 2;
+        for _ in 0..2 {
+            app.receive_history_targets("account", &batch(&[
+                ":bnc CHATHISTORY TARGETS Peer 2024-01-01T00:00:00.000Z",
+            ]));
+        }
+        app.receive_history_targets("account", &batch(&[]));
+        assert!(app.history_discovery["account"].finished);
+        assert!(!app.history_discovery["account"].incomplete);
+    }
+
+    #[tokio::test]
+    async fn explicit_end_of_targets_does_not_report_a_limit_gap() {
+        let mut app = app();
+        app.start_history_discovery("account");
+        app.history_discovery.get_mut("account").unwrap().limit = 1;
+        app.receive_history_targets("account", &batch(&[
+            ":bnc CHATHISTORY TARGETS Peer 2024-01-01T00:00:00.000Z",
+        ]));
+        let mut page = batch(&[":bnc CHATHISTORY TARGETS Peer 2024-01-01T00:00:00.000Z"]);
+        page.opener_tags = Some(vec![irc::proto::message::Tag("draft/chathistory-end".into(), None)]);
+        app.receive_history_targets("account", &page);
+        assert!(app.history_discovery["account"].finished);
+        assert!(!app.history_discovery["account"].incomplete);
     }
 
     fn batch(lines: &[&str]) -> BatchInfo {
