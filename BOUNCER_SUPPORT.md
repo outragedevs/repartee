@@ -526,3 +526,9 @@ TARGETS pages. Both actual-provider App fixtures prove that the omitted query is
 retrievable by a known name. This is not complete automatic enumeration; the
 remaining server-cursor and filtered-empty-page gaps are retained in
 `docs/validation/bouncer-history-acceptance.md`.
+
+The Soju memory-store daemon scenario checks absence of CHATHISTORY, the user
+warning, actual upstream traffic, offline replay between daemon processes,
+browser reload and disk/diagnostic exclusion. See
+`docs/validation/bouncer-memory-history.md` for its exact scope. Provider restart
+retention and the remaining history matrix are not covered by this scenario.

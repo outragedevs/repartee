@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 class PresenceServer:
-    def __init__(self, events, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, upstream_auth=False, account_registration=False, channel_context=False, network_icon=False):
+    def __init__(self, events, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, upstream_auth=False, account_registration=False, channel_context=False, network_icon=False, memory_history=False):
         self.account_registration = account_registration
         self.accounts = {}
         self.upstream_auth = upstream_auth or account_registration
@@ -19,6 +19,8 @@ class PresenceServer:
         self.monitor = monitor
         self.monitor_unavailable = monitor_unavailable
         self.events = events
+        self.memory_peer = None
+        self.memory_history = memory_history
         self.next_connection = 0
 
     def record(self, connection, nick, away):
@@ -42,6 +44,8 @@ class PresenceServer:
             capabilities.add("draft/account-registration")
         if self.invites:
             capabilities.add("invite-notify")
+        if self.memory_history:
+            capabilities.update(["message-tags", "echo-message"])
         if self.redaction:
             capabilities.update(["draft/message-redaction", "message-tags", "echo-message"])
         if self.names:
@@ -127,6 +131,18 @@ class PresenceServer:
                     have_user = True
                 elif command == 'PING':
                     send(f':fixture.local PONG fixture.local :{params[-1]}')
+                elif command == 'PONG' and self.memory_history and params and params[-1] == 'memory-offline-stored':
+                    with self.events.open('a') as output:
+                        output.write(json.dumps({'offline_ack': True}) + '\n')
+                elif command == 'PRIVMSG' and registered and self.memory_history and len(params) == 2:
+                    if params[0] == 'FixtureControl' and params[1] in ('memory-history-0', 'memory-history-1'):
+                        with self.events.open('a') as output:
+                            output.write(json.dumps({'control': params[1]}) + '\n')
+                        send(f':Alice!peer@fixture.local PRIVMSG {nick} :fixture-memory-incoming-{params[1][-1]}')
+                    elif params[0].lower() == 'alice':
+                        with self.events.open('a') as output:
+                            output.write(json.dumps({'outgoing': params[1]}) + '\n')
+                        send(f':{nick}!fixture@localhost PRIVMSG Alice :{params[1]}')
                 elif command == 'PRIVMSG' and registered and self.channel_context and params == ['FixtureControl', 'channel-context']:
                     send(f'@+draft/channel-context=#context :Alice!peer@fixture.local NOTICE {nick} :context live notice')
                 elif command == 'PRIVMSG' and registered and self.redaction and params == ['FixtureControl', 'search-private']:
@@ -236,6 +252,8 @@ class PresenceServer:
                     break
                 if nick != '*' and have_user and not negotiating and not registered:
                     registered = True
+                    if self.memory_history:
+                        self.memory_peer = (nick, writer)
                     self.record(connection, nick, None)
                     send(f':fixture.local 001 {nick} :Welcome to the disposable presence fixture')
                     send(f':fixture.local 005 {nick} CASEMAPPING=ascii CHANTYPES=# PREFIX=(ov)@+ {"MONITOR=100" if monitor_available else ""} :supported')
@@ -246,6 +264,15 @@ class PresenceServer:
         finally:
             writer.close()
             await writer.wait_closed()
+
+
+async def memory_offline(fixture, trigger):
+    while not trigger.exists():
+        await asyncio.sleep(.02)
+    nick, writer = fixture.memory_peer
+    writer.write((f':Alice!peer@fixture.local PRIVMSG {nick} :fixture-memory-offline\r\n'
+                  'PING :memory-offline-stored\r\n').encode())
+    await writer.drain()
 
 
 async def main():
@@ -262,12 +289,19 @@ async def main():
     parser.add_argument('--redaction', action='store_true')
     parser.add_argument('--upstream-auth', action='store_true')
     parser.add_argument('--account-registration', action='store_true')
+    parser.add_argument('--memory-history', action='store_true')
+    parser.add_argument('--memory-control', type=Path)
     args = parser.parse_args()
-    fixture = PresenceServer(args.events, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.upstream_auth, args.account_registration, args.channel_context, args.network_icon)
+    if args.memory_history and not args.memory_control:
+        parser.error("--memory-history requires --memory-control")
+    fixture = PresenceServer(args.events, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.upstream_auth, args.account_registration, args.channel_context, args.network_icon, args.memory_history)
     server = await asyncio.start_server(fixture.client, '127.0.0.1', 0)
     args.ready.write_text(json.dumps({'port': server.sockets[0].getsockname()[1]}))
     async with server:
-        await server.serve_forever()
+        if args.memory_history:
+            await asyncio.gather(server.serve_forever(), memory_offline(fixture, args.memory_control))
+        else:
+            await server.serve_forever()
 
 
 if __name__ == '__main__':
