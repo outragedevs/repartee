@@ -13,7 +13,7 @@ import tempfile
 from test_bouncer_binding import PINS, ROOT, run, wait_ready
 
 
-def scenario(implementation, source, auto_away, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, filehost=False, oauth=False, upstream_auth=False, account_registration=False, server_search=False, metadata=False, certificates=False, channel_context=False, network_icon=False, memory_history=False, daemon_image=None, live_history=False):
+def scenario(implementation, source, auto_away, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, filehost=False, oauth=False, upstream_auth=False, account_registration=False, server_search=False, metadata=False, certificates=False, channel_context=False, network_icon=False, memory_history=False, daemon_image=None, live_history=False, service=False):
     daemon_history = memory_history or live_history
     with tempfile.TemporaryDirectory(prefix="bouncer-presence-", dir="/tmp") as directory:
         temporary = Path(directory)
@@ -135,6 +135,10 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                     "REPARTEE_PRESENCE_AUTO_AWAY": str(auto_away).lower(),
                 })
                 test_filter = "pinned_bouncer_presence"
+                if service:
+                    test_filter = "pinned_bouncer_service"
+                    environment["REPARTEE_BOUNCER_TEST_NETID"] = str(settings.get("network", 1))
+                    environment["REPARTEE_SOJU_TEST_DB"] = str(temporary / "main.db")
                 if filehost:
                     environment["REPARTEE_FILEHOST_TEST_CA"] = str(temporary / "ca.pem")
                     test_filter = "pinned_bouncer_filehost"
@@ -209,6 +213,11 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                 else:
                     run(["make", "test", f"TEST_ARGS={test_filter} -- --ignored --nocapture"],
                         cwd=ROOT, env=environment)
+                if service:
+                    rows = [json.loads(line) for line in events.read_text().splitlines()]
+                    forwarded = [row["service_forwarded"] for row in rows if "service_forwarded" in row]
+                    expected = [] if implementation == "soju" else [r"native '100%; test' A\B", r"browser '100%; test' A\B"]
+                    assert forwarded == expected, f"Unexpected service forwarding: {forwarded!r}"
                 if setname and implementation == "soju":
                     rows = [json.loads(line) for line in events.read_text().splitlines()]
                     if not any(row.get("realname") == "Fixture changed name %" for row in rows):
@@ -241,6 +250,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("implementation", choices=PINS)
     parser.add_argument("source", type=Path)
+    parser.add_argument("--service", action="store_true")
     parser.add_argument("--setname", action="store_true")
     parser.add_argument("--monitor", action="store_true")
     parser.add_argument("--monitor-unavailable", action="store_true")
@@ -261,11 +271,17 @@ def main():
     history_mode.add_argument("--live-history", action="store_true")
     parser.add_argument("--daemon-image")
     args = parser.parse_args()
+    if args.service and any((args.setname, args.monitor, args.monitor_unavailable, args.invites,
+                             args.network_icon, args.channel_context, args.names, args.redaction,
+                             args.server_search, args.metadata, args.certificates, args.filehost,
+                             args.oauth, args.upstream_auth, args.account_registration,
+                             args.memory_history, args.live_history)):
+        parser.error("--service is a standalone scenario")
     if args.memory_history and (args.implementation != "soju" or not args.daemon_image):
         parser.error("--memory-history requires Soju and --daemon-image")
     if args.live_history and not args.daemon_image:
         parser.error("--live-history requires --daemon-image")
-    if (args.memory_history or args.live_history) and any((args.setname, args.monitor, args.monitor_unavailable, args.invites,
+    if (args.memory_history or args.live_history) and any((args.service, args.setname, args.monitor, args.monitor_unavailable, args.invites,
                                    args.network_icon, args.channel_context, args.names, args.redaction,
                                    args.server_search, args.metadata, args.certificates, args.filehost,
                                    args.oauth, args.upstream_auth, args.account_registration)):
@@ -278,8 +294,8 @@ def main():
     head = run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True).stdout.strip()
     if head != PINS[args.implementation]:
         raise RuntimeError("Upstream checkout does not match the audited revision")
-    scenario(args.implementation, source, True, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.filehost, args.oauth, args.upstream_auth, args.account_registration, args.server_search, args.metadata, args.certificates, args.channel_context, args.network_icon, args.memory_history, args.daemon_image, args.live_history)
-    if args.implementation == "soju" and not args.setname and not args.monitor and not args.monitor_unavailable and not args.invites and not args.names and not args.redaction and not args.filehost and not args.oauth and not args.upstream_auth and not args.account_registration and not args.server_search and not args.metadata and not args.certificates and not args.channel_context and not args.network_icon and not args.memory_history and not args.live_history:
+    scenario(args.implementation, source, True, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.filehost, args.oauth, args.upstream_auth, args.account_registration, args.server_search, args.metadata, args.certificates, args.channel_context, args.network_icon, args.memory_history, args.daemon_image, args.live_history, args.service)
+    if args.implementation == "soju" and not args.setname and not args.monitor and not args.monitor_unavailable and not args.invites and not args.names and not args.redaction and not args.filehost and not args.oauth and not args.upstream_auth and not args.account_registration and not args.server_search and not args.metadata and not args.certificates and not args.channel_context and not args.network_icon and not args.memory_history and not args.live_history and not args.service:
         scenario(args.implementation, source, False)
 
 

@@ -47,6 +47,8 @@ mod invite_fixture;
 #[cfg(test)]
 mod network_icon_fixture;
 #[cfg(test)]
+mod bouncer_service_fixture;
+#[cfg(test)]
 mod channel_context_fixture;
 #[cfg(test)]
 mod names_fixture;
