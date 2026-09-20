@@ -516,12 +516,12 @@ TARGETS: more than 1000 names at one timestamp exceed the server page limit, and
 filtering hidden conversations can produce an empty page before older visible
 conversations are reached. Repartee warns when it detects a full timestamp tie,
 but an empty filtered page cannot be distinguished from an exhausted list.
-If you know a missing peer's nick, open it with `/query nick` in the web interface
-and request history by scrolling. Native terminal scrollback currently requires
-an existing message as a history anchor, so it cannot retrieve history for a
-newly opened empty query. Retrieving a known conversation cannot discover unknown
-names omitted by the server. These enumeration limits do not indicate that the
-bouncer deleted the stored messages.
+If you know a missing peer's nick, open it with `/query nick`. With
+`display.backlog_lines` enabled, terminal and web command input load that known
+conversation's recent history; scroll up to request older pages. Setting the
+backlog size to zero disables this automatic load. Retrieving a known conversation
+cannot discover unknown names omitted by the server. These enumeration limits do
+not indicate that the bouncer deleted the stored messages.
 
 ## Bouncer network identity
 
