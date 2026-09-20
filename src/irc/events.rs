@@ -4667,22 +4667,14 @@ fn server_buffer(state: &AppState, conn_id: &str) -> String {
 }
 
 /// Get the active buffer, or fall back to the server buffer.
-///
-/// Uses `as_deref()` to inspect the active buffer ID without cloning,
-/// then clones only when needed (the `Some` branch) or constructs a
-/// new ID (the `None` branch).
 fn active_or_server_buffer(state: &AppState, conn_id: &str) -> String {
-    if state.irc_reply_buffer.is_some() { return server_buffer(state, conn_id); }
-    state.active_buffer_id.as_deref().map_or_else(
-        || {
-            let label = state
-                .connections
-                .get(conn_id)
-                .map_or("Status", |c| c.label.as_str());
-            make_buffer_id(conn_id, label)
-        },
-        str::to_owned,
-    )
+    if state.irc_reply_buffer.is_some() {
+        return server_buffer(state, conn_id);
+    }
+    state.active_buffer_id.as_ref()
+        .filter(|id| state.buffers.get(*id).is_some_and(|buffer| buffer.connection_id == conn_id))
+        .cloned()
+        .unwrap_or_else(|| server_buffer(state, conn_id))
 }
 
 /// Get the buffer where WHOIS output should go.
