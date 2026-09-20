@@ -210,9 +210,14 @@ large to review, retaining the acceptance rows and dependencies.
   complete enumeration across large timestamp ties or targets filtered after
   LIMIT; these remain acceptance gaps, alongside the remaining extension matrix.
 
-Read-marker work in progress: native and web read actions resolve displayed
+Read markers merged in https://github.com/outragedevs/repartee/pull/70 after
+a clean gpt-5.6-sol medium review: native and web read actions resolve displayed
 message IDs to server timestamps; background terminal focus and history scrolling
 do not advance markers. Pending updates retry and are isolated by network scope.
 The pinned integration fixture now checks server persistence and notification of
 a second client for `draft/read-marker`. Legacy Soju `READ` has isolated protocol
 regressions. Aggregate presence remains a separate pending part of stage 6.
+
+
+Presence implementation is on `feat/bouncer-presence`. Its acceptance checks are
+tracked in `docs/validation/bouncer-presence.md`; the presence row is not complete.

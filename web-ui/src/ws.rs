@@ -3,6 +3,7 @@ use std::cell::RefCell;
 use futures::{SinkExt, StreamExt, channel::mpsc, future};
 use gloo_net::websocket::{Message, futures::WebSocket};
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::protocol::{WebCommand, WebEvent};
 use crate::state::AppState;
@@ -134,9 +135,28 @@ pub fn send_command(cmd: &WebCommand) {
     });
 }
 
+fn report_presence(state: &AppState) {
+    let present = state.connected.get_untracked() && web_sys::window().and_then(|window| window.document())
+        .is_some_and(|document| !document.hidden() && document.has_focus().unwrap_or(false));
+    send_command(&WebCommand::Presence { present });
+}
+
 /// Main WebSocket event loop — polls commands and server messages concurrently.
 async fn run_ws_loop(ws: WebSocket, state: &AppState, mut cmd_rx: mpsc::UnboundedReceiver<String>) {
     let (mut ws_tx, mut ws_rx) = ws.split();
+    let presence_state = *state;
+    let heartbeat = gloo_timers::callback::Interval::new(15_000, move || report_presence(&presence_state));
+    let presence_listener = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::Event)>::new(move |_| report_presence(&presence_state));
+    let window = web_sys::window();
+    let document = window.as_ref().and_then(web_sys::Window::document);
+    if let Some(window) = &window {
+        for event in ["focus", "blur"] {
+            let _ = window.add_event_listener_with_callback(event, presence_listener.as_ref().unchecked_ref());
+        }
+    }
+    if let Some(document) = &document {
+        let _ = document.add_event_listener_with_callback("visibilitychange", presence_listener.as_ref().unchecked_ref());
+    }
 
     loop {
         let cmd_next = cmd_rx.next();
@@ -157,7 +177,11 @@ async fn run_ws_loop(ws: WebSocket, state: &AppState, mut cmd_rx: mpsc::Unbounde
             // Incoming server message.
             future::Either::Right((Some(Ok(Message::Text(text))), _)) => {
                 match serde_json::from_str::<WebEvent>(&text) {
-                    Ok(event) => state.handle_event(event),
+                    Ok(event) => {
+                        let initialized = matches!(&event, WebEvent::SyncInit { .. });
+                        state.handle_event(event);
+                        if initialized { report_presence(state); }
+                    },
                     Err(e) => {
                         web_sys::console::warn_1(&format!("invalid WebEvent: {e}").into());
                     }
@@ -171,6 +195,15 @@ async fn run_ws_loop(ws: WebSocket, state: &AppState, mut cmd_rx: mpsc::Unbounde
             // WebSocket closed.
             future::Either::Right((None, _)) => break,
         }
+    }
+    drop(heartbeat);
+    if let Some(window) = &window {
+        for event in ["focus", "blur"] {
+            let _ = window.remove_event_listener_with_callback(event, presence_listener.as_ref().unchecked_ref());
+        }
+    }
+    if let Some(document) = &document {
+        let _ = document.remove_event_listener_with_callback("visibilitychange", presence_listener.as_ref().unchecked_ref());
     }
 }
 

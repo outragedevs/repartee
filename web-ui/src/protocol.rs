@@ -193,6 +193,7 @@ pub enum WebCommand {
     SwitchBuffer {
         buffer_id: String,
     },
+    Presence { present: bool },
     MarkRead {
         buffer_id: String,
         up_to: i64,
