@@ -643,6 +643,7 @@ fn build_batched_joins(
 #[derive(Debug)]
 pub struct IrcHandle {
     pub(crate) bouncer_identity: Option<super::bouncer::Identity>,
+    pub(crate) bouncer_provider: Option<super::bouncer::Provider>,
     pub(crate) sasl_authenticated: bool,
     pub(crate) account_registration_rules: Option<String>,
     pub conn_id: String,
@@ -687,6 +688,7 @@ impl IrcHandle {
             outgoing_handle,
             reader_handle: None,
             bouncer_identity: None,
+            bouncer_provider: None,
             account_registration_rules: None,
             sasl_authenticated: false,
         }

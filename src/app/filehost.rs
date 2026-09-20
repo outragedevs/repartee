@@ -59,7 +59,7 @@ fn prepare(app: &super::App, buffer_id: &str) -> Result<(Filehost, Credentials, 
     }
     let endpoint = conn.isupport_parsed.get("soju.im/FILEHOST").ok_or("The bouncer does not advertise FILEHOST")?;
     let host = Filehost::new(endpoint, conn.origin_config.tls).map_err(|error| error.to_string())?;
-    let credentials = Credentials::from_config(&conn.origin_config).map_err(|error| error.to_string())?;
+    let credentials = Credentials::for_bouncer(&conn.origin_config, app.irc_handles.get(&conn.id).and_then(|handle| handle.bouncer_provider)).map_err(|error| error.to_string())?;
     let result = UploadResult { buffer_id: buffer.id.clone(), connection_id: conn.id.clone(),
         scope: conn.network_key().to_string(), response: None, result: Err("Upload did not finish".into()) };
     Ok((host, credentials, result))

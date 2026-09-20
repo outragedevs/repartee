@@ -17,12 +17,30 @@ async fn pinned_bouncer_filehost() {
     app.config.general.flood_protection = false;
     let mut config: crate::config::ServerConfig = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]\nbouncer_network_id='1'").unwrap();
     config.port = std::env::var("REPARTEE_BOUNCER_TEST_PORT").unwrap().parse().unwrap();
-    config.sasl_user = Some(std::env::var("REPARTEE_BOUNCER_TEST_USER").unwrap());
-    config.sasl_pass = Some("fixture-password".into());
+    let user = std::env::var("REPARTEE_BOUNCER_TEST_USER").unwrap();
+    let provider = if std::env::var("REPARTEE_PRESENCE_PROVIDER").as_deref() == Ok("lurker") {
+        crate::irc::bouncer::Provider::Lurker
+    } else { crate::irc::bouncer::Provider::Soju };
+    let legacy = std::env::var("REPARTEE_BOUNCER_TEST_LEGACY").as_deref() == Ok("1");
+    if legacy {
+        if provider == crate::irc::bouncer::Provider::Lurker {
+            config.username = Some("unrelated-user".into());
+            config.password = Some(format!("{user}:fixture:password"));
+        } else {
+            config.bouncer_network_id = None;
+            config.username = Some(format!("{user}/fixture"));
+            config.password = Some("fixture:password".into());
+        }
+    } else {
+        config.sasl_user = Some(user.clone());
+        config.sasl_pass = Some("fixture-password".into());
+    }
     app.setup_connection("fixture", &config);
     app.start_connection_attempt("fixture", config);
     until(&mut app, |app| app.state.connections["fixture"].status == crate::state::connection::ConnectionStatus::Connected
         && app.state.connections["fixture"].isupport_parsed.get("soju.im/FILEHOST").is_some()).await;
+    assert_eq!(app.irc_handles["fixture"].bouncer_provider, Some(provider));
+    assert_eq!(app.irc_handles["fixture"].sasl_authenticated, !legacy);
     app.irc_handles["fixture"].sender().send("JOIN #upload".parse::<irc::proto::Message>().unwrap()).unwrap();
     until(&mut app, |app| app.state.buffers.contains_key("fixture/#upload")).await;
     app.state.set_active_buffer("fixture/#upload");
@@ -50,7 +68,7 @@ async fn pinned_bouncer_filehost() {
     assert_eq!(app.input.value, url);
     let conn = &app.state.connections["fixture"];
     let host = crate::filehost::Filehost::new(conn.isupport_parsed.get("soju.im/FILEHOST").unwrap(), false).unwrap();
-    let rejection = host.upload(&crate::filehost::Credentials::Basic { username: conn.origin_config.sasl_user.clone().unwrap(), password: "wrong-disposable-password".into() },
+    let rejection = host.upload(&crate::filehost::Credentials::Basic { username: user, password: "wrong-disposable-password".into() },
         "denied.txt", "text/plain", contents.to_vec()).await;
     assert!(matches!(rejection, Err(crate::filehost::Error::Http { status: 401 | 403 })));
     if let Ok(script) = std::env::var("REPARTEE_FILEHOST_BROWSER_SCRIPT") {

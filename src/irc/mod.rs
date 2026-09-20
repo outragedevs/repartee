@@ -71,6 +71,7 @@ pub enum IrcEvent {
 /// Result of `IRCv3` capability negotiation.
 struct NegotiateResult {
     bouncer_detected: bool,
+    cap_server: Option<String>,
     sasl_authenticated: bool,
     account_registration_rules: Option<String>,
     /// Capabilities successfully enabled via `CAP REQ` / `CAP ACK`.
@@ -841,6 +842,8 @@ pub async fn connect_server_with_selector(
     let mut neg = result?;
     let account_registration_rules = neg.account_registration_rules.take();
     let sasl_authenticated = neg.sasl_authenticated;
+    let bouncer_provider = bouncer_identity.as_ref().and_then(|_|
+        bouncer::Provider::detect(neg.cap_server.as_deref(), &neg.early_messages));
 
     let (tx, rx) = mpsc::channel(4096);
     let id = conn_id.to_string();
@@ -962,6 +965,7 @@ pub async fn connect_server_with_selector(
     handle.account_registration_rules = account_registration_rules;
     handle.sasl_authenticated = sasl_authenticated;
     handle.bouncer_identity = bouncer_identity;
+    handle.bouncer_provider = bouncer_provider;
     Ok((handle, rx))
 }
 
@@ -1054,6 +1058,7 @@ async fn negotiate_caps(
     // - RPL_WELCOME (001)    → non-IRCv3 that silently ignored CAP, already registered
     let mut server_caps = ServerCaps::default();
     let mut cap_supported = false;
+    let mut cap_server = None;
 
     while let Some(result) = stream.next().await {
         let msg = result?;
@@ -1082,6 +1087,9 @@ async fn negotiate_caps(
             } else {
                 field3.as_deref().unwrap_or("")
             };
+            if let Some(irc::proto::Prefix::ServerName(server)) = &msg.prefix {
+                cap_server = Some(server.clone());
+            }
             server_caps.merge(caps_str);
             if !is_continuation {
                 cap_supported = true;
@@ -1336,6 +1344,7 @@ async fn negotiate_caps(
 
     Ok(NegotiateResult {
         bouncer_detected,
+        cap_server,
         sasl_authenticated: authenticated,
         account_registration_rules: enabled_caps.contains("draft/account-registration").then(|| server_caps.value("draft/account-registration").unwrap_or("").to_string()),
         enabled_caps,
