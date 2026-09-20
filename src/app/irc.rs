@@ -986,6 +986,7 @@ impl App {
                     // Snapshot buffer count so we can detect newly created buffers
                     // and feed them with chat history from the log database.
                     let buffers_before = self.state.buffers.len();
+                    let names_request = crate::irc::names::request_after_join(&self.state, &conn_id, &msg);
                     let own_handle_before = self
                         .state
                         .connections
@@ -1007,6 +1008,14 @@ impl App {
                     // `sync_translate_from_config` re-derives the mirror from
                     // the stale key and translation stops for that
                     // conversation.
+                    if let Some(command) = names_request
+                        && let Some(handle) = self.irc_handles.get(&conn_id)
+                        && let Err(error) = handle.sender().send(command)
+                    {
+                        let label = &self.state.connections[&conn_id].label;
+                        let buffer_id = make_buffer_id(&conn_id, label);
+                        self.add_event_to_buffer(&buffer_id, format!("Could not request NAMES: {error}").replace('%', "%%"));
+                    }
                     self.drain_pending_buffer_rekeys();
                     // Drain pending web events and broadcast + auto-record mentions.
                     self.drain_pending_web_events();

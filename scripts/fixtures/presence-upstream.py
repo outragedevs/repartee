@@ -5,9 +5,10 @@ from pathlib import Path
 
 
 class PresenceServer:
-    def __init__(self, events, setname=False, monitor=False, monitor_unavailable=False, invites=False):
+    def __init__(self, events, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False):
         self.setname = setname
         self.invites = invites
+        self.names = names
         self.monitor = monitor
         self.monitor_unavailable = monitor_unavailable
         self.events = events
@@ -128,7 +129,11 @@ class PresenceServer:
                 elif command == 'JOIN' and registered and params:
                     for channel in params[0].split(','):
                         send(f':{nick}!fixture@localhost JOIN {channel}')
-                        send(f':fixture.local 353 {nick} = {channel} :{nick}')
+                        send(f':fixture.local 353 {nick} = {channel} :{nick}{" @Alice Bob" if self.names else ""}')
+                        send(f':fixture.local 366 {nick} {channel} :End of NAMES')
+                elif command == 'NAMES' and registered and self.names and params:
+                    for channel in params[0].split(','):
+                        send(f':fixture.local 353 {nick} = {channel} :{nick} @Alice Bob')
                         send(f':fixture.local 366 {nick} {channel} :End of NAMES')
                 elif command == 'QUIT':
                     break
@@ -152,8 +157,9 @@ async def main():
     parser.add_argument('--monitor', action='store_true')
     parser.add_argument('--monitor-unavailable', action='store_true')
     parser.add_argument('--invites', action='store_true')
+    parser.add_argument('--names', action='store_true')
     args = parser.parse_args()
-    fixture = PresenceServer(args.events, args.setname, args.monitor, args.monitor_unavailable, args.invites)
+    fixture = PresenceServer(args.events, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names)
     server = await asyncio.start_server(fixture.client, '127.0.0.1', 0)
     args.ready.write_text(json.dumps({'port': server.sockets[0].getsockname()[1]}))
     async with server:
