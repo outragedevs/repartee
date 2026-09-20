@@ -174,7 +174,7 @@ pub fn ServerWizard() -> impl IntoView {
                         {text_row("Channels (comma-separated)", channels)}
                         {pass_row("Server password", password)}
                         {text_row("SASL user", sasl_user)}
-                        {pass_row("SASL pass", sasl_pass)}
+                        {pass_row("SASL password/token", sasl_pass)}
                         {select_row("SASL mechanism", sasl_mechanism)}
                         {text_row("Encoding", encoding)}
                         {check_row("Autoconnect", autoconnect)}

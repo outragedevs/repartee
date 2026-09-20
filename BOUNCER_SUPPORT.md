@@ -310,3 +310,10 @@ Sol medium review round 3 and complete browser-to-provider tests for both pinned
 bouncers. Follow-up `fix/redaction-live-isupport` corrects redaction's legacy
 ISUPPORT reads, with a reproduced failure via actual 005 and passing regressions.
 See `docs/validation/redaction-live-isupport.md`; review remains required.
+
+Explicit OAUTHBEARER is implemented on `feat/bouncer-oauthbearer` with verified
+TLS, native/web configuration, and a pinned Soju OAuth-provider fixture covering
+network binding, reconnect and credential rejection. Full Sol medium reviews 1
+and 2 are clean; 2567 native and 144 web tests passed, and WASM was rebuilt.
+See `docs/validation/bouncer-oauthbearer.md`. Remaining acceptance rows, including
+upstream account operations, remain in scope.

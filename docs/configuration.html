@@ -339,6 +339,17 @@ levels = [&quot;ALL&quot;]
 </tr>
 </tbody></table>
 <p>Set <code>sasl_mechanism</code> to one of those names to pin it. A pinned mechanism the server does not offer means <strong>no SASL at all</strong>, never a quiet downgrade to a weaker one. The <code>-PLUS</code> (channel-binding) variants are not implemented and are never selected.</p>
+<p>For an OAuth-enabled Soju bouncer, explicitly select <code>sasl_mechanism = &quot;OAUTHBEARER&quot;</code>.
+Set <code>sasl_user</code> to the bouncer account name and store the access token in the
+server&#39;s <code>SERVERNAME_SASL_PASS</code> environment secret, using the same secret storage
+as SASL passwords. In either server wizard, choose OAUTHBEARER and enter the token
+in the SASL password/token field. Keep <code>tls = true</code> and <code>tls_verify = true</code>;
+connections without verified TLS are rejected before sending credentials.
+OAUTHBEARER is never selected automatically: existing passwords must not be
+interpreted as tokens. Obtain and renew the access token through your bouncer
+administrator&#39;s OAuth provider; automatic token acquisition and refresh are not
+implemented. This authenticates the bouncer account, not the upstream IRC account.
+Lurker&#39;s IRC endpoint advertises PLAIN instead, so do not select OAUTHBEARER there.</p>
 <p><code>client_cert_path</code> and <code>sasl_key_path</code> are separate keys with separate jobs: the first is presented during the TLS handshake, the second is only ever used to sign a challenge. Relative paths resolve against <code>~/.repartee/certs</code>.</p>
 <p>To use <code>EXTERNAL</code> / CertFP, set <code>tls = true</code> and point <code>client_cert_path</code> to one <strong>PEM file containing both the certificate chain (leaf first) and its unencrypted private key</strong>. PKCS#8 (<code>PRIVATE KEY</code>), PKCS#1 (<code>RSA PRIVATE KEY</code>), and SEC1 (<code>EC PRIVATE KEY</code>) keys are supported. PKCS#12 (<code>.p12</code> / <code>.pfx</code>) and encrypted private keys are not supported. The IRC connection uses rustls for this PEM identity.</p>
 <pre><code class="language-bash">mkdir -p ~/.repartee/certs

@@ -120,7 +120,7 @@ fn schema(edit: bool) -> Vec<Field> {
         text("channels", "Channels (comma-separated)", 1),
         Field { key: "password", label: "Server password", kind: FieldKind::Masked, page: 1, required: false, readonly: false },
         text("sasl_user", "SASL user", 1),
-        Field { key: "sasl_pass", label: "SASL pass", kind: FieldKind::Masked, page: 1, required: false, readonly: false },
+        Field { key: "sasl_pass", label: "SASL password/token", kind: FieldKind::Masked, page: 1, required: false, readonly: false },
         Field { key: "sasl_mechanism", label: "SASL mechanism", kind: FieldKind::Select(sasl_mechs()), page: 1, required: false, readonly: false },
         text("encoding", "Encoding", 1),
         Field { key: "autoconnect", label: "Autoconnect", kind: FieldKind::Toggle, page: 1, required: false, readonly: false },
