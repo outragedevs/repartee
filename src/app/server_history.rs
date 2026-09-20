@@ -625,9 +625,8 @@ mod tests {
     #[tokio::test]
     async fn reopening_query_reloads_history_after_pagination_exhaustion() {
         let mut app = app();
-        app.state
-            .add_buffer(Buffer::for_test("account", BufferType::Query, "peer"));
-        app.load_backlog("account/peer");
+        app.state.set_active_buffer("account/#test");
+        app.handle_submit("/query peer");
         app.state
             .connections
             .get_mut("account")
@@ -649,9 +648,8 @@ mod tests {
                 .is_before_exhausted("peer")
         );
         app.state.remove_buffer("account/peer");
-        app.state
-            .add_buffer(Buffer::for_test("account", BufferType::Query, "peer"));
-        app.load_backlog("account/peer");
+        app.state.set_active_buffer("account/#test");
+        app.handle_submit("/query peer");
         let history = &app.state.connections["account"].chathistory;
         assert!(!history.is_before_exhausted("peer"));
         assert!(history.oldest_fetched("peer").is_none());
@@ -664,14 +662,16 @@ mod tests {
         app.state
             .add_buffer(Buffer::for_test("account", BufferType::Query, "peer"));
         app.config.display.backlog_lines = 0;
-        app.load_backlog("account/peer");
+        app.state.set_active_buffer("account/#test");
+        app.handle_submit("/query peer");
         assert!(
             !app.state.connections["account"]
                 .chathistory
                 .any_in_flight("peer")
         );
         app.config.display.backlog_lines = 7;
-        app.load_backlog("account/peer");
+        app.state.set_active_buffer("account/#test");
+        app.handle_submit("/query peer");
         assert_eq!(
             app.state.connections["account"]
                 .chathistory

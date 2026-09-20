@@ -95,6 +95,18 @@ async fn verify_pages(app: &mut App) {
             .iter()
             .all(|row| row.text.starts_with("fixture-history-"))
     );
+    app.state.remove_buffer(buffer_id);
+    app.state.set_active_buffer("fixture/fixture");
+    app.handle_submit("/query history-peer");
+    assert_eq!(app.state.active_buffer_id.as_deref(), Some(buffer_id));
+    assert!(app.state.buffers[buffer_id].messages.is_empty());
+    until(app, "native query history", |app| {
+        app.state.buffers[buffer_id].messages.len() == 200
+            && !app.state.connections["fixture"]
+                .chathistory
+                .any_in_flight("history-peer")
+    })
+    .await;
     let first = app.state.buffers[buffer_id].messages.front().unwrap();
     let (before, before_message_id) = (first.timestamp.timestamp_millis(), first.id);
     let mut web = app.web_broadcaster.subscribe();

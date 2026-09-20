@@ -1092,6 +1092,9 @@ pub(crate) fn cmd_query(app: &mut App, args: &[String]) {
 
     // Switch to the query buffer
     app.state.set_active_buffer(&buffer_id);
+    if app.server_owns_buffer_history(&buffer_id) {
+        app.load_backlog(&buffer_id);
+    }
 
     // If a message was provided, send it through the outbound E2E gate —
     // same fail-closed rules as /msg and the query-buffer input path.
