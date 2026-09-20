@@ -364,6 +364,7 @@ impl App {
                 }
             }
             IrcEvent::Connected(conn_id, enabled_caps, multiline_limits) => {
+                self.reset_monitor(&conn_id);
                 self.reconnect_read_markers(&conn_id);
                 self.history_discovery.remove(&conn_id);
                 self.bouncer_networks.remove(&conn_id);
@@ -540,6 +541,7 @@ impl App {
                 // limits/ref types and could be rejected for non-membership.
             }
             IrcEvent::Disconnected(conn_id, error) => {
+                self.reset_monitor(&conn_id);
                 self.disconnect_bouncer_mutation(&conn_id);
 
                 self.history_discovery.remove(&conn_id);
@@ -768,6 +770,7 @@ impl App {
                     }
                 } else {
                     self.observe_bouncer_presence(&conn_id, &msg);
+                    if self.observe_monitor(&conn_id, &msg) { return; }
                     if self.handle_read_marker(&conn_id, &msg) {
                         return;
                     }

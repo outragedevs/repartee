@@ -5,6 +5,7 @@ pub mod chathistory;
 mod client_cert;
 pub mod events;
 pub mod setname;
+pub mod monitor;
 pub mod extban;
 pub mod flood;
 pub mod formatting;

@@ -1,6 +1,7 @@
 # SETNAME validation
 
-Status: implementation and integration checks pass; pinned review is running.
+Status: merged in PR 73 after the second pinned Sol medium review returned no
+actionable findings. Unit, browser and pinned-server integration checks pass.
 
 ## Source behavior
 

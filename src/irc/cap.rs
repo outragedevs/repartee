@@ -14,6 +14,8 @@ pub const DESIRED_CAPS: &[&str] = &[
     "account-notify",
     "chghost",
     "setname",
+    "extended-monitor",
+    "draft/extended-monitor",
     "echo-message",
     "invite-notify",
     "batch",
@@ -258,7 +260,7 @@ mod tests {
     fn negotiate_with_full_desired_list() {
         let caps = ServerCaps::parse(
             "multi-prefix extended-join ircnet.com/extended-join server-time \
-             account-tag cap-notify away-notify account-notify chghost setname \
+             account-tag cap-notify away-notify account-notify chghost setname extended-monitor draft/extended-monitor \
              echo-message invite-notify batch userhost-in-names message-tags \
              draft/multiline draft/chathistory draft/event-playback \
              sasl=PLAIN,EXTERNAL",

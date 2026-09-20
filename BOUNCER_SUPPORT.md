@@ -231,6 +231,11 @@ rejection, escaped attributes, credential references, timeout handling and web
 snapshot updates have unit and pinned-server evidence in
 `docs/validation/bouncer-network-management.md`.
 
-Stage 8 starts with SETNAME on `feat/irc-setname`. Subsequent bounded increments
-must cover dynamic capabilities/MONITOR, labeled replies, redaction, invitations,
-ISUPPORT/names and upstream account operations; no remaining row is dropped.
+Stage 8 SETNAME merged in https://github.com/outragedevs/repartee/pull/73 after
+a clean second Sol medium review. Own/peer real-name updates, initial WHO/WHOX,
+incremental JOIN and web tooltips are covered in `docs/validation/bouncer-setname.md`.
+
+The next increment is MONITOR and extended-monitor capability aliases on
+`feat/irc-monitor`. Remaining increments must still cover other dynamic capability
+behavior, labeled replies, redaction, invitations, ISUPPORT/names and upstream
+account operations; no remaining row is dropped.
