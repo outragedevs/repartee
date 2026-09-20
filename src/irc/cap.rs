@@ -32,7 +32,7 @@ pub const DESIRED_CAPS: &[&str] = &[
 ];
 
 pub fn bouncer_network_caps(server: &ServerCaps) -> Vec<String> {
-    server.negotiate(&["draft/read-marker", "soju.im/read", "draft/message-redaction", "draft/account-registration"])
+    server.negotiate(&["draft/read-marker", "soju.im/read", "draft/message-redaction", "draft/account-registration", "soju.im/search"])
 }
 
 /// Parsed representation of server-advertised capabilities from `CAP LS`.
@@ -312,5 +312,37 @@ mod tests {
             caps.value("draft/multiline"),
             Some("max-bytes=4096,max-lines=24")
         );
+    }
+}
+
+
+pub fn update_registration_caps(enabled: &mut HashSet<String>, message: &irc::proto::Message) {
+    use irc::proto::{CapSubCommand, Command};
+    let Command::CAP(_, subcommand, third, fourth) = &message.command else { return; };
+    if !matches!(subcommand, CapSubCommand::ACK | CapSubCommand::DEL) { return; }
+    for token in fourth.as_ref().or(third.as_ref()).into_iter().flat_map(|caps| caps.split_whitespace()) {
+        let name = token.trim_start_matches('-').split('=').next().unwrap_or("").to_ascii_lowercase();
+        if *subcommand == CapSubCommand::DEL || token.starts_with('-') { enabled.remove(&name); }
+        else { enabled.insert(name); }
+    }
+}
+
+#[cfg(test)]
+mod registration_update_tests {
+    use super::*;
+
+    #[test]
+    fn binding_cap_changes_are_retained_until_welcome() {
+        let mut enabled = HashSet::from(["labeled-response".into(), "batch".into()]);
+        update_registration_caps(&mut enabled, &":bouncer CAP * DEL :labeled-response".parse().unwrap());
+        assert!(!enabled.contains("labeled-response"));
+        assert!(enabled.contains("batch"));
+        update_registration_caps(&mut enabled, &":bouncer CAP * NEW :labeled-response".parse().unwrap());
+        assert!(!enabled.contains("labeled-response"));
+        update_registration_caps(&mut enabled, &":bouncer CAP * ACK :labeled-response draft/multiline=max-lines=10".parse().unwrap());
+        assert!(enabled.contains("labeled-response"));
+        assert!(enabled.contains("draft/multiline"));
+        update_registration_caps(&mut enabled, &":bouncer CAP * ACK :-labeled-response".parse().unwrap());
+        assert!(!enabled.contains("labeled-response"));
     }
 }

@@ -347,6 +347,7 @@ impl App {
             IrcEvent::HandleReady(handle) => {
                 self.upstream_auth.remove(&handle.conn_id);
                 self.account_registration.remove(&handle.conn_id);
+                self.reset_server_search(&handle.conn_id);
                 if let Some(rules) = &handle.account_registration_rules {
                     self.account_registration.insert(handle.conn_id.clone(), super::account_registration::Session::from_rules(rules));
                 }
@@ -556,6 +557,7 @@ impl App {
             IrcEvent::Disconnected(conn_id, error) => {
                 self.upstream_auth.remove(&conn_id);
                 self.account_registration.remove(&conn_id);
+                self.reset_server_search(&conn_id);
                 self.reset_monitor(&conn_id);
                 self.disconnect_bouncer_mutation(&conn_id);
 
@@ -696,7 +698,9 @@ impl App {
                             .as_ref()
                             .map_or_else(String::new, |s| s.to_str().to_string());
                         let batch_params = params.clone().unwrap_or_default();
-                        tracker.start_batch(tag, &batch_type, batch_params, msg.tags.clone());
+                        let mut opener = (*msg).clone();
+                        tracker.inherit_label(&mut opener);
+                        tracker.start_batch(tag, &batch_type, batch_params, opener.tags);
                         if let Some(identity) = redaction_ref {
                             tracker.retain_redactions(tag, &[identity]);
                         }
@@ -710,7 +714,7 @@ impl App {
                                 batch.messages.len()
                             );
                             self.receive_completed_batch(&conn_id, &batch);
-                            if let Some(label) = batch.opener_tags.as_ref().and_then(|tags| tags.iter().find(|tag| tag.0 == "label")).and_then(|tag| tag.1.as_deref()) {
+                            if batch.parent_ref().is_none() && let Some(label) = batch.opener_tags.as_ref().and_then(|tags| tags.iter().find(|tag| tag.0 == "label")).and_then(|tag| tag.1.as_deref()) {
                                 self.finish_labeled_response(&conn_id, label);
                             }
                         }

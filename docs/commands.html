@@ -1150,6 +1150,49 @@ reconnecting and deciding whether to repeat the operation.</p>
 <h2>See Also</h2>
 <p>/server, /connect, /set</p>
 </div>
+<div class="command-entry" data-command="bsearch" data-category="Connection">
+<h1>/bsearch</h1>
+<h2>Syntax</h2>
+<pre><code>/bsearch &lt;target&gt; [-from nick] [-after timestamp] [-before timestamp] [-limit 1..100] -- &lt;text&gt;
+/bsearch context &lt;row&gt;
+/bsearch cancel
+</code></pre>
+<h2>Description</h2>
+<p>Search the active bouncer network&#39;s server-owned history. Soju supports this when
+its message store provides search; Lurker does not advertise this IRC extension.
+The connection must be bound to one network. The target is a channel or peer nick.</p>
+<p><code>-after</code> and <code>-before</code> accept RFC3339 timestamps. Boundary handling is defined
+by the server store; the pinned Soju SQLite store uses exclusive bounds. <code>-from</code>
+restricts the sender. The default limit is 100; the maximum is 100. Use <code>--</code> before
+search text containing spaces or leading hyphens. Omit <code>-- &lt;text&gt;</code> to search only
+by the other selectors. Text matching is defined by the server&#39;s message store. Server-side text search
+cannot match encrypted plaintext. Readable encrypted results use the existing
+history decryption path; undecryptable ciphertext and own encrypted echoes are
+skipped, with a notice.</p>
+<p>Results appear in the read-only <code>*search*</code> buffer for that network in both the
+terminal and web client. They preserve server timestamps, senders and message IDs,
+without changing the original conversation&#39;s unread count or writing local logs.
+Each new request replaces the previous results.
+<code>context &lt;row&gt;</code> counts result rows from 1 and replaces the view with up to 50
+messages around that result, fetched using CHATHISTORY AROUND on the original
+network and target. It uses the retained message ID when the server supports it, otherwise the
+server timestamp. Context retrieval uses request labels when available. Without labels, an earlier
+history timeout requires reconnecting first so delayed replies cannot be confused
+with the new context. Results from a different account/network cannot be reused. This context remains separate from the live conversation. Closing the view discards late
+results; ordinary messages cannot be sent from this view.</p>
+<p>Only one unresolved search is allowed per connection. <code>cancel</code> stops displaying
+its results; it cannot cancel work already running on the bouncer. A timeout also
+discards late results. Wait for the terminal response or reconnect before sending
+a replacement request. A failed request is reported separately from zero matches.</p>
+<h2>Examples</h2>
+<pre><code>/bsearch #repartee -from Alice -limit 25 -- release notes
+/bsearch Alice -after 2026-01-01T00:00:00Z -- meeting
+/bsearch #repartee -before 2026-01-01T00:00:00Z
+/bsearch cancel
+</code></pre>
+<h2>See Also</h2>
+<p>/bouncer, /log</p>
+</div>
 <div class="command-entry" data-command="connect" data-category="Connection">
 <h1>/connect</h1>
 <h2>Syntax</h2>

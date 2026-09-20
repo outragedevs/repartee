@@ -101,8 +101,9 @@ impl App {
         batch: &crate::irc::batch::BatchInfo,
         clean_end: bool,
     ) {
+        if batch.batch_type == "CHATHISTORY" && self.receive_search_context(conn_id, batch, clean_end) { return; }
         match batch.batch_type.as_str() {
-            "SOJU.IM/SEARCH" => {},
+            "SOJU.IM/SEARCH" => self.receive_search_results(conn_id, batch, clean_end),
             "DRAFT/CHATHISTORY-TARGETS" if clean_end => {
                 self.receive_history_targets(conn_id, batch);
             }
@@ -149,6 +150,7 @@ impl App {
     }
 
     pub(crate) fn dispatch_live_irc_message(&mut self, conn_id: &str, msg: &::irc::proto::Message) {
+        if self.handle_server_search(conn_id, msg) { self.drain_pending_web_events(); return; }
         let previous = self.state.irc_reply_buffer.take();
         self.state.irc_reply_buffer = self.labeled_response_buffer(conn_id, msg);
         let acknowledgement = matches!(&msg.command, ::irc::proto::Command::Raw(command, _) if command.eq_ignore_ascii_case("ACK"));

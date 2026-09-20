@@ -3,6 +3,9 @@ use std::collections::{HashMap, VecDeque};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub static SEARCH_TARGET_TAG: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!("{}/search-target", crate::constants::APP_NAME));
+pub static SEARCH_SCOPE_TAG: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!("{}/search-scope", crate::constants::APP_NAME));
+
 // === Buffer Type ===
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

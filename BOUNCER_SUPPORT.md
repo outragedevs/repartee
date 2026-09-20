@@ -346,3 +346,13 @@ IRC/bouncer connections, nested and expired batches, web live delivery and norma
 message/logging non-regression. Clippy and 2586 native/144 web tests passed; full
 Sol medium review round 2 is clean. Search request/UI implementation remains
 pending; see `docs/validation/bouncer-server-search.md`.
+
+The search command/result-view increment is implemented on
+`feat/bouncer-server-search`. `/bsearch` supports Soju filters and isolated native/web
+results, with server-side AROUND context, decryption, redaction and independently
+closable views. Label correlation protects context from late ordinary history;
+unlabelled context rejects ambiguous retries until reconnect. Registration now
+retains capability withdrawals after network binding. Clippy and 2603 native/144
+web tests passed; pinned Soju plus real WebKit passed with and without labels,
+and pinned Lurker rejects the unsupported feature. Full Sol medium review round 10 is clean; see `docs/validation/bouncer-server-search.md`. Metadata,
+certificates, WebPush and all remaining acceptance rows stay in scope.

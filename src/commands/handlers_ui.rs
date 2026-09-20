@@ -444,6 +444,10 @@ fn close_one(app: &mut App, buf_id: &str, reason: Option<&str>, confirmed: bool,
     let buf_name = buf.name.clone();
     let conn_id = buf.connection_id.clone();
 
+    if buf_type == BufferType::Special && buf_name == "*search*" {
+        app.state.remove_buffer(buf_id);
+        return;
+    }
     match buf_type {
         BufferType::Mentions => {
             if !confirmed {
@@ -561,6 +565,7 @@ fn resolve_range(
                 "{C_ERR}Range {start}-{end} includes the protected Mentions window ({num}). \
                  Use {C_CMD}/wc {start}-{end} -YES{C_ERR} if you really want it gone.{C_RST}"
             )),
+            BufferType::Special if buf.name == "*search*" => None,
             BufferType::Server | BufferType::Special => {
                 let label = state
                     .connections

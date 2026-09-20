@@ -22,7 +22,7 @@ fn replace_body(message: &mut Message, text: &str) {
     message.wire_origin = None;
     message.translation_suffix_at = None;
     if let Some(tags) = &mut message.tags {
-        tags.retain(|key, _| matches!(key.as_str(), "msgid" | "time"));
+        tags.retain(|key, _| matches!(key.as_str(), "msgid" | "time") || key == super::buffer::SEARCH_TARGET_TAG.as_str() || key == super::buffer::SEARCH_SCOPE_TAG.as_str());
     }
 }
 
@@ -205,6 +205,10 @@ impl AppState {
         let identity = self.redaction_registry.redact(key, text);
         let text = identity.notice().unwrap_or_default();
         self.redact_visible_buffer(&buffer_id, id, text);
+        let copies: Vec<_> = self.buffers.values().filter(|buffer| buffer.buffer_type == BufferType::Special
+            && buffer.messages.iter().any(|message| message.redaction_ref.as_ref().is_some_and(|reference| reference.key == identity.key)))
+            .map(|buffer| buffer.id.clone()).collect();
+        for copy in copies { self.redact_visible_buffer(&copy, id, text); }
         if let Some(mention_id) = mention_id {
             self.redact_visible_buffer("_mentions", &mention_id, text);
         }

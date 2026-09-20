@@ -652,7 +652,7 @@ pub fn handle_cap_new(
         .filter(|cap| {
             (DESIRED_CAPS.iter().any(|d| d.eq_ignore_ascii_case(cap))
                 || (state.connections.get(conn_id).is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some() && !conn.origin_config.bouncer_control)
-                    && matches!(cap.as_str(), "draft/read-marker" | "soju.im/read" | "draft/message-redaction" | "draft/account-registration")))
+                    && matches!(cap.as_str(), "draft/read-marker" | "soju.im/read" | "draft/message-redaction" | "draft/account-registration" | "soju.im/search")))
                 && enabled.is_none_or(|set| !set.contains(cap.as_str()))
         })
         .cloned()
@@ -946,7 +946,7 @@ pub(super) fn message_timestamp(tags: Option<&HashMap<String, String>>) -> DateT
 /// our own echo, or a decrypt error) is skipped rather than stored: persisting
 /// it would show gibberish on scroll-up AND let it win the `@msgid` dedup over a
 /// later live plaintext row.
-fn decrypt_chathistory_text(
+pub fn decrypt_chathistory_text(
     state: &AppState,
     network: &str,
     target: &str,

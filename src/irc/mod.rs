@@ -842,6 +842,7 @@ pub async fn connect_server(
         // reads the same stream), so anything they made it send has already been
         // charged to the real counter — the mirror has to catch up on them too.
         for message in neg.early_messages {
+            if !sent_connected { cap::update_registration_caps(&mut neg.enabled_caps, &message); }
             if let Err(error) = echo.handle_inbound(&message, &echo_sender, std::time::Instant::now()) {
                 tracing::warn!("failed to send CTCP reply: {error}");
             }
@@ -874,6 +875,7 @@ pub async fn connect_server(
             let Some(result) = result else { break };
             match result {
                 Ok(message) => {
+                    if !sent_connected { cap::update_registration_caps(&mut neg.enabled_caps, &message); }
                     // The crate has just handled this message inside `poll_next`
                     // and may already have queued the autojoin
                     // batch or a NICK retry. Book them before anything else can
