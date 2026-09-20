@@ -15,6 +15,14 @@ class FaultProxy:
         self.blocked = False
         self.connections = set()
 
+    def forward(self, pair, source, data):
+        destination = pair[1] if source is pair[0] else pair[0]
+        destination.sendall(data)
+        return True
+
+    def extra_control(self, path):
+        return None
+
     def cut(self):
         with self.lock:
             self.blocked = True
@@ -52,8 +60,8 @@ class FaultProxy:
                                 data = source.recv(65536)
                                 if not data:
                                     return
-                                destination = upstream if source is self.request else self.request
-                                destination.sendall(data)
+                                if not proxy.forward(pair, source, data):
+                                    return
                     except OSError:
                         pass
                     finally:
@@ -72,8 +80,10 @@ class FaultProxy:
                         proxy.blocked = False
                     result = {'resumed': True}
                 else:
-                    self.send_error(404)
-                    return
+                    result = proxy.extra_control(self.path)
+                    if result is None:
+                        self.send_error(404)
+                        return
                 body = json.dumps(result).encode()
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
