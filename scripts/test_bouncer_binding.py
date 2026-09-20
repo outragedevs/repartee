@@ -38,6 +38,7 @@ def main():
     parser.add_argument("source", type=Path)
     parser.add_argument("--test-filter", default="pinned_bouncer_")
     parser.add_argument("--daemon-image", help="Run the real daemon/browser lifecycle fixture using this container image")
+    parser.add_argument("--target-tie", action="store_true", help="Seed 1001 conversations sharing a timestamp")
     args = parser.parse_args()
     source = args.source.resolve()
     head = run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True).stdout.strip()
@@ -54,7 +55,8 @@ def main():
                         "node", str(source / "node_modules/tsx/dist/cli.mjs"),
                         str(ROOT / "scripts/fixtures/lurker-binding.mts"), str(source), str(ready),
                     ], cwd=source, stdout=log, stderr=log,
-                        env=dict(os.environ, REPARTEE_BOUNCER_DAEMON_FIXTURE="1" if args.daemon_image else "0"))
+                        env=dict(os.environ, REPARTEE_BOUNCER_DAEMON_FIXTURE="1" if args.daemon_image else "0",
+                                 REPARTEE_BOUNCER_TARGET_TIE="1" if args.target_tie else "0"))
                     wait_ready(process, ready.exists)
                     settings = json.loads(ready.read_text())
                 else:
@@ -87,6 +89,12 @@ def main():
                                 raw = f"@time={timestamp} :history-peer!user@fixture.local PRIVMSG {recipient} :{body}"
                                 database.execute("INSERT INTO Message(target, raw, time, sender, text) VALUES (?, ?, ?, ?, ?)",
                                                  (target_id, raw, timestamp, "history-peer", body))
+                    if args.target_tie:
+                        from audit_bouncer_history_targets import seed
+                        with sqlite3.connect(temporary / "main.db") as database:
+                            database.execute("DELETE FROM Message")
+                            database.execute("DELETE FROM MessageTarget")
+                        seed(temporary / "main.db")
                     settings = {"port": port, "network": 1, "user": "fixture"}
                 environment = os.environ.copy()
                 environment.update({
@@ -97,7 +105,7 @@ def main():
                 })
                 test_args = f"{args.test_filter} -- --ignored"
                 if args.test_filter == "pinned_bouncer_":
-                    test_args += " --skip pinned_bouncer_presence --skip pinned_bouncer_network_management --skip pinned_bouncer_setname --skip pinned_bouncer_monitor --skip pinned_bouncer_no_monitor --skip pinned_bouncer_invites --skip pinned_bouncer_names --skip pinned_bouncer_channel_context --skip pinned_bouncer_network_icon"
+                    test_args += " --skip pinned_bouncer_discovery_limit --skip pinned_bouncer_presence --skip pinned_bouncer_network_management --skip pinned_bouncer_setname --skip pinned_bouncer_monitor --skip pinned_bouncer_no_monitor --skip pinned_bouncer_invites --skip pinned_bouncer_names --skip pinned_bouncer_channel_context --skip pinned_bouncer_network_icon"
                 if args.daemon_image:
                     run(["python3", str(ROOT / "scripts/test_bouncer_daemon_history.py"), args.daemon_image],
                         cwd=ROOT, env=environment)

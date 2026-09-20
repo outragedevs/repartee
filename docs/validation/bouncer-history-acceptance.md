@@ -150,3 +150,33 @@ The separate real-daemon/browser follow-up is documented in
 pagination, and fixes diagnostic-file content leaks found by that broader test.
 Its remaining limits are stated separately; this does not retroactively enlarge
 the scope of the in-process fixture above.
+
+## Timestamp-tie warning and named recovery
+
+The client now distinguishes a potentially incomplete discovery run internally
+and emits one server-buffer message when an overlapping boundary page is still
+full at a single timestamp. Native state and the web event stream carry the same
+warning. Pagination continues toward older timestamps; the warning does not
+prevent other targets from being discovered or histories from loading. A short
+overlap page or explicit `draft/chathistory-end` does not trigger this warning.
+
+Run the actual App fixture against either pinned endpoint:
+
+```sh
+python3 scripts/test_bouncer_binding.py soju /path/to/soju --target-tie --test-filter pinned_bouncer_discovery_limit
+python3 scripts/test_bouncer_binding.py lurker /path/to/lurker --target-tie --test-filter pinned_bouncer_discovery_limit
+```
+
+Both runs passed on 2026-09-20. The fixture creates 1001 targets sharing a timestamp,
+observes exactly 1000 discovered queries, checks one native/web warning, determines
+the missing name from the known fixture set, opens it with `/query`, and retrieves
+its history through the web FetchMessages path. This supplies the previously
+missing Lurker runtime reproduction as well as App-level evidence for Soju.
+The Lurker rows use the corresponding target nick as sender so private-history
+routing models real conversations correctly.
+
+This is detection and named recovery, not automatic enumeration of the missing
+name. Neither pinned TARGETS endpoint exposes a secondary cursor within one
+timestamp. The warning deliberately says conversations *may* be missing: exactly
+one full timestamp group can also be complete. Filtered-empty pages and complete
+automatic discovery remain unresolved; they are not marked complete by this PR.
