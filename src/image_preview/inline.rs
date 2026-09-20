@@ -247,6 +247,12 @@ impl InlinePreviews {
         }
     }
 
+    pub fn purge(&mut self) {
+        self.entries.clear();
+        self.direct.clear();
+        self.invalidate_layout();
+    }
+
     pub fn accept(&mut self, request: u64, result: Result<Box<DynamicImage>, String>) {
         self.pending.remove(&request);
         if let Some(entry) = self
@@ -465,6 +471,33 @@ fn crop_thumbnail(
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn redaction_purges_native_images_and_rejects_late_fetch_results() {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        for (id, status) in [
+            (1, Status::Ready { image: Box::new(thumbnail()), protocol: None }),
+            (2, Status::Loading(42)),
+        ] {
+            let key = ImageKey { buffer_id: "net/oldnick".into(), message_id: id,
+                url: "https://example.invalid/private.png".into() };
+            app.inline_previews.direct.push((key.clone(), Rect::new(0, 0, 8, 8)));
+            app.inline_previews.entries.insert(key, Entry { status, used: 0 });
+        }
+        app.inline_previews.pending.insert(42);
+        app.inline_previews.visible = true;
+        app.state.pending_web_events.push(crate::web::protocol::WebEvent::RedactMessage {
+            buffer_id: "net/newnick".into(), msgid: "opaque".into(), text: "Message deleted".into(),
+        });
+        app.drain_pending_web_events();
+        assert!(app.inline_previews.entries.is_empty());
+        assert!(app.inline_previews.direct.is_empty());
+        assert!(app.inline_previews.prepare_frame(0, false));
+        assert!(app.inline_previews.pending.contains(&42));
+        app.inline_previews.accept(42, Ok(Box::new(thumbnail())));
+        assert!(app.inline_previews.entries.is_empty());
+        assert!(app.inline_previews.pending.is_empty());
+    }
 
     #[tokio::test]
     async fn oversized_inline_frame_recovers_as_text_for_the_attachment() {

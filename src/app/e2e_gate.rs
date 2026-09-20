@@ -729,6 +729,8 @@ impl AppState {
         self.add_local_message(
             buffer_id,
             Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: chrono::Utc::now(),
@@ -900,6 +902,8 @@ impl super::App {
                     self.state.add_message(
                         echo.buffer_id,
                         Message {
+                            redaction_ref: None,
+                            redaction_msgid: None,
                             log_key: None, // live row, never read back from the log
                             id,
                             timestamp: chrono::Utc::now(),
@@ -944,6 +948,8 @@ impl super::App {
         self.state.add_local_message(
             &active_id,
             Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: chrono::Utc::now(),

@@ -30,7 +30,10 @@ impl App {
         {
             let messages = self.live_batch_messages(conn_id, batch, true);
             if !self.batch_trackers.get_mut(conn_id).is_some_and(|tracker| {
-                tracker.fold_messages(parent, messages, batch.dropped_messages)
+                let folded = tracker.fold_messages(parent, messages, batch.dropped_messages);
+                tracker.retain_redactions(parent, &batch.redaction_refs);
+                tracker.refresh_redactions(parent, &mut self.state, conn_id);
+                folded
             }) {
                 tracing::warn!(
                     conn_id,
@@ -64,11 +67,16 @@ impl App {
                 .find(|(id, reference, _)| id == &conn_id && reference == parent)
             {
                 parent_batch.extend_messages(messages, batch.dropped_messages);
+                parent_batch.retain_redactions(&batch.redaction_refs);
+                parent_batch.refresh_redactions(&mut self.state, &conn_id);
             } else if !self
                 .batch_trackers
                 .get_mut(&conn_id)
                 .is_some_and(|tracker| {
-                    tracker.fold_messages(parent, messages, batch.dropped_messages)
+                    let folded = tracker.fold_messages(parent, messages, batch.dropped_messages);
+                tracker.retain_redactions(parent, &batch.redaction_refs);
+                    tracker.refresh_redactions(parent, &mut self.state, &conn_id);
+                folded
                 })
             {
                 tracing::warn!(

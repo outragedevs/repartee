@@ -130,6 +130,8 @@ fn emit(
             highlight: false,
             event_key: None,
             event_params: None,
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             log_msg_id: None,
             log_ref_id: None,

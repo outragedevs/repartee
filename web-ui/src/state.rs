@@ -112,6 +112,8 @@ pub struct AppState {
     pub nick_lists: RwSignal<HashMap<String, Vec<WireNick>>>,
     pub nick_lists_loaded: RwSignal<HashSet<String>>,
     pub mention_count: RwSignal<u32>,
+    mention_read_through: RwSignal<u64>,
+    unread_mention_ids: RwSignal<HashSet<u64>>,
     pub session_hint: RwSignal<bool>,
     pub theme: RwSignal<String>,
     pub error: RwSignal<Option<String>>,
@@ -247,6 +249,8 @@ impl AppState {
             nick_lists: RwSignal::new(HashMap::new()),
             nick_lists_loaded: RwSignal::new(HashSet::new()),
             mention_count: RwSignal::new(0),
+            mention_read_through: RwSignal::new(0),
+            unread_mention_ids: RwSignal::new(HashSet::new()),
             session_hint: RwSignal::new(false),
             theme: RwSignal::new(saved_theme),
             error: RwSignal::new(None),
@@ -373,6 +377,8 @@ impl AppState {
                 self.buffers.set(buffers);
                 self.connections.set(connections);
                 self.mention_count.set(mention_count);
+                self.mention_read_through.set(0);
+                self.unread_mention_ids.update(HashSet::clear);
                 self.emotes_enabled.set(emotes_enabled);
                 self.authenticated.set(true);
                 self.connected.set(true);
@@ -487,6 +493,13 @@ impl AppState {
                         m.insert(buffer_id.clone(), true);
                     });
                 }
+            }
+            WebEvent::RedactMessage { buffer_id, msgid, text } => {
+                self.messages.update(|buffers| {
+                    if let Some(messages) = buffers.get_mut(&buffer_id) {
+                        redact_messages(messages, &msgid, &text);
+                    }
+                });
             }
             WebEvent::DeleteMessages {
                 buffer_id,
@@ -689,11 +702,26 @@ impl AppState {
                     }
                 });
             }
-            WebEvent::MentionAlert { .. } => {
+            WebEvent::MentionAlert { message, .. } => {
+                self.unread_mention_ids.update(|ids| { ids.insert(message.id); });
                 self.mention_count.update(|c| *c += 1);
             }
-            WebEvent::MentionsList { .. } => {
+            WebEvent::MentionsRedacted { message_ids } => {
+                let mut removed = 0u32;
+                let through = self.mention_read_through.get_untracked();
+                self.unread_mention_ids.update(|ids| {
+                    for id in message_ids {
+                        if ids.remove(&id) || id > through {
+                            removed = removed.saturating_add(1);
+                        }
+                    }
+                });
+                self.mention_count.update(|value| *value = value.saturating_sub(removed));
+            }
+            WebEvent::MentionsList { through, .. } => {
                 self.mention_count.set(0);
+                self.mention_read_through.set(through);
+                self.unread_mention_ids.update(HashSet::clear);
             }
             WebEvent::NickEvent {
                 realname,
@@ -1126,6 +1154,19 @@ fn prepend_backlog_page(page: Vec<WireMessage>, mut tail: Vec<WireMessage>) -> V
 ///
 /// Mirrors the TUI's `load_backlog` behavior — adds `─── Day, DD Mon YYYY ───`
 /// event lines at each date boundary in the message list.
+fn redact_messages(messages: &mut [WireMessage], msgid: &str, text: &str) {
+    for message in messages.iter_mut().filter(|message| message.msgid.as_deref() == Some(msgid)) {
+        message.text = text.to_string();
+        message.msg_type = "event".to_string();
+        message.nick = None;
+        message.nick_mode = None;
+        message.highlight = false;
+        message.event_key = None;
+        message.previews.clear();
+        message.orig_offset = None;
+    }
+}
+
 fn insert_date_separators(messages: Vec<WireMessage>) -> Vec<WireMessage> {
     if messages.is_empty() {
         return messages;
@@ -1157,6 +1198,7 @@ fn insert_date_separators(messages: Vec<WireMessage>) -> Vec<WireMessage> {
             if last_date.is_some_and(|d| d != date) || last_date.is_none() {
                 let formatted = date.format("%a, %d %b %Y");
                 result.push(WireMessage {
+                    msgid: None,
                     id: 0,
                     timestamp: msg.timestamp,
                     ts_ms: msg.ts_ms,
@@ -1482,10 +1524,35 @@ mod tests {
         assert!(nick_count_should_change(true, true));
     }
 
+    #[test]
+    fn redaction_matches_server_identity_after_transport_id_changes() {
+        let mut deleted = msg(500, 1);
+        deleted.msgid = Some("opaque-ID".into());
+        deleted.highlight = true;
+        deleted.orig_offset = Some(1);
+        deleted.previews.push(LinkPreview {
+            link: "https://example.org/private.png".into(),
+            kind: LinkPreviewKind::ClientDirect,
+            thumb_url: None,
+        });
+        let mut other = msg(500, 1);
+        other.msgid = Some("opaque-id".into());
+        let mut messages = vec![deleted, other];
+        redact_messages(&mut messages, "opaque-ID", "Message deleted by alice");
+        assert_eq!(messages[0].text, "Message deleted by alice");
+        assert_eq!(messages[0].id, 500);
+        assert_eq!(messages[0].msgid.as_deref(), Some("opaque-ID"));
+        assert!(messages[0].previews.is_empty());
+        assert!(!messages[0].highlight);
+        assert!(messages[0].orig_offset.is_none());
+        assert_eq!(messages[1].text, "hi");
+    }
+
     /// A stored (DB-sourced) message: `log_id == id` (the rowid), as
     /// `stored_to_wire` produces.
     fn msg(id: u64, ts: i64) -> WireMessage {
         WireMessage {
+            msgid: None,
             id,
             timestamp: ts,
             ts_ms: ts * 1000,
@@ -1702,6 +1769,7 @@ mod tests {
         // id=100). `log_id` (the rowid) is the stable identity — same
         // `Some(log_id)` means the same row, whatever the transport id says.
         let seeded = WireMessage {
+            msgid: None,
             id: 500,
             log_id: Some(100),
             ..msg(100, JUN9_12)
@@ -1811,6 +1879,26 @@ mod tests {
         assert!(is_scrollbar_press(405.0, 400.0, true));
         assert!(!is_scrollbar_press(399.0, 400.0, false));
         assert!(!is_scrollbar_press(200.0, 400.0, true));
+    }
+
+    #[test]
+    fn mention_redaction_respects_each_sessions_read_boundary() {
+        let viewed = headless_state();
+        let unread = headless_state();
+        for state in [&viewed, &unread] {
+            state.handle_event(WebEvent::MentionAlert { buffer_id: "chat".into(), message: live_msg(10, JUN9_12) });
+        }
+        viewed.handle_event(WebEvent::MentionsList { through: 15, mentions: vec![], session_id: None });
+        for state in [&viewed, &unread] {
+            state.handle_event(WebEvent::MentionAlert { buffer_id: "chat".into(), message: live_msg(20, JUN9_12) });
+            state.handle_event(WebEvent::MentionsRedacted { message_ids: vec![10] });
+            assert_eq!(state.mention_count.get_untracked(), 1);
+            state.handle_event(WebEvent::MentionsRedacted { message_ids: vec![20] });
+            assert_eq!(state.mention_count.get_untracked(), 0);
+        }
+        viewed.handle_event(WebEvent::MentionAlert { buffer_id: "chat".into(), message: live_msg(12, JUN9_12) });
+        viewed.handle_event(WebEvent::MentionsRedacted { message_ids: vec![12] });
+        assert_eq!(viewed.mention_count.get_untracked(), 0);
     }
 
 }

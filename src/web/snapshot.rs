@@ -124,6 +124,7 @@ pub fn message_to_wire(
     extractor: Option<&crate::web::preview::WebPreviewExtractor>,
 ) -> WireMessage {
     WireMessage {
+        msgid: msg.redaction_msgid.clone().or_else(|| msg.tags.as_ref().and_then(|tags| tags.get("msgid")).cloned()),
         id: msg.id,
         timestamp: msg.timestamp.timestamp(),
         ts_ms: msg.timestamp.timestamp_millis(),
@@ -150,6 +151,7 @@ pub fn stored_to_wire(
     extractor: Option<&crate::web::preview::WebPreviewExtractor>,
 ) -> WireMessage {
     WireMessage {
+        msgid: None,
         id: u64::try_from(msg.id).unwrap_or(0),
         timestamp: msg.timestamp,
         ts_ms: msg.ts_ms,
@@ -421,6 +423,8 @@ mod tests {
     #[test]
     fn message_to_wire_converts_correctly() {
         let msg = crate::state::buffer::Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: 42,
             timestamp: Utc::now(),
@@ -433,12 +437,13 @@ mod tests {
             event_params: None,
             log_msg_id: None,
             log_ref_id: None,
-            tags: None,
+            tags: Some(HashMap::from([("msgid".into(), "opaque-ID".into())])),
             wire_origin: None,
             translation_suffix_at: None,
         };
         let wire = message_to_wire(&msg, None);
         assert_eq!(wire.id, 42);
+        assert_eq!(wire.msgid.as_deref(), Some("opaque-ID"));
         assert_eq!(wire.nick.as_deref(), Some("ferris"));
         assert_eq!(wire.nick_mode.as_deref(), Some("@"));
         assert!(wire.highlight);
@@ -449,6 +454,8 @@ mod tests {
     #[test]
     fn message_to_wire_preserves_event_key() {
         let msg = crate::state::buffer::Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: 99,
             timestamp: Utc::now(),
@@ -473,6 +480,8 @@ mod tests {
     fn message_to_wire_populates_previews_when_extractor_provided() {
         let extractor = crate::web::preview::WebPreviewExtractor::new(vec![0u8; 32], 4, 200);
         let msg = crate::state::buffer::Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: 1,
             timestamp: Utc::now(),
@@ -563,6 +572,8 @@ mod tests {
         // and renders the appended original in full brightness, while the
         // TUI dims it — the documented display differing per frontend.
         let msg = Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: 1,
             timestamp: chrono::Utc::now(),
@@ -592,6 +603,8 @@ mod tests {
         // `show_original_in = false` still replaces the text, but there is
         // no appended original — so nothing to dim.
         let msg = Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: 1,
             timestamp: chrono::Utc::now(),

@@ -821,6 +821,8 @@ mod tests {
         );
         let mut queue = crate::translate::queue::TranslateQueue::new();
         let msg = crate::state::buffer::Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: 1,
             timestamp: chrono::Utc::now(),

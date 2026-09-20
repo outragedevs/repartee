@@ -93,8 +93,8 @@ impl App {
             crate::storage::query::load_recent_mentions(&db, seven_days_ago, 1000).ok()
         }).unwrap_or_default();
         rows.retain(|row| !Self::mention_uses_server_history(&row.network, &row.buffer));
-        rows.extend(self.volatile_mentions.iter().filter(|(_, mention)| mention.timestamp >= seven_days_ago)
-            .map(|(network, mention)| crate::storage::types::MentionRow {
+        rows.extend(self.volatile_mentions.iter().filter(|(_, mention, _)| mention.timestamp >= seven_days_ago)
+            .map(|(network, mention, _)| crate::storage::types::MentionRow {
                 id: mention.id,
                 timestamp: mention.timestamp,
                 network: network.clone(),
@@ -107,6 +107,9 @@ impl App {
         if rows.len() > 1000 {
             rows.drain(..rows.len() - 1000);
         }
+        let identities: std::collections::HashMap<_, _> = self.volatile_mentions.iter()
+            .filter_map(|(_, mention, identity)| identity.as_ref().map(|identity| (mention.id, identity.clone())))
+            .collect();
         for row in &mut rows {
             row.network = self.mention_target(&row.network).map_or_else(
                 || "Previous bouncer network".to_string(),
@@ -120,12 +123,19 @@ impl App {
             return;
         };
         for (i, row) in rows.iter().enumerate() {
-            buf.messages.push_back(Self::mention_row_to_message(
+            let mut message = Self::mention_row_to_message(
                 row,
                 base_id + i as u64,
                 self.config.display.nick_color_saturation,
                 self.config.display.nick_color_lightness,
-            ));
+            );
+            if let Some(identity) = identities.get(&row.id) {
+                message.redaction_ref = Some(identity.clone());
+                if let Ok(id) = serde_json::to_string(&identity.key) {
+                    message.tags = Some(std::collections::HashMap::from([("msgid".into(), id)]));
+                }
+            }
+            buf.messages.push_back(message);
         }
     }
 
@@ -152,6 +162,8 @@ impl App {
             nick_lit,
         );
         Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id,
             timestamp: ts,

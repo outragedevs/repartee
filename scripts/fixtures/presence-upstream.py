@@ -5,7 +5,8 @@ from pathlib import Path
 
 
 class PresenceServer:
-    def __init__(self, events, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False):
+    def __init__(self, events, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False):
+        self.redaction = redaction
         self.setname = setname
         self.invites = invites
         self.names = names
@@ -30,6 +31,8 @@ class PresenceServer:
         capabilities = {"setname"} if self.setname else set()
         if self.invites:
             capabilities.add("invite-notify")
+        if self.redaction:
+            capabilities.update(["draft/message-redaction", "message-tags", "echo-message"])
         if self.names:
             capabilities.update(["labeled-response", "message-tags", "batch", "echo-message"])
         if self.monitor:
@@ -68,6 +71,17 @@ class PresenceServer:
                     have_user = True
                 elif command == 'PING':
                     send(f':fixture.local PONG fixture.local :{params[-1]}')
+                elif command == 'PRIVMSG' and registered and self.redaction and params == ['FixtureControl', 'redaction-message']:
+                    send('@msgid=upstream-redaction :Alice!peer@fixture.local PRIVMSG #redaction :fixture secret body')
+                elif command == 'REDACT' and registered and self.redaction and len(params) >= 2:
+                    with self.events.open('a') as output:
+                        output.write(json.dumps({'redact': params}) + '\n')
+                    if len(params) > 2 and params[2] == 'denied':
+                        label = f'@label={request_label} ' if request_label else ''
+                        send(f'{label}:fixture.local FAIL REDACT REDACT_FORBIDDEN {params[0]} {params[1]} :fixture denied deletion')
+                    else:
+                        reason = f' :{params[2]}' if len(params) > 2 else ''
+                        send(f':{nick}!fixture@localhost REDACT {params[0]} {params[1]}{reason}')
                 elif command == 'SETNAME' and registered and self.setname and params:
                     with self.events.open('a') as output:
                         output.write(json.dumps({'connection': connection, 'realname': params[0]}) + '\n')
@@ -172,8 +186,9 @@ async def main():
     parser.add_argument('--monitor-unavailable', action='store_true')
     parser.add_argument('--invites', action='store_true')
     parser.add_argument('--names', action='store_true')
+    parser.add_argument('--redaction', action='store_true')
     args = parser.parse_args()
-    fixture = PresenceServer(args.events, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names)
+    fixture = PresenceServer(args.events, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction)
     server = await asyncio.start_server(fixture.client, '127.0.0.1', 0)
     args.ready.write_text(json.dumps({'port': server.sockets[0].getsockname()[1]}))
     async with server:

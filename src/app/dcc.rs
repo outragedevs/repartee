@@ -155,6 +155,8 @@ impl App {
                 self.state.add_message(
                     &buffer_id,
                     Message {
+                        redaction_ref: None,
+                        redaction_msgid: None,
                         log_key: None,
                         id: msg_id,
                         timestamp: Utc::now(),
@@ -208,6 +210,8 @@ impl App {
                     self.state.add_message_with_activity(
                         &buffer_id,
                         Message {
+                            redaction_ref: None,
+                            redaction_msgid: None,
                             log_key: None,
                             id: msg_id,
                             timestamp: Utc::now(),
@@ -245,6 +249,8 @@ impl App {
                 self.state.add_message_with_activity(
                     &buffer_id,
                     Message {
+                        redaction_ref: None,
+                        redaction_msgid: None,
                         log_key: None,
                         id: msg_id,
                         timestamp: Utc::now(),
@@ -291,6 +297,8 @@ impl App {
                     self.state.add_message(
                         &buffer_id,
                         Message {
+                            redaction_ref: None,
+                            redaction_msgid: None,
                             log_key: None,
                             id: msg_id,
                             timestamp: Utc::now(),

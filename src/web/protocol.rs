@@ -78,6 +78,11 @@ pub enum WebEvent {
     /// `NewMessage`, so clearing it server-side alone leaves the client showing
     /// BOTH the placeholder and the decrypted `InsertMessage` until a full
     /// resync. This event lets the client drop the stale placeholder in place.
+    RedactMessage {
+        buffer_id: String,
+        msgid: String,
+        text: String,
+    },
     DeleteMessages {
         buffer_id: String,
         message_ids: Vec<u64>,
@@ -150,7 +155,10 @@ pub enum WebEvent {
         session_id: Option<String>,
     },
     /// Response to `FetchMentions` (targeted to requesting session).
+    MentionsRedacted { message_ids: Vec<u64> },
     MentionsList {
+        #[serde(default)]
+        through: u64,
         mentions: Vec<WireMention>,
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
@@ -374,6 +382,8 @@ pub struct ConnectionMeta {
 /// Wire-format message for transport over WebSocket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub msgid: Option<String>,
     pub id: u64,
     pub timestamp: i64,
     /// Full-millisecond `@time`. `timestamp` is only whole seconds, which is too
@@ -428,6 +438,8 @@ pub struct WireNick {
 /// Wire-format mention entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireMention {
+    #[serde(skip)]
+    pub source_message_id: u64,
     pub id: i64,
     pub timestamp: i64,
     pub buffer_id: String,
@@ -509,6 +521,7 @@ mod tests {
     #[test]
     fn wire_message_roundtrip() {
         let msg = WireMessage {
+            msgid: None,
             id: 42,
             timestamp: 1_710_000_000,
             ts_ms: 1_710_000_000_500,

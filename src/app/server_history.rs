@@ -354,6 +354,7 @@ mod tests {
         assert_eq!(app.pending_history_pages.len(), 1);
         let batch = crate::irc::batch::BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".into(),
             params: vec!["#test".into()],
             started_at: Instant::now(),
@@ -465,6 +466,7 @@ mod tests {
         assert!(web.try_recv().is_err());
         let batch = crate::irc::batch::BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".into(),
             params: vec!["#test".into()],
             started_at: Instant::now(),
@@ -753,6 +755,7 @@ mod tests {
         );
         let batch = crate::irc::batch::BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".into(),
             params: vec!["#test".into()],
             started_at: Instant::now(),
@@ -840,6 +843,7 @@ mod tests {
         app.state.collapse_buffer_backlog("account/#test");
         let batch = crate::irc::batch::BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".into(),
             params: vec!["#test".into()],
             started_at: Instant::now(),
@@ -911,6 +915,7 @@ mod tests {
             .clone();
         let batch = crate::irc::batch::BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".into(),
             params: vec!["#test".into()],
             started_at: Instant::now(),
