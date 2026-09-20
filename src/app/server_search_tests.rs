@@ -432,3 +432,89 @@ async fn private_channel_context_search_results_match_only_the_requested_channel
         assert!(app.state.buffers["first/#room"].messages.is_empty());
     }
 }
+
+fn range(app: &mut super::super::App) {
+    command(app, &["between", "#room", "2024-01-01T00:00:00Z", "2024-01-01T00:00:10Z", "3"].map(str::to_string));
+}
+
+#[tokio::test]
+async fn bounded_history_is_available_without_search_and_discards_cancelled_or_outside_rows() {
+    let (mut app, sender) = app();
+    let conn = app.state.connections.get_mut("first").unwrap();
+    conn.enabled_caps.remove(CAP);
+    conn.enabled_caps.remove("labeled-response");
+    conn.enabled_caps.insert("draft/chathistory".into());
+    conn.isupport_parsed.parse_tokens(&["CHATHISTORY=2", "MSGREFTYPES=timestamp"]);
+    let (tx, mut logs) = tokio::sync::mpsc::channel(16);
+    app.state.log_tx = Some(tx);
+    range(&mut app);
+    assert!(sender.captured()[0].to_string().contains("CHATHISTORY BETWEEN #room timestamp=2024-01-01T00:00:00.000Z timestamp=2024-01-01T00:00:10.000Z 2"));
+    assert_eq!(app.state.connections["first"].chathistory.in_flight_direction("#room"), Some(crate::irc::chathistory::Direction::Between));
+    range(&mut app);
+    assert_eq!(sender.captured().len(), 1);
+    receive(&mut app, "first", ":server BATCH +range chathistory #room");
+    receive(&mut app, "first", "@batch=range;time=2024-01-01T00:00:01Z :Alice!u@h PRIVMSG #room :inside");
+    receive(&mut app, "first", ":server BATCH -range");
+    assert_eq!(app.state.buffers["first/*search*"].messages.back().unwrap().text, "inside");
+    assert!(app.state.buffers["first/#room"].messages.is_empty());
+    range(&mut app);
+    command(&mut app, &["cancel".into()]);
+    receive(&mut app, "first", ":server BATCH +cancelled chathistory #room");
+    receive(&mut app, "first", "@batch=cancelled;time=2024-01-01T00:00:01Z :Alice!u@h PRIVMSG #room :cancelled");
+    receive(&mut app, "first", ":server BATCH -cancelled");
+    assert!(!app.server_search.contains_key("first"));
+    assert!(!app.state.buffers["first/*search*"].messages.iter().any(|row| row.nick.is_some()));
+    range(&mut app);
+    receive(&mut app, "first", ":server BATCH +outside chathistory #room");
+    receive(&mut app, "first", "@batch=outside;time=2024-01-01T00:00:10Z :Alice!u@h PRIVMSG #room :outside");
+    receive(&mut app, "first", ":server BATCH -outside");
+    assert!(app.state.buffers["first/*search*"].messages.back().unwrap().text.contains("exceeded the requested bounds"));
+    assert!(logs.try_recv().is_err());
+    range(&mut app);
+    receive(&mut app, "first", "FAIL CHATHISTORY INVALID_PARAMS BETWEEN :rejected");
+    assert!(!app.server_search.contains_key("first"));
+    assert!(!app.state.connections["first"].chathistory.any_in_flight("#room"));
+}
+
+#[tokio::test]
+async fn bounded_history_rejects_an_oversized_labelled_request_before_tracking() {
+    let (mut app, sender) = app();
+    app.state.connections.get_mut("first").unwrap().enabled_caps.insert("draft/chathistory".into());
+    command(&mut app, &["between".into(), "x".repeat(390), "2024-01-01T00:00:00Z".into(), "2024-01-01T00:00:10Z".into()]);
+    assert!(sender.captured().is_empty());
+    assert!(!app.server_search.contains_key("first"));
+    assert_eq!(app.state.connections["first"].chathistory.pending_count(), 0);
+}
+
+#[tokio::test]
+async fn bounded_history_completes_the_original_casemapped_target_key() {
+    let (mut app, sender) = app();
+    let conn = app.state.connections.get_mut("first").unwrap();
+    conn.enabled_caps.insert("draft/chathistory".into());
+    conn.enabled_caps.remove("labeled-response");
+    conn.isupport_parsed.parse_tokens(&["CASEMAPPING=rfc1459"]);
+    let args = ["between", "#foo[", "2024-01-01T00:00:00Z", "2024-01-01T00:00:10Z"].map(str::to_string);
+    command(&mut app, &args);
+    assert_eq!(app.state.connections["first"].chathistory.pending_count(), 1);
+    receive(&mut app, "first", ":server BATCH +range chathistory #foo{");
+    receive(&mut app, "first", "@batch=range;time=2024-01-01T00:00:01Z :Alice!u@h PRIVMSG #foo{ :inside");
+    receive(&mut app, "first", ":server BATCH -range");
+    assert_eq!(app.state.connections["first"].chathistory.pending_count(), 0);
+    assert_eq!(app.state.buffers["first/*search*"].messages.back().unwrap().text, "inside");
+    command(&mut app, &args);
+    assert_eq!(sender.captured().len(), 2);
+}
+
+#[tokio::test]
+async fn bounded_history_honors_explicit_reference_types() {
+    let (mut app, sender) = app();
+    let conn = app.state.connections.get_mut("first").unwrap();
+    conn.enabled_caps.insert("draft/chathistory".into());
+    conn.isupport_parsed.parse_tokens(&["MSGREFTYPES=msgid"]);
+    range(&mut app);
+    assert!(sender.captured().is_empty());
+    assert!(!app.server_search.contains_key("first"));
+    app.state.connections.get_mut("first").unwrap().isupport_parsed.parse_tokens(&["MSGREFTYPES=msgid,timestamp"]);
+    range(&mut app);
+    assert_eq!(sender.captured().len(), 1);
+}

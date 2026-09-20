@@ -628,7 +628,7 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
             "bsearch",
             CommandDef {
                 handler: crate::app::server_search::command,
-                description: "Search history on the active bouncer network",
+                description: "Search or retrieve bounded history on the active bouncer network",
                 aliases: &[],
                 category: CommandCategory::Connection,
             },

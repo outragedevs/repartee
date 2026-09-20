@@ -1228,6 +1228,7 @@ reconnecting and deciding whether to repeat the operation.</p>
 <h1>/bsearch</h1>
 <h2>Syntax</h2>
 <pre><code>/bsearch &lt;target&gt; [-from nick] [-after timestamp] [-before timestamp] [-limit 1..100] -- &lt;text&gt;
+/bsearch between &lt;target&gt; &lt;first RFC3339 time&gt; &lt;last RFC3339 time&gt; [1..1000]
 /bsearch context &lt;row&gt;
 /bsearch cancel
 </code></pre>
@@ -1266,6 +1267,11 @@ a replacement request. A failed request is reported separately from zero matches
 </code></pre>
 <h2>See Also</h2>
 <p>/bouncer, /log</p>
+<h2>Bounded history</h2>
+<p><code>/bsearch between</code> retrieves messages strictly between two timestamps. It works in the terminal and web command input, including on bouncers without <code>soju.im/search</code>. Use ascending bounds for the earliest messages in the interval or descending bounds for the newest; results are displayed oldest-first. The default limit is 100 and the maximum accepted input is 1000, clamped to the server limit.</p>
+<pre><code>/bsearch between Alice 2024-01-01T00:00:10Z 2024-01-01T00:00:20Z 50
+</code></pre>
+<p>The results use the temporary search view and are not written to local history. <code>/bsearch cancel</code> stops displaying the pending response; wait for its terminal reply or reconnect before starting another request. A timed-out unlabelled history request requires reconnecting before a new range request, so delayed replies cannot be mistaken for new results.</p>
 </div>
 <div class="command-entry" data-command="connect" data-category="Connection">
 <h1>/connect</h1>
