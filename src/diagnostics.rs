@@ -6,7 +6,10 @@ pub struct IrcWireFilter;
 
 fn permitted(metadata: &Metadata<'_>) -> bool {
     *metadata.level() != tracing::Level::TRACE
-        || !(metadata.target() == "irc::client" || metadata.target().starts_with("irc::client::"))
+        || !["irc::client", "irc_repartee::client"].iter().any(|target| {
+            metadata.target() == *target
+                || metadata.target().strip_prefix(target).is_some_and(|suffix| suffix.starts_with("::"))
+        })
 }
 
 impl<S: Subscriber> Filter<S> for IrcWireFilter {
@@ -49,7 +52,7 @@ mod tests {
         let writer = Capture(bytes.clone());
         let subscriber = tracing_subscriber::registry()
             .with(tracing_subscriber::EnvFilter::new(
-                "trace,irc::client=trace,irc::client::transport=trace",
+                "trace,irc::client=trace,irc::client::transport=trace,irc_repartee::client=trace,irc_repartee::client::transport=trace",
             ))
             .with(
                 tracing_subscriber::fmt::layer()
@@ -62,12 +65,18 @@ mod tests {
             log::trace!(target: "irc::client", "[SENT] BOUNCER CHANGENETWORK 1 pass=fixture-private-password");
             log::trace!(target: "irc::client::transport", "[SEND] BOUNCER CHANGENETWORK 1 pass=fixture-private-password");
             tracing::trace!(target: "irc::client", "fixture-private-password");
+            log::trace!(target: "irc_repartee::client", "[SENT] WEBPUSH REGISTER synthetic-endpoint auth=synthetic-push-secret");
+            log::trace!(target: "irc_repartee::client::transport", "[SEND] WEBPUSH REGISTER synthetic-endpoint auth=synthetic-push-secret");
+            tracing::trace!(target: "irc_repartee::client", "synthetic-push-secret");
             log::debug!(target: "irc::client", "flood estimate updated");
             tracing::warn!("connection failed");
         });
         let output = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
         assert!(!output.contains("fixture-private-password"));
         assert!(!output.contains("BOUNCER"));
+        assert!(!output.contains("synthetic-push-secret"));
+        assert!(!output.contains("synthetic-endpoint"));
+        assert!(!output.contains("WEBPUSH"));
         assert!(output.contains("flood estimate updated"));
         assert!(output.contains("connection failed"));
     }

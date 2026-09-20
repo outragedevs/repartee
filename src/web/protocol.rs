@@ -11,6 +11,14 @@ const fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WebEvent {
+    WebPush {
+        connection_id: String,
+        request_id: String,
+        session_id: String,
+        status: crate::irc::webpush::Status,
+        scope: Option<String>,
+        vapid: Option<String>,
+    },
     /// Initial state sync on WebSocket connect.
     SyncInit {
         buffers: Vec<BufferMeta>,
@@ -245,6 +253,7 @@ pub enum WebEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WebCommand {
+    WebPush(Box<crate::irc::webpush::WebRequest>),
     #[serde(skip)]
     UploadFile { submission: std::sync::Arc<std::sync::Mutex<Option<super::upload::Submission>>> },
     /// Send a message to a buffer (plain text or /command).

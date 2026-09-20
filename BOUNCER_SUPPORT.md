@@ -388,3 +388,18 @@ refuses the unavailable extension. Clippy has no project warnings; 2640 native
 and 145 web tests pass. Full Sol medium review round 4 is clean. See
 `docs/validation/bouncer-client-certificates.md`. WebPush and all remaining
 full-matrix acceptance rows remain required for goal completion.
+
+
+The WebPush backend increment on `feat/bouncer-webpush-protocol` adds a structured,
+session-targeted Get/Register/Unregister API for verified TLS and authenticated
+bound-network connections. Account/network scope, VAPID, key validation, serialized
+mutations and acknowledgment barriers prevent false success or cross-session
+responses. Control connections cannot register subscriptions that would never
+receive network messages. Raw IRC TRACE suppression covers the actual fork targets.
+Pinned unmodified Soju delivers an actual upstream private message to a disposable
+HTTPS receiver that verifies VAPID and decrypts aes128gcm. Reconnect persistence,
+repeat operations and expired endpoints are covered. Clippy has no project warnings;
+2652 native and 145 web tests pass. Full Sol medium review round 4 is clean.
+See `docs/validation/bouncer-webpush.md`. Browser permission UI, service workers,
+notification display/clicks, renewal and real browser delivery remain required;
+this backend does not complete WebPush or the overall acceptance matrix.

@@ -351,6 +351,7 @@ impl App {
                 self.reset_server_search(&handle.conn_id);
                 self.bouncer_metadata.remove(&handle.conn_id);
                 self.bouncer_certificates.remove(&handle.conn_id);
+                self.cancel_bouncer_webpush(&handle.conn_id);
                 if let Some(rules) = &handle.account_registration_rules {
                     self.account_registration.insert(handle.conn_id.clone(), super::account_registration::Session::from_rules(rules));
                 }
@@ -564,6 +565,7 @@ impl App {
                 self.reset_server_search(&conn_id);
                 self.bouncer_metadata.remove(&conn_id);
                 self.bouncer_certificates.remove(&conn_id);
+                self.cancel_bouncer_webpush(&conn_id);
                 self.reset_monitor(&conn_id);
                 self.disconnect_bouncer_mutation(&conn_id);
 
@@ -626,6 +628,7 @@ impl App {
                 if self.handle_bouncer_network_message(&conn_id, &msg) {
                     return;
                 }
+                if self.handle_bouncer_webpush(&conn_id, &msg) { return; }
                 if self.handle_bouncer_certificates(&conn_id, &msg) { return; }
                 if self.finish_metadata_operation(&conn_id, &msg) { return; }
                 // Intercept PONG to update lag measurement
@@ -694,6 +697,7 @@ impl App {
                     self.tick_labels();
                     self.tick_bouncer_metadata();
                     self.tick_bouncer_certificates();
+                    self.tick_bouncer_webpush();
                 }
 
                 // --- IRCv3 batch interception ---
