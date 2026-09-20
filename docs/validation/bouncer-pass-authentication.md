@@ -55,6 +55,6 @@ recovered from a local archive. This is an App reconstruction test, not two OS
 processes, and the live-message inputs in this fixture are controlled App events.
 
 TLS uses the existing verified transport settings; these loopback acceptance
-runs do not prove TLS rejection. G2 remains open for actual untrusted/wrong-host
-TLS checks and legacy username/network selector behavior with correct history
-ownership. This change does not claim those separate paths are complete.
+runs do not prove TLS rejection. The separate [TLS acceptance](bouncer-tls-validation.md) verifies untrusted/wrong-host
+rejection. G2 remains open for legacy username/network selector behavior with
+correct history ownership and the account-scope continuity noted above. This change does not claim those separate paths are complete.

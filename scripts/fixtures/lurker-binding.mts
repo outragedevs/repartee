@@ -26,6 +26,6 @@ for (let index = 0; index < (tie ? 1 : 300); index += 1) {
   });
 }
 }
-const harness = await harnessModule.startHarness();
+const harness = await harnessModule.startHarness({ tls: process.env.REPARTEE_BOUNCER_TLS_FIXTURE === '1' });
 fs.writeFileSync(readyFile, JSON.stringify({ port: harness.port, network: account.network.id, user: account.user.username }));
 process.on('SIGTERM', () => { harness.stop(); process.exit(0); });

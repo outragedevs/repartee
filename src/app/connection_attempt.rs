@@ -46,7 +46,7 @@ impl super::App {
                     let _ = tx
                         .send(wrap(IrcEvent::Disconnected(
                             connection_id.clone(),
-                            Some(error.to_string()),
+                            Some(format!("{error:#}")),
                         )))
                         .await;
                 }
