@@ -703,6 +703,7 @@ fn process_netjoin_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo)
             state.add_nick(
                 &buffer_id,
                 NickEntry {
+                    realname: None,
                     nick: nick.clone(),
                     prefix: String::new(),
                     modes: String::new(),
@@ -938,6 +939,7 @@ mod tests {
 
         // Set up connection and channel buffer with users
         state.add_connection(crate::state::connection::Connection {
+            own_realname: None,
             id: conn_id.to_string(),
             label: "Test".to_string(),
             network_scope: None,
@@ -996,6 +998,7 @@ mod tests {
         state.add_nick(
             &buf_id,
             crate::state::buffer::NickEntry {
+                realname: None,
                 nick: "alice".to_string(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -1008,6 +1011,7 @@ mod tests {
         state.add_nick(
             &buf_id,
             crate::state::buffer::NickEntry {
+                realname: None,
                 nick: "bob".to_string(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -1194,6 +1198,7 @@ mod tests {
         let mut state = AppState::new();
         state.log_tx = Some(tx);
         state.add_connection(crate::state::connection::Connection {
+            own_realname: None,
             id: conn_id.to_string(),
             label: "libera".to_string(),
             network_scope: None,
@@ -1249,6 +1254,7 @@ mod tests {
         state.add_nick(
             &buf_id,
             NickEntry {
+                realname: None,
                 nick: "alice".to_string(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -2139,11 +2145,13 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines)]
     fn netsplit_batch_removes_nicks_case_insensitive() {
         let mut state = AppState::new();
         let conn_id = "test";
 
         state.add_connection(crate::state::connection::Connection {
+            own_realname: None,
             id: conn_id.to_string(),
             label: "Test".to_string(),
             network_scope: None,
@@ -2202,6 +2210,7 @@ mod tests {
         state.add_nick(
             &buf_id,
             NickEntry {
+                realname: None,
                 nick: "Alice".to_string(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -2214,6 +2223,7 @@ mod tests {
         state.add_nick(
             &buf_id,
             NickEntry {
+                realname: None,
                 nick: "BOB".to_string(),
                 prefix: String::new(),
                 modes: String::new(),

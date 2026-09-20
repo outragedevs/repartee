@@ -1,6 +1,7 @@
 # Bouncer network management validation
 
-Status: implementation and first integration checks complete; review in progress.
+Status: merged in PR 72 after the second pinned Sol medium review returned no
+actionable findings. Unit and pinned-server integration checks pass.
 
 ## Audited behavior
 

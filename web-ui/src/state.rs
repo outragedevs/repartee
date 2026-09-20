@@ -696,6 +696,7 @@ impl AppState {
                 self.mention_count.set(0);
             }
             WebEvent::NickEvent {
+                realname,
                 buffer_id,
                 kind,
                 nick,
@@ -715,6 +716,7 @@ impl AppState {
                         if !list.iter().any(|n| n.nick == nick) {
                             inserted = true;
                             list.push(WireNick {
+                                realname,
                                 nick: nick.clone(),
                                 prefix: prefix.unwrap_or_default(),
                                 modes: modes.unwrap_or_default(),
@@ -782,9 +784,9 @@ impl AppState {
                     self.nick_lists.update(|lists| {
                         if let Some(list) = lists.get_mut(&buffer_id)
                             && let Some(entry) = list.iter_mut().find(|n| n.nick == nick)
-                            && let Some(a) = away
                         {
-                            entry.away = a;
+                            if let Some(a) = away { entry.away = a; }
+                            if let Some(realname) = realname { entry.realname = Some(realname); }
                         }
                     });
                 }

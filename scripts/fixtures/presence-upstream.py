@@ -5,7 +5,8 @@ from pathlib import Path
 
 
 class PresenceServer:
-    def __init__(self, events):
+    def __init__(self, events, setname=False):
+        self.setname = setname
         self.events = events
         self.next_connection = 0
 
@@ -40,9 +41,10 @@ class PresenceServer:
                 if command == 'CAP' and params:
                     if params[0].upper() == 'LS':
                         negotiating = True
-                        send(f':fixture.local CAP {nick} LS :')
+                        send(f':fixture.local CAP {nick} LS :{"setname" if self.setname else ""}')
                     elif params[0].upper() == 'REQ':
-                        send(f':fixture.local CAP {nick} NAK :{params[-1]}')
+                        reply = 'ACK' if self.setname and params[-1] == 'setname' else 'NAK'
+                        send(f':fixture.local CAP {nick} {reply} :{params[-1]}')
                     elif params[0].upper() == 'END':
                         negotiating = False
                 elif command == 'NICK' and params:
@@ -51,6 +53,10 @@ class PresenceServer:
                     have_user = True
                 elif command == 'PING':
                     send(f':fixture.local PONG fixture.local :{params[-1]}')
+                elif command == 'SETNAME' and registered and self.setname and params:
+                    with self.events.open('a') as output:
+                        output.write(json.dumps({'connection': connection, 'realname': params[0]}) + '\n')
+                    send(f':{nick}!fixture@localhost SETNAME :{params[0]}')
                 elif command == 'AWAY' and registered:
                     away = params[0] if params else None
                     self.record(connection, nick, away)
@@ -79,8 +85,9 @@ async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('ready', type=Path)
     parser.add_argument('events', type=Path)
+    parser.add_argument('--setname', action='store_true')
     args = parser.parse_args()
-    fixture = PresenceServer(args.events)
+    fixture = PresenceServer(args.events, args.setname)
     server = await asyncio.start_server(fixture.client, '127.0.0.1', 0)
     args.ready.write_text(json.dumps({'port': server.sockets[0].getsockname()[1]}))
     async with server:

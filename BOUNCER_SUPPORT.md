@@ -225,5 +225,12 @@ fixtures pass for Lurker and Soju with AutoAway enabled and disabled. Validation
 and the remaining browser focus-delivery gap are recorded in
 `docs/validation/bouncer-presence.md`; this does not close the full matrix.
 
-Soju network management is next on `feat/soju-network-management`, with source
-findings and acceptance cases in `docs/validation/bouncer-network-management.md`.
+Soju network management merged in https://github.com/outragedevs/repartee/pull/72
+after a clean second Sol medium review. Add/change/delete operations, Lurker
+rejection, escaped attributes, credential references, timeout handling and web
+snapshot updates have unit and pinned-server evidence in
+`docs/validation/bouncer-network-management.md`.
+
+Stage 8 starts with SETNAME on `feat/irc-setname`. Subsequent bounded increments
+must cover dynamic capabilities/MONITOR, labeled replies, redaction, invitations,
+ISUPPORT/names and upstream account operations; no remaining row is dropped.

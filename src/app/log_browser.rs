@@ -88,6 +88,7 @@ impl App {
             let conn_id = format!("{}{net}", Self::LOG_CONN_PREFIX);
             let net_label = label_for(net);
             self.state.add_connection(Connection {
+                own_realname: None,
                 id: conn_id.clone(),
                 label: net_label.clone(),
                 network_scope: Some(net.clone()),

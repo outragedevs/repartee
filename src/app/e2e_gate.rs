@@ -1111,6 +1111,7 @@ mod tests {
     fn make_state_with_manager() -> crate::state::AppState {
         let mut state = crate::state::AppState::new();
         state.add_connection(crate::state::connection::Connection {
+            own_realname: None,
             id: "test".to_string(),
             label: "TestServer".to_string(),
             network_scope: None,
@@ -1471,6 +1472,7 @@ mod tests {
         buf.users.insert(
             "bob".to_string(),
             crate::state::buffer::NickEntry {
+                realname: None,
                 nick: "bob".to_string(),
                 prefix: String::new(),
                 modes: String::new(),
@@ -1600,6 +1602,7 @@ mod tests {
         buf.users.insert(
             "carol".to_string(),
             crate::state::buffer::NickEntry {
+                realname: None,
                 nick: "carol".to_string(),
                 prefix: String::new(),
                 modes: String::new(),

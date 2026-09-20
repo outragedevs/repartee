@@ -1234,6 +1234,7 @@ impl App {
     fn create_default_status(state: &mut AppState) {
         let buf_id = make_buffer_id(Self::DEFAULT_CONN_ID, "Status");
         state.add_connection(Connection {
+            own_realname: None,
             id: Self::DEFAULT_CONN_ID.to_string(),
             label: "Status".to_string(),
             network_scope: None,

@@ -94,6 +94,7 @@ mod tests {
 
     fn make_nick(nick: &str, prefix: &str) -> NickEntry {
         NickEntry {
+            realname: None,
             nick: nick.to_string(),
             prefix: prefix.to_string(),
             modes: String::new(),
