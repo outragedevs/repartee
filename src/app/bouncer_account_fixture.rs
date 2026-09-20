@@ -11,13 +11,22 @@ struct Account {
 }
 
 async fn until(app: &mut App, context: &str, predicate: impl Fn(&App) -> bool + Send + Sync) {
+    until_with_reconnect(app, context, predicate, false).await;
+}
+
+async fn until_with_reconnect(app: &mut App, context: &str, predicate: impl Fn(&App) -> bool + Send + Sync, reconnect: bool) {
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             while let Ok(event) = app.irc_rx.try_recv() { app.handle_irc_event(event); }
+            app.tick_bouncer_presence();
+            app.tick_bouncer_metadata();
+            app.drain_pending_web_events();
             if predicate(app) { return; }
+            if reconnect { app.check_reconnects(); }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.unwrap_or_else(|_| panic!("account matrix timed out: {context}"));
+    }).await.unwrap_or_else(|_| panic!("account matrix timed out: {context}; nicks: {:?}",
+        app.state.connections.iter().map(|(id, conn)| (id, &conn.nick)).collect::<Vec<_>>()));
 }
 
 fn children(app: &App, parent: &str) -> Vec<String> {
@@ -46,7 +55,7 @@ async fn pinned_bouncer_account_matrix() {
     app.state.log_tx = Some(log_tx);
     for (index, account) in accounts.iter().enumerate() {
         let mut config: crate::config::ServerConfig = toml::from_str(
-            "label='Same account label'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=['#must-not-autojoin']\nbouncer_control=true",
+            "label='Same account label'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=['#must-not-autojoin']\nbouncer_control=true\nreconnect_delay=1",
         ).unwrap();
         config.port = std::env::var("REPARTEE_BOUNCER_TEST_PORT").unwrap().parse().unwrap();
         config.sasl_user = Some(account.user.clone());
@@ -97,6 +106,7 @@ async fn pinned_bouncer_account_matrix() {
         assert_eq!(rows, (11..14).map(|index| format!("matrix-{}-{}-{index}", child.parent, child.network.id)).collect::<Vec<_>>());
     }
     verify_read_isolation(&mut app, &all).await;
+    verify_live_isolation(&mut app, &all).await;
     let untouched: Vec<_> = children(&app, "1").into_iter()
         .map(|id| (app.conn_generations[&id], app.state.connections[&id].network_key().to_string(), id)).collect();
     app.irc_handles["0"].sender().send("QUIT :fixture reconnect".parse::<irc::proto::Message>().unwrap()).unwrap();
@@ -114,6 +124,11 @@ async fn pinned_bouncer_account_matrix() {
     }
     verify_network_lifecycle(&mut app, &accounts).await;
     verify_provider_restart(&mut app).await;
+    verify_restored_traffic(&mut app).await;
+    if let Ok(script) = std::env::var("REPARTEE_MATRIX_BROWSER_SCRIPT") {
+        app.web_broadcaster = std::sync::Arc::new(crate::web::broadcast::WebBroadcaster::new(128));
+        super::filehost_browser_fixture::run(&mut app, &script).await;
+    }
     while let Ok(row) = log_rx.try_recv() {
         assert!(!["history-peer", "#history-channel", "*search*"].contains(&row.buffer.as_str()), "unexpected persistent row: {row:?}");
         assert!(!row.text.contains("matrix-"));
@@ -122,6 +137,85 @@ async fn pinned_bouncer_account_matrix() {
         app.suspend_bouncer_children(parent);
         app.cancel_connection_attempt(parent);
         app.irc_handles.remove(parent);
+    }
+}
+
+async fn verify_live_isolation(app: &mut App, all: &[String]) {
+    let port: u16 = std::env::var("REPARTEE_MATRIX_UPSTREAM_PORT").unwrap().parse().unwrap();
+    let soju = std::env::var("REPARTEE_MATRIX_PROVIDER").unwrap() == "soju";
+    let path = std::path::PathBuf::from(std::env::var("REPARTEE_MATRIX_UPSTREAM_EVENTS").unwrap());
+    for id in all {
+        let child = &app.bouncer_children[id];
+        let request = serde_json::json!({"action":"online", "account":child.parent.parse::<usize>().unwrap(),
+            "network":child.network.id.parse::<u64>().unwrap(), "name":child.network.name(), "port":port,
+            "nick":format!("matrix-{}-{}", child.parent, child.network.id)});
+        control(app, &request).await;
+        if !soju && let Some(handle) = app.irc_handles.get(id) {
+            handle.sender().send(irc::proto::Command::Raw("VERSION".into(), vec![])).unwrap();
+        }
+    }
+    until_with_reconnect(app, "four real upstream registrations", |app| all.iter().all(|id| {
+        let child = &app.bouncer_children[id];
+        app.state.connections[id].nick == format!("matrix-{}-{}", child.parent, child.network.id)
+    }), true).await;
+    for id in all {
+        let text = format!("matrix-live-{id}");
+        app.irc_handles[id].sender().send(irc::proto::Command::PRIVMSG("Alice".into(), text.clone())).unwrap();
+        until(app, "own live echo", |app| app.state.buffers.get(&make_buffer_id(id, "Alice"))
+            .is_some_and(|buffer| buffer.messages.iter().any(|row| row.text == text))).await;
+        assert_eq!(app.state.buffers[&make_buffer_id(id, "Alice")].name, "Alice");
+        for other in all {
+            if other != id {
+                assert!(app.state.buffers.values().filter(|buffer| buffer.connection_id == *other)
+                    .all(|buffer| buffer.messages.iter().all(|row| row.text != text)));
+            }
+        }
+    }
+    verify_live_presence(app, all, &path, soju).await;
+    let selected = &all[0];
+    if soju {
+        app.state.set_active_buffer(&make_buffer_id(selected, "Alice"));
+        app.handle_submit("/bmeta Alice pin on");
+        until(app, "selected network metadata", |app| app.state.metadata_flags(selected, "Alice").pinned).await;
+        for other in all {
+            if other != selected { assert!(!app.state.metadata_flags(other, "Alice").pinned); }
+        }
+    } else {
+        assert!(all.iter().all(|id| !app.state.connections[id].enabled_caps.contains(crate::irc::metadata::CAP)));
+    }
+    let child = &app.bouncer_children[selected];
+    let generation = app.conn_generations[selected];
+    let request = serde_json::json!({"account":child.parent.parse::<usize>().unwrap(),
+        "network":child.network.id.parse::<u64>().unwrap(), "name":child.network.name(), "port":port,
+        "nick":format!("matrix-{}-{}", child.parent, child.network.id)});
+    let mut offline = request.clone();
+    offline["action"] = "offline".into();
+    control(app, &offline).await;
+    let mut online = request;
+    online["action"] = "online".into();
+    control(app, &online).await;
+    if !soju && let Some(handle) = app.irc_handles.get(selected) {
+        handle.sender().send(irc::proto::Command::Raw("VERSION".into(), vec![])).unwrap();
+    }
+    until(app, "selected upstream returned", |_| {
+        std::fs::read_to_string(&path).unwrap_or_default().lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|row| row["nick"] == online["nick"] && row.get("away").is_some())
+            .map(|row| row["connection"].as_u64().unwrap()).collect::<std::collections::HashSet<_>>().len() >= 2
+    }).await;
+    until_with_reconnect(app, "selected downstream reattached", |app| app.state.connections[selected].status == ConnectionStatus::Connected
+        && (soju || app.conn_generations[selected] > generation)
+        && app.irc_handles.contains_key(selected), true).await;
+    app.irc_handles[selected].sender().send(irc::proto::Command::PRIVMSG("Alice".into(), "matrix-after-upstream-reconnect".into())).unwrap();
+    until(app, "traffic after upstream reconnect", |app| app.state.buffers[&make_buffer_id(selected, "Alice")]
+        .messages.iter().any(|row| row.text == "matrix-after-upstream-reconnect")).await;
+    let rows: Vec<serde_json::Value> = std::fs::read_to_string(path).unwrap().lines()
+        .map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert!(rows.iter().all(|row| row.get("join").is_none()), "unexpected upstream autojoin");
+    for id in all {
+        let child = &app.bouncer_children[id];
+        let nick = format!("matrix-{}-{}", child.parent, child.network.id);
+        assert_eq!(rows.iter().filter(|row| row["outgoing"] == format!("matrix-live-{id}") && row["nick"] == nick).count(), 1);
     }
 }
 
@@ -181,7 +275,8 @@ async fn verify_network_lifecycle(app: &mut App, accounts: &[Account]) {
     until(app, "network deletion", |app| !app.bouncer_children.contains_key(&id)).await;
     assert!(!app.state.connections.contains_key(&id));
     assert!(app.state.buffers.values().all(|buffer| buffer.connection_id != id));
-    let result = control(app, &serde_json::json!({"action":"create", "account":0})).await;
+    let port: u16 = std::env::var("REPARTEE_MATRIX_UPSTREAM_PORT").unwrap().parse().unwrap();
+    let result = control(app, &serde_json::json!({"action":"create", "account":0, "port":port})).await;
     let new_network = result["network"].as_u64().unwrap().to_string();
     assert_ne!(new_network, network);
     until(app, "network recreation", |app| app.bouncer_children.iter().any(|(id, child)|
@@ -190,8 +285,9 @@ async fn verify_network_lifecycle(app: &mut App, accounts: &[Account]) {
             && app.history_discovery.get(id).is_some_and(|discovery| discovery.finished))).await;
     let new_id = children(app, "0").into_iter().find(|id| app.bouncer_children[id].network.id == new_network).unwrap();
     assert_ne!(app.state.connections[&new_id].network_key(), old_scope);
+    let deleted_prefix = format!("matrix-0-{network}-");
     assert!(app.state.buffers.values().filter(|buffer| buffer.connection_id == new_id)
-        .all(|buffer| buffer.messages.iter().all(|message| !message.text.starts_with("matrix-"))));
+        .all(|buffer| buffer.messages.iter().all(|message| !message.text.starts_with(&deleted_prefix))));
     for (id, generation, scope) in other {
         assert_eq!(app.conn_generations[&id], generation);
         assert_eq!(app.state.connections[&id].network_key(), scope);
@@ -228,4 +324,53 @@ async fn verify_provider_restart(app: &mut App) {
             }
         }
     }
+}
+
+async fn verify_restored_traffic(app: &mut App) {
+    let restored: Vec<_> = app.bouncer_children.keys().cloned().collect();
+    for id in &restored {
+        let text = format!("matrix-incoming-after-restart-{id}");
+        app.irc_handles[id].sender().send(irc::proto::Command::PRIVMSG("FixtureControl".into(), text.clone())).unwrap();
+        until(app, "incoming traffic after provider restart", |app| app.state.buffers.get(&make_buffer_id(id, "Alice"))
+            .is_some_and(|buffer| buffer.messages.iter().any(|row| row.text == text))).await;
+        for other in &restored {
+            if other != id {
+                assert!(app.state.buffers.values().filter(|buffer| buffer.connection_id == *other)
+                    .all(|buffer| buffer.messages.iter().all(|row| row.text != text)));
+            }
+        }
+    }
+    let events = std::fs::read_to_string(std::env::var("REPARTEE_MATRIX_UPSTREAM_EVENTS").unwrap()).unwrap();
+    assert!(events.lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .all(|row| row.get("join").is_none()), "unexpected upstream autojoin after provider restart");
+}
+
+async fn verify_live_presence(app: &mut App, all: &[String], path: &std::path::Path, soju: bool) {
+    let selected = &all[0];
+    app.handle_web_command(crate::web::protocol::WebCommand::WebConnect { initial_buffer_id: None }, "matrix-browser");
+    app.handle_web_command(crate::web::protocol::WebCommand::Presence { present: true }, "matrix-browser");
+    for id in all { assert!(app.set_bouncer_away(id, None)); }
+    until(app, "all upstreams present", |app| {
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(path).unwrap_or_default().lines()
+            .filter_map(|line| serde_json::from_str(line).ok()).collect();
+        all.iter().all(|id| {
+            let child = &app.bouncer_children[id];
+            let nick = format!("matrix-{}-{}", child.parent, child.network.id);
+            rows.iter().rev().find(|row| row["nick"] == nick && row.get("away").is_some())
+                .is_some_and(|row| row["away"].is_null())
+        })
+    }).await;
+    assert!(app.set_bouncer_away(selected, Some("matrix-manual-away")));
+    until(app, "manual away isolation", |app| {
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(path).unwrap_or_default().lines()
+            .filter_map(|line| serde_json::from_str(line).ok()).collect();
+        all.iter().all(|id| {
+            let child = &app.bouncer_children[id];
+            let nick = format!("matrix-{}-{}", child.parent, child.network.id);
+            let expected = id == selected || (!soju && child.parent == app.bouncer_children[selected].parent);
+            rows.iter().rev().find(|row| row["nick"] == nick && row.get("away").is_some())
+                .is_some_and(|row| row["away"].is_null() != expected)
+        })
+    }).await;
+    assert!(app.set_bouncer_away(selected, None));
 }

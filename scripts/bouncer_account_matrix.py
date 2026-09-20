@@ -54,12 +54,18 @@ class SojuController:
                 self.control.unlink()
                 user = self.accounts[request["account"]]["user"]
                 action = request["action"]
-                if action == "rename":
+                if action == "online":
+                    command = ["network", "update", request["name"], "-addr", f"irc+insecure://127.0.0.1:{request['port']}",
+                               "-nick", request["nick"], "-auto-away", "true", "-enabled", "true"]
+                elif action == "offline":
+                    command = ["network", "update", request["name"], "-enabled", "false"]
+                elif action == "rename":
                     command = ["network", "update", request["name"], "-name", "renamed"]
                 elif action == "delete":
                     command = ["network", "delete", "renamed"]
                 elif action == "create":
-                    command = ["network", "create", "-name", "renamed", "-addr", "irc+insecure://127.0.0.1:1", "-enabled", "false"]
+                    command = ["network", "create", "-name", "renamed", "-addr", f"irc+insecure://127.0.0.1:{request['port']}",
+                               "-nick", "matrix-recreated", "-auto-away", "true", "-enabled", "true"]
                 else:
                     raise ValueError("Unknown matrix action")
                 run([str(self.source / "sojuctl"), "-config", str(self.config), "user", "run", user, *command], capture_output=True, timeout=10)

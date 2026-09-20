@@ -42,8 +42,35 @@ local log queue. The bouncer logging exclusion now covers special buffers as
 well as server/channel/query buffers. DCC and direct-IRC logging retain their
 existing behavior.
 
-The provider processes, authentication, history, read markers, registry updates
-and process restart are real. Soju networks are disabled upstreams; Lurker uses
-its upstream harness. This does not prove real upstream offline/online traffic,
-combined presence/metadata isolation, browser rendering or OS focus changes.
-Those remain separate completion evidence requirements.
+The initial history phase starts with Soju disabled upstreams and Lurker's
+upstream harness. The extended phase then activates four real TCP upstream
+connections, verifies separately routed outgoing echoes, network/account away
+scope, and Soju query metadata isolation (Lurker does not advertise metadata).
+One upstream is stopped and restarted, and its downstream resumes traffic.
+Lurker closes a downstream whose upstream connection object was replaced; the
+fixture pumps the normal Repartee reconnect controller for recovery.
+
+Network recreation and provider restart restore real upstream connections.
+After the provider restart, fresh incoming messages identify each owning
+connection, and assertions reject delivery to any of the other three networks.
+The upstream wire log also rejects unsolicited JOIN throughout the scenario,
+including after account reconnect and provider restart.
+
+Set `REPARTEE_MATRIX_BROWSER_SCRIPT` to the absolute path of
+`scripts/fixtures/account-matrix-browser.cjs` to include the compiled web UI.
+The browser opens each of four identically named Alice queries after provider
+restart, checks that exactly the owning connection's fresh message is rendered,
+and repeats after browser reload. Set `NODE_PATH` and
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE` for the local Playwright installation.
+
+Presence in this combined scenario is driven through the App web-command
+handler; actual browser events and native attach are covered separately in
+[bouncer-presence.md](bouncer-presence.md). It does not establish OS terminal
+focus emission. The combined scenario checks the log queue; actual SQLite and
+TRACE exclusion remain covered by the real daemon scenarios.
+
+The browser check exposed a production defect in live own-message echoes: a new
+query used the peer as its buffer ID but the sender (our own nick) as its display
+name. The common PRIVMSG handler now uses the resolved conversation target for
+both. The combined fixture checks the native state name immediately after each
+own echo and the actual browser label/content after provider and browser restart.
