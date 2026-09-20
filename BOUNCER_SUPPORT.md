@@ -15,6 +15,28 @@ links every surface to implementation, tests and merged PRs and identifies the
 remaining gates. Historical progress notes below do not close those gates by
 themselves.
 
+## Current acceptance state
+
+As of merged PR 124, `irc-repartee` 1.5.2 is published and integrated from
+crates.io. SAFERATE, registry package verification and installation are covered;
+there is no pending dependency-publication step. The notes below record earlier
+stages chronologically and may describe gaps subsequently closed.
+
+The current [completion matrix](docs/validation/bouncer-completion-matrix.md)
+records completed authentication, history query/error handling, service commands,
+and combined two-account/four-network acceptance. Actual browser presence,
+daemon restart, SQLite/TRACE conversation exclusion, native shim attach/detach,
+and browser query isolation have dedicated evidence. The last two production
+corrections fix the legacy native detach chord (PR 123) and own-echo query names
+(PR 124).
+
+Full completion is not yet claimed. TARGETS enumeration has reproduced upstream
+limitations on both pinned providers, including empty filtered pages and more
+than 1000 targets at one timestamp. The decision about extending this work to
+upstream changes remains pending. Native CSI focus handling is verified through
+a PTY; OS-generated terminal focus events have not been observed. Final release
+and documentation reconciliation remains subject to those open gates.
+
 ## Reproducible upstream evidence
 
 Audited checkouts under `/tmp/repartee-bouncer-audit.U3fkHg/`:
