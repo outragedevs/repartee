@@ -129,6 +129,7 @@ impl WebPreviewExtractor {
         // `Client::new()` would create a default client *without* the
         // resolver and redirect policy, completely defeating the guard.
         let http = reqwest::Client::builder()
+            .no_proxy()
             .timeout(Duration::from_secs(30))
             .redirect(redirect_policy())
             .dns_resolver(Arc::new(PublicOnlyResolver))
@@ -142,6 +143,16 @@ impl WebPreviewExtractor {
             cache_dir,
             http,
         }
+    }
+
+    pub fn register_network_icon(&self, url: &str) -> Option<String> {
+        validate_url_shape_str(url).ok()?;
+        let hash = self.hash_url(url);
+        let mut registry = self.registry.lock().ok()?;
+        if registry.len() >= MAX_REGISTRY_ENTRIES { registry.clear(); }
+        registry.insert(hash.clone(), url.to_owned());
+        drop(registry);
+        Some(format!("/api/network-icon?h={hash}"))
     }
 
     /// Run URL detection on `text` and return preview metadata for each URL
@@ -545,53 +556,50 @@ fn redirect_policy() -> reqwest::redirect::Policy {
     })
 }
 
-/// Reject loopback, RFC1918 private, link-local, multicast, broadcast,
-/// unspecified (`0.0.0.0` / `::`), CGNAT, documentation, and IPv6
-/// unique-local / IPv4-mapped-IPv6 of any of the above. Anything left is
-/// a publicly routable unicast address — the only thing we let the
-/// server proxy fetch.
 fn is_disallowed_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
-            if v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_multicast()
-                || v4.is_broadcast()
-                || v4.is_unspecified()
-                || v4.is_documentation()
-            {
-                return true;
-            }
-            // CGNAT (RFC 6598): 100.64.0.0/10
-            let o = v4.octets();
-            o[0] == 100 && (64..=127).contains(&o[1])
+            let [a, b, c, d] = v4.octets();
+            a == 0 || a == 10 || a == 127 || a >= 224
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 169 && b == 254)
+                || (a == 172 && (16..=31).contains(&b))
+                || (a == 192 && b == 168)
+                || (a == 192 && b == 0 && c == 0 && !matches!(d, 9 | 10))
+                || (a == 192 && b == 0 && c == 2)
+                || (a == 192 && b == 88 && c == 99)
+                || (a == 198 && matches!(b, 18 | 19))
+                || (a == 198 && b == 51 && c == 100)
+                || (a == 203 && b == 0 && c == 113)
         }
         IpAddr::V6(v6) => {
-            if v6.is_loopback() || v6.is_multicast() || v6.is_unspecified() {
-                return true;
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_disallowed_ip(&IpAddr::V4(v4));
             }
             let seg = v6.segments();
-            // Unique local fc00::/7
-            if seg[0] & 0xfe00 == 0xfc00 {
-                return true;
+            if seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                let octets = v6.octets();
+                return is_disallowed_ip(&IpAddr::V4(std::net::Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15])));
             }
-            // Link-local fe80::/10
-            if seg[0] & 0xffc0 == 0xfe80 {
-                return true;
-            }
-            // Documentation 2001:db8::/32 (RFC 3849). `Ipv6Addr::is_documentation`
-            // is unstable on stable Rust, so test the prefix inline.
-            if seg[0] == 0x2001 && seg[1] == 0x0db8 {
-                return true;
-            }
-            // IPv4-mapped IPv6 (::ffff:a.b.c.d) — re-check the v4 part.
-            if let Some(v4) = v6.to_ipv4_mapped()
-                && is_disallowed_ip(&IpAddr::V4(v4))
+            if seg[0] & 0xe000 != 0x2000 || seg[0] == 0x2002
+                || (seg[0] == 0x2001 && seg[1] == 0x0db8)
+                || (seg[0] == 0x3fff && seg[1] & 0xf000 == 0)
             {
                 return true;
             }
-            false
+            if seg[0] == 0x2001 && seg[1] < 0x200 {
+                let anycast = seg[..7] == [0x2001, 1, 0, 0, 0, 0, 0] && matches!(seg[7], 1..=3);
+                let global_assignment = seg[1] == 3
+                    || (seg[1] == 4 && seg[2] == 0x112);
+                return !(anycast || global_assignment);
+            }
+            let allocated = (seg[0] == 0x2001 && ((0x200..=0xfff).contains(&seg[1])
+                || (0x1200..=0x4dff).contains(&seg[1]) || (0x5000..=0x5fff).contains(&seg[1])
+                || (0x8000..=0xbfff).contains(&seg[1])))
+                || (seg[0] == 0x2003 && seg[1] < 0x4000)
+                || matches!(seg[0] & 0xfff0, 0x2400 | 0x2410 | 0x2600 | 0x2630 | 0x2800 | 0x2a00 | 0x2a10 | 0x2c00)
+                || (matches!(seg[0], 0x2610 | 0x2620) && seg[1] < 0x200);
+            !allocated
         }
     }
 }
@@ -1028,5 +1036,23 @@ mod tests {
         // reminds them to update the docstring.
         let policy_cap = 5;
         assert_eq!(policy_cap, 5, "redirect cap mirrored in docs");
+    }
+}
+
+#[path = "network_icon.rs"]
+pub mod network_icon;
+
+#[cfg(test)]
+mod global_address_tests {
+    use super::is_disallowed_ip;
+
+    #[test]
+    fn special_use_and_translation_destinations_are_not_public_fetch_targets() {
+        for address in ["0.1.2.3", "192.0.0.0", "192.0.0.8", "192.0.0.11", "192.0.0.255", "192.88.99.1", "198.18.0.0", "198.19.255.255", "240.0.0.1", "255.255.255.255", "::8.8.8.8", "::ffff:198.18.0.1", "64:ff9b::a00:1", "64:ff9b:1::1", "100::1", "100:0:0:1::1", "2001::1", "2001:1::4", "2001:2::1", "2001:1ff::1", "2001:20::1", "2001:30::1", "2002:a00:1::1", "3fff::1", "3fff:fff:ffff::1", "5f00::1", "fec0::1", "2001:1000::1", "2001:4e00::1", "2001:6000::1", "2001:c000::1", "2003:4000::1", "2610:200::1", "2620:200::1", "2d00::1", "3ffe::1", "3fff:1000::1"] {
+            assert!(is_disallowed_ip(&address.parse().unwrap()), "{address}");
+        }
+        for address in ["1.1.1.1", "192.0.0.9", "192.0.0.10", "192.0.1.1", "192.31.196.1", "192.52.193.1", "192.175.48.1", "198.17.255.255", "198.20.0.0", "::ffff:8.8.8.8", "64:ff9b::808:808", "2001:1::1", "2001:1::3", "2001:3::1", "2001:4:112::1", "2001:200::1", "2606:4700:4700::1111", "2620:4f:8000::1", "2410::1", "2a10::1", "2c00::1"] {
+            assert!(!is_disallowed_ip(&address.parse().unwrap()), "{address}");
+        }
     }
 }

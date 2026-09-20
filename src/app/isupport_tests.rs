@@ -221,3 +221,25 @@ async fn network_icon_command_uses_atomic_connection_scoped_state() {
     assert!(app.state.buffers["fixture/fixture"].messages.back().unwrap().text.contains("has not advertised"));
     assert_eq!(app.state.connections["other"].isupport_parsed.network_icon(32), None);
 }
+
+#[tokio::test]
+async fn network_icon_web_events_and_snapshot_follow_atomic_updates_and_disconnect() {
+    use crate::web::protocol::WebEvent;
+    let mut app = app();
+    app.state.web_icon_extractor = Some(std::sync::Arc::new(crate::web::preview::WebPreviewExtractor::new(vec![1; 32], 3, 10)));
+    receive(&mut app, ":s 005 me draft/ICON=https://example.org/{size}.svg :supported tokens");
+    let initial = crate::web::snapshot::network_icon_url(&app.state, "fixture").unwrap();
+    assert!(initial.starts_with("/api/network-icon?h="));
+    assert!(!initial.contains("example.org"));
+    assert!(crate::web::snapshot::network_icon_url(&app.state, "other").is_none());
+    receive(&mut app, ":s BATCH +icon draft/isupport");
+    receive(&mut app, "@batch=icon :s 005 me -draft/ICON :supported tokens");
+    assert_eq!(crate::web::snapshot::network_icon_url(&app.state, "fixture"), Some(initial));
+    receive(&mut app, ":s BATCH -icon");
+    assert!(crate::web::snapshot::network_icon_url(&app.state, "fixture").is_none());
+    receive(&mut app, ":s 005 me draft/ICON=https://example.org/new.png :supported tokens");
+    assert!(crate::web::snapshot::network_icon_url(&app.state, "fixture").is_some());
+    crate::irc::events::handle_disconnected(&mut app.state, "fixture", None);
+    assert!(app.state.pending_web_events.iter().any(|event| matches!(event, WebEvent::NetworkIcon { conn_id, icon_url: None } if conn_id == "fixture")));
+    assert!(crate::web::snapshot::network_icon_url(&app.state, "fixture").is_none());
+}

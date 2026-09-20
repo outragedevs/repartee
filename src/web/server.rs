@@ -54,6 +54,7 @@ pub struct AppHandle {
     pub session_cookie_max_age: i64,
     /// Server-side preview/thumbnail extractor (`None` when `image_previews` disabled).
     pub preview_extractor: Option<Arc<super::preview::WebPreviewExtractor>>,
+    pub icon_extractor: Option<Arc<super::preview::WebPreviewExtractor>>,
     /// Snapshot of `AppState` used to build `SyncInit` for newly
     /// connecting clients and to seed each session's initial active
     /// buffer. Updated eagerly on relevant events (see
@@ -323,6 +324,7 @@ pub fn build_router(handle: Arc<AppHandle>) -> Router {
         .route("/api/upload", post(super::upload::handler))
         .route("/api/webpush", post(super::push::handler))
         .route("/api/preview", get(super::preview::preview_handler))
+        .route("/api/network-icon", get(super::preview::network_icon::handler))
         .route("/ws", get(super::ws::ws_handler))
         .route("/favicon.ico", get(favicon_handler))
         .route("/emotes/{file}", get(emote_handler))
@@ -402,6 +404,7 @@ mod tests {
             session_store: Arc::new(Mutex::new(SessionStore::with_days(vec![0u8; 32], 90))),
             rate_limiter: Arc::new(Mutex::new(RateLimiter::new())),
             session_cookie_max_age: 90 * 86_400,
+            icon_extractor: None,
             preview_extractor: None,
             web_state_snapshot: None,
         })

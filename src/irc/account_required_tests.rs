@@ -89,7 +89,8 @@ async fn registration(case: Case) {
             if case.failure == Failure::AfterWelcome { write.write_all(refusal).await.unwrap(); }
             write.write_all(b":fixture 422 me :No MOTD\r\n").await.unwrap();
         }
-        assert!(lines.next_line().await.unwrap().is_none());
+        let closed = lines.next_line().await;
+        assert!(matches!(closed, Ok(None)) || matches!(closed, Err(ref error) if error.kind() == std::io::ErrorKind::ConnectionReset), "unexpected frame at fixture teardown: {closed:?}");
     });
     let mut config: crate::config::ServerConfig = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]\nnick='me'").unwrap();
     config.port = port;

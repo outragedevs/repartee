@@ -420,6 +420,8 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
         conn.chathistory = crate::irc::chathistory::HistoryState::new();
     }
 
+    refresh_network_icon(state, conn_id);
+
     let label = state
         .connections
         .get(conn_id)
@@ -537,6 +539,8 @@ pub fn handle_disconnected(state: &mut AppState, conn_id: &str, error: Option<&s
                 Some(std::time::Instant::now() + std::time::Duration::from_secs(delay));
         }
     }
+
+    refresh_network_icon(state, conn_id);
 
     let label = state
         .connections
@@ -4675,7 +4679,15 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
     }
 }
 
+fn refresh_network_icon(state: &mut AppState, conn_id: &str) {
+    let icon_url = crate::web::snapshot::network_icon_url(state, conn_id);
+    state.pending_web_events.push(crate::web::protocol::WebEvent::NetworkIcon {
+        conn_id: conn_id.to_owned(), icon_url,
+    });
+}
+
 pub fn refresh_isupport_label(state: &mut AppState, conn_id: &str) {
+    refresh_network_icon(state, conn_id);
     if let Some(network) = state.connections.get(conn_id)
         .and_then(|conn| conn.isupport_parsed.network().map(str::to_owned)
             .or_else(|| conn.network_label.as_ref().map(|_| conn.origin_config.label.clone())))

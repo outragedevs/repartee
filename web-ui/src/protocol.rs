@@ -106,6 +106,7 @@ pub enum WebEvent {
         activity: u8,
         unread_count: u32,
     },
+    NetworkIcon { conn_id: String, icon_url: Option<String> },
     ConnectionRemoved { conn_id: String },
     BufferRenamed { old_id: String, new_id: String, name: String },
     ConnectionStatus {
@@ -338,6 +339,8 @@ pub struct BufferMeta {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionMeta {
+    #[serde(default)]
+    pub icon_url: Option<String>,
     pub id: String,
     pub label: String,
     pub nick: String,

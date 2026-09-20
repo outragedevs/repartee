@@ -1,6 +1,20 @@
 use super::App;
 
 impl App {
+    fn prepare_web_image_extractors(&mut self) {
+        let secret = if self.config.web.session_secret.is_empty() {
+            vec![0u8; 32]
+        } else {
+            self.config.web.session_secret.clone()
+        };
+        let extractor = std::sync::Arc::new(crate::web::preview::WebPreviewExtractor::new(
+            secret, self.config.web.image_previews_max_per_msg as usize,
+            self.config.web.thumbnail_cache_mb,
+        ));
+        self.state.web_preview_extractor = self.config.web.image_previews.then(|| std::sync::Arc::clone(&extractor));
+        self.state.web_icon_extractor = Some(extractor);
+    }
+
     fn e2e_debug_enabled() -> bool {
         std::env::var("REPARTEE_E2E_DEBUG_BUFFER").is_ok_and(|v| {
             let v = v.trim();
@@ -83,6 +97,7 @@ impl App {
         // message_to_wire keeps populating `previews` for messages that
         // no client can render.
         self.state.web_preview_extractor = None;
+        self.state.web_icon_extractor = None;
     }
 
     /// Start the web server (HTTPS + WebSocket). Creates fresh session
@@ -90,10 +105,6 @@ impl App {
     /// `web_broadcaster` and `web_cmd_tx` channel.
     ///
     /// Does nothing if `web.enabled` is false or `web.password` is empty.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "linear startup sequence; splitting would obscure ordering"
-    )]
     pub(crate) async fn start_web_server(&mut self) {
         if !self.config.web.enabled {
             return;
@@ -153,28 +164,9 @@ impl App {
         ));
         self.web_state_snapshot = Some(std::sync::Arc::clone(&snapshot));
 
-        // Build the preview extractor (if enabled). Both AppState and
-        // AppHandle share the same Arc so registry lookups in the handler
-        // see what extraction wrote.
-        let preview_extractor = if self.config.web.image_previews {
-            let secret = if self.config.web.session_secret.is_empty() {
-                vec![0u8; 32]
-            } else {
-                self.config.web.session_secret.clone()
-            };
-            Some(std::sync::Arc::new(
-                crate::web::preview::WebPreviewExtractor::new(
-                    secret,
-                    self.config.web.image_previews_max_per_msg as usize,
-                    self.config.web.thumbnail_cache_mb,
-                ),
-            ))
-        } else {
-            None
-        };
-        self.state
-            .web_preview_extractor
-            .clone_from(&preview_extractor);
+        self.prepare_web_image_extractors();
+        let preview_extractor = self.state.web_preview_extractor.clone();
+        let icon_extractor = self.state.web_icon_extractor.clone();
 
         let handle = std::sync::Arc::new(crate::web::server::AppHandle {
             broadcaster: std::sync::Arc::clone(&self.web_broadcaster),
@@ -184,6 +176,7 @@ impl App {
             session_store: sessions,
             rate_limiter: limiter,
             session_cookie_max_age: i64::from(self.config.web.session_days) * 86_400,
+            icon_extractor,
             preview_extractor,
             web_state_snapshot: Some(snapshot),
         });
@@ -277,7 +270,8 @@ impl App {
                         }
                     }
                 }
-                crate::web::protocol::WebEvent::ConnectionRemoved { .. }
+                crate::web::protocol::WebEvent::NetworkIcon { .. }
+                | crate::web::protocol::WebEvent::ConnectionRemoved { .. }
                 | crate::web::protocol::WebEvent::BufferRenamed { .. }
                 | crate::web::protocol::WebEvent::ConnectionStatus { .. }
                 | crate::web::protocol::WebEvent::SettingsChanged { .. }
@@ -1157,5 +1151,24 @@ mod activity_read_tests {
         assert_eq!(app.state.next_activity_buffer().as_deref(), Some("net/#old"));
         app.web_mark_read("net/#old", None, "browser");
         assert!(app.state.next_activity_buffer().is_none());
+    }
+}
+
+#[cfg(test)]
+mod network_icon_configuration_tests {
+    #[tokio::test]
+    async fn icons_are_provisioned_with_message_previews_disabled() {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        assert!(!app.config.web.image_previews);
+        app.prepare_web_image_extractors();
+        assert!(app.state.web_icon_extractor.is_some());
+        assert!(app.state.web_preview_extractor.is_none());
+        app.config.web.image_previews = true;
+        app.prepare_web_image_extractors();
+        assert!(app.state.web_icon_extractor.is_some());
+        assert!(app.state.web_preview_extractor.is_some());
+        app.stop_web_server();
+        assert!(app.state.web_icon_extractor.is_none());
+        assert!(app.state.web_preview_extractor.is_none());
     }
 }

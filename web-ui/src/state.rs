@@ -623,6 +623,13 @@ impl AppState {
                 }
                 self.sort_buffers();
             }
+            WebEvent::NetworkIcon { conn_id, icon_url } => {
+                self.connections.update(|connections| {
+                    if let Some(connection) = connections.iter_mut().find(|connection| connection.id == conn_id) {
+                        connection.icon_url = icon_url;
+                    }
+                });
+            }
             WebEvent::ConnectionStatus {
                 conn_id,
                 connected,
@@ -632,10 +639,12 @@ impl AppState {
                 self.connections.update(|conns| {
                     if let Some(c) = conns.iter_mut().find(|c| c.id == conn_id) {
                         c.connected = connected;
+                        if !connected { c.icon_url = None; }
                         c.nick = nick;
                         c.label = label;
                     } else {
                         conns.push(ConnectionMeta {
+                            icon_url: None,
                             id: conn_id,
                             label,
                             nick,
@@ -1378,6 +1387,22 @@ mod tests {
         state.handle_event(event);
         assert_eq!(state.active_buffer.get_untracked().as_deref(), Some("existing/#chat"));
         assert_eq!(state.buffers.get_untracked().len(), 1);
+    }
+
+    #[test]
+    fn network_icon_events_update_clear_and_disconnect_without_crossing_connections() {
+        let state = headless_state();
+        for id in ["one", "two"] {
+            state.handle_event(WebEvent::ConnectionStatus { conn_id: id.into(), label: id.into(), connected: true, nick: "me".into() });
+        }
+        state.handle_event(WebEvent::NetworkIcon { conn_id: "one".into(), icon_url: Some("/api/network-icon?h=first".into()) });
+        assert_eq!(state.connections.get_untracked()[0].icon_url.as_deref(), Some("/api/network-icon?h=first"));
+        assert!(state.connections.get_untracked()[1].icon_url.is_none());
+        state.handle_event(WebEvent::NetworkIcon { conn_id: "one".into(), icon_url: None });
+        assert!(state.connections.get_untracked()[0].icon_url.is_none());
+        state.handle_event(WebEvent::NetworkIcon { conn_id: "one".into(), icon_url: Some("/api/network-icon?h=second".into()) });
+        state.handle_event(WebEvent::ConnectionStatus { conn_id: "one".into(), label: "one".into(), connected: false, nick: "me".into() });
+        assert!(state.connections.get_untracked()[0].icon_url.is_none());
     }
 
     #[test]
