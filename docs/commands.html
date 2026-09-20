@@ -1212,6 +1212,42 @@ message; switch to a buffer on the intended network before running the command.<
 <h2>See Also</h2>
 <p>/connect, /quit, /server</p>
 </div>
+<div class="command-entry" data-command="monitor" data-category="Connection">
+<h1>/monitor</h1>
+<h2>Syntax</h2>
+<pre><code>/monitor add &lt;nick[,nick...] ...&gt;
+/monitor remove &lt;nick[,nick...] ...&gt;
+/monitor clear
+/monitor list
+/monitor status
+/monitor show
+</code></pre>
+<h2>Description</h2>
+<p>Watch nicknames on the active IRC network, including users outside shared channels.
+<code>+</code> and <code>-</code> are aliases for add and remove; <code>C</code>, <code>L</code> and <code>S</code> mean clear, list and
+status. Commands work from terminal and web input. Use a bound network connection,
+not a bouncer control connection.</p>
+<p>The server must advertise MONITOR in ISUPPORT. Changes are queued while the server
+is unavailable, and a list read after each change verifies accepted subscriptions.
+List-full replies remove rejected targets. Targets are scoped to their connection
+and bouncer network and retained in memory across transport reconnects, not saved
+as message history. Closing the application discards this in-memory list.</p>
+<p><code>list</code> requests a fresh server list; <code>status</code> requests current online/offline
+replies. <code>show</code> displays cached information, including account, away, host and real
+name when those notifications are available. Unknown information is displayed as
+unknown. Both extended-monitor capability spellings are supported; their detailed
+notifications also depend on the upstream&#39;s account/away/host/name capabilities.</p>
+<p>A list timeout retains cached information and stops further changes until the
+reply finishes or the connection is re-established, avoiding ambiguous resends.</p>
+<h2>Examples</h2>
+<pre><code>/monitor add alice bob
+/monitor status
+/monitor show
+/monitor remove alice
+</code></pre>
+<h2>See Also</h2>
+<p>/whois, /setname, /bouncer</p>
+</div>
 <div class="command-entry" data-command="quit" data-category="Connection">
 <h1>/quit</h1>
 <h2>Syntax</h2>
