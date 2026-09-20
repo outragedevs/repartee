@@ -3797,7 +3797,11 @@ fn handle_invite(
 ) {
     let inviter = extract_nick(prefix).unwrap_or_default();
 
-    if nick.eq_ignore_ascii_case(our_nick) {
+    let mapping = state
+        .connections
+        .get(conn_id)
+        .map_or("rfc1459", |conn| conn.isupport_parsed.casemapping());
+    if super::isupport::casefold(nick, mapping) == super::isupport::casefold(our_nick, mapping) {
         // We are the invited user — show in active buffer or server buffer (highlight)
         let label = state
             .connections
@@ -3805,30 +3809,43 @@ fn handle_invite(
             .map_or("Status", |c| c.label.as_str());
         let buffer_id = state
             .active_buffer_id
-            .clone()
+            .as_ref()
+            .filter(|id| {
+                state
+                    .buffers
+                    .get(*id)
+                    .is_some_and(|buffer| buffer.connection_id == conn_id)
+            })
+            .cloned()
             .unwrap_or_else(|| make_buffer_id(conn_id, label));
 
         let id = state.next_message_id();
-        state.add_message(
-            &buffer_id,
-            Message {
-                log_key: None,
-                id,
-                timestamp: message_timestamp(tags.as_ref()),
-                message_type: MessageType::Event,
-                nick: None,
-                nick_mode: None,
-                text: format!("{inviter} invites you to {channel}"),
-                highlight: true,
-                event_key: None,
-                event_params: None,
-                log_msg_id: None,
-                log_ref_id: None,
-                tags,
-                wire_origin: None,
-                translation_suffix_at: None,
-            },
-        );
+        let message = Message {
+            log_key: None,
+            id,
+            timestamp: message_timestamp(tags.as_ref()),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text: format!("{inviter} invites you to {channel}").replace('%', "%%"),
+            highlight: true,
+            event_key: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
+            tags,
+            wire_origin: None,
+            translation_suffix_at: None,
+        };
+        if state
+            .connections
+            .get(conn_id)
+            .is_some_and(crate::state::connection::Connection::server_owns_history)
+        {
+            state.add_transient_message_with_activity(&buffer_id, message, ActivityLevel::Mention);
+        } else {
+            state.add_message_with_activity(&buffer_id, message, ActivityLevel::Mention);
+        }
     } else {
         // invite-notify: someone else was invited — show in the channel buffer
         let buffer_id = make_buffer_id(conn_id, channel);
@@ -3843,7 +3860,7 @@ fn handle_invite(
                     message_type: MessageType::Event,
                     nick: None,
                     nick_mode: None,
-                    text: format!("{inviter} invited {nick} to {channel}"),
+                    text: format!("{inviter} invited {nick} to {channel}").replace('%', "%%"),
                     highlight: false,
                     event_key: None,
                     event_params: None,
@@ -9175,6 +9192,99 @@ mod tests {
         assert_eq!(buf.messages[0].message_type, MessageType::Event);
         assert_eq!(buf.messages[0].text, "op invites you to #secret");
         assert!(buf.messages[0].highlight);
+    }
+
+    #[test]
+    fn invites_stay_on_their_network_and_follow_history_policy() {
+        for bouncer in [false, true] {
+            let mut state = make_test_state();
+            let mut other = state.connections["test"].clone();
+            other.id = "other".into();
+            other.label = "Other".into();
+            state.add_connection(other);
+            let mut other_buffer = state.buffers["test/#test"].clone();
+            other_buffer.id = "other/#test".into();
+            other_buffer.connection_id = "other".into();
+            state.add_buffer(other_buffer);
+            state
+                .connections
+                .get_mut("test")
+                .unwrap()
+                .origin_config
+                .bouncer_network_id = bouncer.then(|| "1".into());
+            state.set_active_buffer("other/#test");
+            let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+            state.log_tx = Some(tx);
+            handle_irc_message(
+                &mut state,
+                "test",
+                &make_irc_msg(
+                    Some("op!user@host"),
+                    Command::INVITE("me".into(), "#secret".into()),
+                ),
+            );
+            assert!(state.buffers["other/#test"].messages.is_empty());
+            assert_eq!(state.buffers["test/testserver"].messages.len(), 1);
+            assert_eq!(
+                rx.try_recv().is_err(),
+                bouncer,
+                "only direct IRC invitations may reach local storage"
+            );
+            assert_eq!(
+                state.buffers["test/testserver"].activity,
+                ActivityLevel::Mention
+            );
+            assert!(state.pending_web_events.iter().any(|event| matches!(event,
+            crate::web::protocol::WebEvent::NewMessage { buffer_id, .. } if buffer_id == "test/testserver"
+        )));
+        }
+    }
+
+    #[test]
+    fn invitations_use_server_casemapping_and_keep_literal_percent_text() {
+        for (mapping, target, own) in [
+            ("rfc1459", "{me}~", true),
+            ("strict-rfc1459", "{me}^", true),
+            ("strict-rfc1459", "{me}~", false),
+            ("ascii", "[ME]^", true),
+            ("ascii", "{me}^", false),
+        ] {
+            let mut state = make_test_state();
+            let conn = state.connections.get_mut("test").unwrap();
+            conn.nick = "[Me]^".into();
+            conn.isupport_parsed
+                .parse_tokens(&[&format!("CASEMAPPING={mapping}")]);
+            state.set_active_buffer("test/#test");
+            handle_irc_message(
+                &mut state,
+                "test",
+                &make_irc_msg(
+                    Some("op!user@host"),
+                    Command::INVITE(target.into(), "#test".into()),
+                ),
+            );
+            let message = state.buffers["test/#test"].messages.back().unwrap();
+            assert_eq!(message.highlight, own, "{mapping} {target}");
+        }
+        let mut state = make_test_state();
+        state.set_active_buffer("test/#test");
+        handle_irc_message(
+            &mut state,
+            "test",
+            &make_irc_msg(
+                Some("op!user@host"),
+                Command::INVITE("me".into(), "#100%N".into()),
+            ),
+        );
+        let message = state.buffers["test/#test"].messages.back().unwrap();
+        let text: String = crate::theme::parse_format_string(&message.text, &[])
+            .into_iter()
+            .map(|span| span.text)
+            .collect();
+        assert_eq!(text, "op invites you to #100%N");
+        assert!(state.pending_web_events.iter().any(|event| matches!(event,
+            crate::web::protocol::WebEvent::MentionAlert { buffer_id, .. } if buffer_id == "test/#test"
+        )));
     }
 
     #[test]

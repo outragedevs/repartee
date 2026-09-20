@@ -5,8 +5,9 @@ from pathlib import Path
 
 
 class PresenceServer:
-    def __init__(self, events, setname=False, monitor=False, monitor_unavailable=False):
+    def __init__(self, events, setname=False, monitor=False, monitor_unavailable=False, invites=False):
         self.setname = setname
+        self.invites = invites
         self.monitor = monitor
         self.monitor_unavailable = monitor_unavailable
         self.events = events
@@ -26,6 +27,8 @@ class PresenceServer:
         monitored = set()
         monitor_available = self.monitor and not self.monitor_unavailable
         capabilities = {"setname"} if self.setname else set()
+        if self.invites:
+            capabilities.add("invite-notify")
         if self.monitor:
             capabilities.update(["account-notify", "away-notify", "chghost", "setname", "extended-monitor"])
 
@@ -64,10 +67,14 @@ class PresenceServer:
                     with self.events.open('a') as output:
                         output.write(json.dumps({'connection': connection, 'realname': params[0]}) + '\n')
                     send(f':{nick}!fixture@localhost SETNAME :{params[0]}')
-                elif command == 'PRIVMSG' and registered and self.monitor and len(params) == 2 and params[0].lower() == 'fixturecontrol':
+                elif command == 'PRIVMSG' and registered and (self.monitor or self.invites) and len(params) == 2 and params[0].lower() == 'fixturecontrol':
                     with self.events.open('a') as output:
                         output.write(json.dumps({'control': params[1]}) + '\n')
-                    if params[1] == 'monitor-off':
+                    if params[1] == 'own-invite':
+                        send(f':Inviter!user@fixture.local INVITE {nick} :#100%N')
+                    elif params[1] == 'peer-invite':
+                        send(':Inviter!user@fixture.local INVITE Other :#fixture')
+                    elif params[1] == 'monitor-off':
                         monitor_available = False
                         send(f':fixture.local 005 {nick} -MONITOR :supported')
                     elif params[1] == 'monitor-on':
@@ -144,8 +151,9 @@ async def main():
     parser.add_argument('--setname', action='store_true')
     parser.add_argument('--monitor', action='store_true')
     parser.add_argument('--monitor-unavailable', action='store_true')
+    parser.add_argument('--invites', action='store_true')
     args = parser.parse_args()
-    fixture = PresenceServer(args.events, args.setname, args.monitor, args.monitor_unavailable)
+    fixture = PresenceServer(args.events, args.setname, args.monitor, args.monitor_unavailable, args.invites)
     server = await asyncio.start_server(fixture.client, '127.0.0.1', 0)
     args.ready.write_text(json.dumps({'port': server.sockets[0].getsockname()[1]}))
     async with server:
