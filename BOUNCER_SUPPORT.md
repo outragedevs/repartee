@@ -9,8 +9,11 @@ Unknown extensions must remain forward-compatible. Each implementation PR gets
 `gpt-5.6-sol`, `medium` review/fix rounds until clean, then merges to main before
 the next PR. Run `make clippy` before `make test`; rebuild WASM for web changes.
 
-This is an implementation backlog, not a statement of completed support.
-All acceptance rows below remain pending until linked to tests and merged PRs.
+This is the full implementation and acceptance contract, not a statement of
+completed support. The [completion matrix](docs/validation/bouncer-completion-matrix.md)
+links every surface to implementation, tests and merged PRs and identifies the
+remaining gates. Historical progress notes below do not close those gates by
+themselves.
 
 ## Reproducible upstream evidence
 
