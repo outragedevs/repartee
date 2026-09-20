@@ -118,3 +118,25 @@ This passes for Soju with AutoAway enabled and disabled, and for Lurker with
 AutoAway enabled. It closes the earlier browser event-delivery gap. Native
 terminal attach/detach acceptance is separate; attempted GUI control of Ghostty
 was rejected by the computer-use tool and provides no evidence for that path.
+
+## Native shim acceptance
+
+Set `REPARTEE_DAEMON_NATIVE_ATTACH=1` on the existing presence runner with
+`--live-history --daemon-image IMAGE`. The image must include the native detach
+key correction. `scripts/bouncer_native_attach.py` runs the actual attach binary
+inside each disposable daemon container, through an owned PTY, after the browser
+client closes. No desktop terminal application is controlled.
+
+It checks initial absence, keyboard activity, focus-report handling, detach by
+both the control character and `/detach`, reattach, upstream AWAY, and continued
+daemon operation. The surrounding scenario checks two daemon lifecycles and
+actual SQLite/TRACE exclusion. CSI focus reports are deliberately injected;
+this proves Repartee's input/transport handling, not an OS terminal application's
+emission of focus events.
+
+The scenario reproduced a native bug: legacy terminals encode `Ctrl+\` as
+`0x1c`, which crossterm 0.29 decodes as `Ctrl+4`. The shim recognized only
+`Ctrl+\` and `Ctrl+Z`, so it forwarded the legacy chord instead of detaching.
+It now accepts both representations. The existing ordered-input regression
+covers all three decoded keys. The corrected actual-daemon scenarios pass both cycles on the pinned Lurker
+and Soju providers, with AutoAway enabled.
