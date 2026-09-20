@@ -292,3 +292,200 @@ async fn unlabeled_replies_keep_the_active_buffer_on_the_same_network() {
             .any(|message| message.text.contains("same-network-reply"))
     );
 }
+
+#[tokio::test]
+async fn redaction_web_request_and_rejection_keep_origin_without_local_deletion() {
+    let mut app = setup();
+    app.state
+        .connections
+        .get_mut("first")
+        .unwrap()
+        .enabled_caps
+        .extend(["draft/message-redaction".into(), "message-tags".into()]);
+    receive(
+        &mut app,
+        "first",
+        "@msgid=original :Alice!u@h PRIVMSG #origin :keep this message",
+    );
+    app.state.set_active_buffer("second/#origin");
+    app.handle_web_command(
+        crate::web::protocol::WebCommand::RunCommand {
+            buffer_id: "first/#origin".into(),
+            text: "/redact #origin original optional reason".into(),
+        },
+        "browser",
+    );
+    let frames = app.irc_handles["first"].sender().captured();
+    let frame = frames.last().unwrap();
+    assert_eq!(
+        frame.command,
+        irc::proto::Command::Raw(
+            "REDACT".into(),
+            vec![
+                "#origin".into(),
+                "original".into(),
+                "optional reason".into()
+            ]
+        )
+    );
+    let label = crate::irc::labels::message_label(frame).unwrap();
+    assert_eq!(app.state.redaction_registry.deletion_count(), 0);
+    receive(
+        &mut app,
+        "first",
+        &format!(
+            "@label={label} :server FAIL REDACT REDACT_FORBIDDEN #origin original :not allowed %N"
+        ),
+    );
+    assert!(
+        app.state.buffers["first/#origin"]
+            .messages
+            .iter()
+            .any(|message| message.text == "keep this message")
+    );
+    assert!(
+        app.state.buffers["first/#origin"]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("REDACT_FORBIDDEN")
+                && message.text.ends_with("%%N"))
+    );
+    assert!(
+        !app.state.buffers["second/#origin"]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("REDACT_FORBIDDEN"))
+    );
+    assert_eq!(
+        app.state.active_buffer_id.as_deref(),
+        Some("second/#origin")
+    );
+    assert_eq!(app.state.redaction_registry.deletion_count(), 0);
+}
+
+#[tokio::test]
+async fn redaction_received_before_cap_loss_survives_history_batch_completion() {
+    let mut app = setup();
+    app.state
+        .connections
+        .get_mut("first")
+        .unwrap()
+        .enabled_caps
+        .extend(["draft/message-redaction".into(), "message-tags".into()]);
+    receive(
+        &mut app,
+        "first",
+        ":server BATCH +history chathistory #origin",
+    );
+    receive(
+        &mut app,
+        "first",
+        "@batch=history;msgid=gone;time=2024-01-01T00:00:01.000Z :Alice!u@h PRIVMSG #origin :never expose this",
+    );
+    receive(
+        &mut app,
+        "first",
+        "@batch=history :Alice!u@h REDACT #origin gone",
+    );
+    receive(
+        &mut app,
+        "first",
+        ":server CAP me DEL :draft/message-redaction",
+    );
+    assert!(
+        !app.state.connections["first"]
+            .enabled_caps
+            .contains("draft/message-redaction")
+    );
+    receive(&mut app, "first", ":server BATCH -history");
+    assert!(
+        !app.state.buffers["first/#origin"]
+            .messages
+            .iter()
+            .any(|message| message.text == "never expose this")
+    );
+    assert!(
+        app.state.buffers["first/#origin"]
+            .messages
+            .iter()
+            .any(|message| message.text == "Message deleted by Alice")
+    );
+}
+
+#[tokio::test]
+async fn nested_history_keeps_redaction_after_cache_pressure() {
+    let mut app = setup();
+    app.state
+        .connections
+        .get_mut("first")
+        .unwrap()
+        .enabled_caps
+        .extend(["draft/message-redaction".into(), "message-tags".into()]);
+    receive(
+        &mut app,
+        "first",
+        ":server BATCH +history chathistory #origin",
+    );
+    receive(&mut app, "first", "@batch=history :server BATCH +child labeled-response");
+    receive(
+        &mut app,
+        "first",
+        "@batch=child;msgid=gone;time=2024-01-01T00:00:01.000Z :Alice!u@h PRIVMSG #origin :never expose this",
+    );
+    receive(
+        &mut app,
+        "first",
+        "@batch=history :Alice!u@h REDACT #origin gone",
+    );
+    receive(
+        &mut app,
+        "first",
+        ":server CAP me DEL :draft/message-redaction",
+    );
+    assert!(
+        !app.state.connections["first"]
+            .enabled_caps
+            .contains("draft/message-redaction")
+    );
+    receive(&mut app, "first", ":server BATCH -child");
+    for id in 0..10_000 {
+        app.state.redaction_registry.redact(
+            ("pressure".into(), "#channel".into(), id.to_string()), "deleted".into(),
+        );
+    }
+    receive(&mut app, "first", ":server BATCH -history");
+    assert!(
+        !app.state.buffers["first/#origin"]
+            .messages
+            .iter()
+            .any(|message| message.text == "never expose this")
+    );
+    assert!(
+        app.state.buffers["first/#origin"]
+            .messages
+            .iter()
+            .any(|message| message.text == "Message deleted by Alice")
+    );
+}
+
+#[tokio::test]
+async fn multiline_opener_retains_deletion_before_fragments_arrive() {
+    let mut app = setup();
+    app.state.connections.get_mut("first").unwrap().enabled_caps
+        .extend(["draft/message-redaction".into(), "message-tags".into()]);
+    receive(&mut app, "first", ":server BATCH +history chathistory #origin");
+    receive(&mut app, "first", "@batch=history;msgid=multi-ID;time=2024-01-01T00:00:01.000Z :Alice!u@h BATCH +multi draft/multiline #origin");
+    receive(&mut app, "first", ":Alice!u@h REDACT #origin multi-ID");
+    for id in 0..10_000 {
+        app.state.redaction_registry.redact(
+            ("pressure".into(), "#channel".into(), id.to_string()), "deleted".into(),
+        );
+    }
+    receive(&mut app, "first", "@batch=multi :Alice!u@h PRIVMSG #origin :hidden first line");
+    receive(&mut app, "first", "@batch=multi :Alice!u@h PRIVMSG #origin :hidden second line");
+    receive(&mut app, "first", ":server BATCH -multi");
+    receive(&mut app, "first", ":server BATCH -history");
+    let messages = &app.state.buffers["first/#origin"].messages;
+    assert!(messages.iter().any(|message| message.text == "Message deleted by Alice"));
+    assert!(!messages.iter().any(|message| message.text.contains("hidden")));
+}

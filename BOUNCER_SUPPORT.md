@@ -289,3 +289,10 @@ The `fix/bouncer-redaction-pagination` prerequisite excludes deletion metadata
 from CHATHISTORY page counts and anchors. Regression tests reproduced the old
 anchor error; make clippy/test and a clean full Sol medium review passed. Full
 redaction delivery, commands and native/web behavior remain unimplemented.
+
+Pagination prerequisite merged in https://github.com/outragedevs/repartee/pull/81.
+Redaction delivery is in progress on `feat/bouncer-redaction-delivery`.
+Selective bouncer capability negotiation, native/web command and event paths,
+derived-message retention, and actual Soju live deletion/history replay now pass
+validation. Pinned Lurker correctly rejects the unsupported feature. Full review
+rounds 1–5 returned findings, all fixed; round 6 is clean and local validation passes; see the redaction audit for the remaining acceptance gates.

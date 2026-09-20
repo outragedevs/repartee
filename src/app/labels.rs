@@ -45,6 +45,14 @@ impl App {
                 Some(label.clone()),
             )]);
         }
+        if crate::irc::redaction::is_redaction(&message)
+            && message.to_string().len() > crate::irc::PROTOCOL_LINE_MAX_BYTES
+        {
+            if let Some(label) = &label {
+                self.labeled_requests.get_mut(&id).unwrap().remove(label);
+            }
+            return Err("Redaction request exceeds the IRC line limit after labeling".into());
+        }
         let result = sender.send(message);
         if result.is_err()
             && let Some(label) = label

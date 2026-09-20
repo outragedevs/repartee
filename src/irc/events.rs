@@ -95,6 +95,9 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
                 tags,
             );
         }
+        Command::Raw(command, _) if command.eq_ignore_ascii_case("REDACT") => {
+            state.receive_redaction(conn_id, msg);
+        }
         Command::NOTICE(target, text) => {
             handle_notice(state, conn_id, msg.prefix.as_ref(), target, text, tags);
         }
@@ -194,6 +197,16 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
             && args.first().is_some_and(|arg| arg.eq_ignore_ascii_case("SETNAME")) => {
             crate::irc::setname::failure(state, conn_id, args);
         }
+        Command::Raw(command, args) if command.eq_ignore_ascii_case("FAIL")
+            && args.first().is_some_and(|arg| arg.eq_ignore_ascii_case("REDACT")) => {
+            if args.len() >= 3 {
+                let buffer_id = active_or_server_buffer(state, conn_id);
+                let text = crate::commands::helpers::escape_format(&format!(
+                    "REDACT rejected: {} — {}", args[1], args.last().unwrap()
+                ));
+                emit(state, &buffer_id, &text);
+            }
+        }
         Command::ACCOUNT(account) => {
             handle_account(state, conn_id, msg.prefix.as_ref(), account, tags);
         }
@@ -241,6 +254,8 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
                     state.add_message(
                         &buffer_id,
                         Message {
+                            redaction_ref: None,
+                            redaction_msgid: None,
                             log_key: None,
                             id,
                             timestamp: Utc::now(),
@@ -349,6 +364,8 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
             state.add_message(
                 &buffer_id,
                 Message {
+                    redaction_ref: None,
+                    redaction_msgid: None,
                     log_key: None,
                     id,
                     timestamp: Utc::now(),
@@ -407,6 +424,8 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
     state.add_message(
         &buffer_id,
         Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id,
             timestamp: Utc::now(),
@@ -536,6 +555,8 @@ pub fn handle_disconnected(state: &mut AppState, conn_id: &str, error: Option<&s
     state.add_message(
         &buffer_id,
         Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id,
             timestamp: Utc::now(),
@@ -631,7 +652,7 @@ pub fn handle_cap_new(
         .filter(|cap| {
             (DESIRED_CAPS.iter().any(|d| d.eq_ignore_ascii_case(cap))
                 || (state.connections.get(conn_id).is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some() && !conn.origin_config.bouncer_control)
-                    && matches!(cap.as_str(), "draft/read-marker" | "soju.im/read")))
+                    && matches!(cap.as_str(), "draft/read-marker" | "soju.im/read" | "draft/message-redaction")))
                 && enabled.is_none_or(|set| !set.contains(cap.as_str()))
         })
         .cloned()
@@ -670,6 +691,8 @@ pub fn handle_cap_new(
     state.add_message(
         &buffer_id,
         Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id,
             timestamp: Utc::now(),
@@ -742,6 +765,8 @@ pub fn handle_cap_del(
     state.add_message(
         &buffer_id,
         Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id,
             timestamp: Utc::now(),
@@ -802,6 +827,8 @@ pub fn handle_cap_ack(
     state.add_message(
         &buffer_id,
         Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id,
             timestamp: Utc::now(),
@@ -858,6 +885,8 @@ pub fn handle_cap_nak(
     state.add_message(
         &buffer_id,
         Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id,
             timestamp: Utc::now(),
@@ -1142,7 +1171,9 @@ pub fn ingest_chathistory_batch(
 
         let timestamp = message_timestamp(tags.as_ref());
 
-        let message = Message {
+        let mut message = Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: 0, // store-only: real id assigned if/when spliced into a buffer
             timestamp,
@@ -1162,6 +1193,8 @@ pub fn ingest_chathistory_batch(
             wire_origin: None,
             translation_suffix_at: None,
         };
+
+        state.apply_redaction(&buffer_id, &mut message);
 
         // Only count rows the storage layer actually queued. A row dropped by
         // maybe_log (a `log_exclude_types` type like message/notice/action, or a
@@ -1679,7 +1712,10 @@ fn handle_privmsg(
             let ts = message_timestamp(tags.as_ref());
             // Save nick before moving into Message — needed for mentions buffer below.
             let nick_saved = if is_mention { Some(nick.clone()) } else { None };
+            let mention_msgid = tags.as_ref().and_then(|tags| tags.get("msgid")).cloned();
             let action_row = Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                     id,
                     timestamp: ts,
@@ -1729,7 +1765,7 @@ fn handle_privmsg(
             if is_mention && target_is_channel && !deferred {
                 let nick = nick_saved.unwrap_or_default();
                 let action_body = format!("* {nick} {action_text}");
-                state.fan_out_mention(conn_id, target, &nick, &action_body, ts);
+                state.fan_out_mention(conn_id, target, &nick, &action_body, (ts, mention_msgid.as_deref()));
             }
 
             return;
@@ -1878,7 +1914,10 @@ fn handle_privmsg(
     let ts = message_timestamp(tags.as_ref());
     // Save nick before moving into Message — needed for mentions buffer below.
     let nick_saved = if is_mention { Some(nick.clone()) } else { None };
+    let mention_msgid = tags.as_ref().and_then(|tags| tags.get("msgid")).cloned();
     let msg = Message {
+        redaction_ref: None,
+        redaction_msgid: e2e_transient_line.then(|| mention_msgid.clone()).flatten(),
         log_key: None,
         id,
         timestamp: ts,
@@ -1932,7 +1971,7 @@ fn handle_privmsg(
     // Push to mentions buffer — channel highlights only (not PMs/queries).
     if is_mention && target_is_channel && !deferred_for_translation {
         let nick = nick_saved.unwrap_or_default();
-        state.fan_out_mention(conn_id, target, &nick, text, ts);
+        state.fan_out_mention(conn_id, target, &nick, text, (ts, mention_msgid.as_deref()));
     }
 }
 
@@ -2053,6 +2092,8 @@ fn handle_notice(
     state.add_message(
         &buffer_id,
         Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id,
             timestamp: message_timestamp(tags.as_ref()),
@@ -2255,6 +2296,8 @@ fn handle_join(
     state.add_message(
         &buffer_id,
         Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id,
             timestamp: message_timestamp(tags.as_ref()),
@@ -2361,6 +2404,8 @@ fn handle_account(
         state.add_message(
             &buf_id,
             Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: message_timestamp(tags.as_ref()),
@@ -2773,6 +2818,8 @@ fn handle_chghost(
         state.add_message(
             &buf_id,
             Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: message_timestamp(tags.as_ref()),
@@ -2855,6 +2902,8 @@ fn handle_part(
         state.add_message(
             &buffer_id,
             Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: message_timestamp(tags.as_ref()),
@@ -2977,6 +3026,8 @@ fn handle_quit(
         state.add_message(
             buf_id,
             Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: ts,
@@ -3240,6 +3291,8 @@ fn handle_nick_change(
         state.add_message(
             buf_id,
             Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: ts,
@@ -3331,6 +3384,8 @@ fn handle_kick(
                              tg: Option<HashMap<String, String>>|
          -> Message {
             Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id: state.next_message_id(),
                 timestamp: ts,
@@ -3382,6 +3437,8 @@ fn handle_kick(
         state.add_message(
             &buffer_id,
             Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: ts,
@@ -3432,6 +3489,8 @@ fn handle_topic(
         state.add_message(
             &buffer_id,
             Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: message_timestamp(tags.as_ref()),
@@ -3502,6 +3561,8 @@ fn handle_mode(
         state.add_message(
             &buffer_id,
             Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: ts,
@@ -3529,6 +3590,8 @@ fn handle_mode(
         state.add_message(
             &server_buf,
             Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: ts,
@@ -3825,6 +3888,8 @@ fn handle_invite(
 
         let id = state.next_message_id();
         let message = Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id,
             timestamp: message_timestamp(tags.as_ref()),
@@ -3858,6 +3923,8 @@ fn handle_invite(
             state.add_message(
                 &buffer_id,
                 Message {
+                    redaction_ref: None,
+                    redaction_msgid: None,
                     log_key: None,
                     id,
                     timestamp: message_timestamp(tags.as_ref()),
@@ -4548,6 +4615,8 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
             state.add_message(
                 &buffer_id,
                 Message {
+                    redaction_ref: None,
+                    redaction_msgid: None,
                     log_key: None,
                     id,
                     timestamp: Utc::now(),
@@ -4609,6 +4678,8 @@ pub fn emit(state: &mut AppState, buffer_id: &str, text: &str) {
     state.add_message(
         buffer_id,
         Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id,
             timestamp: Utc::now(),
@@ -4639,6 +4710,8 @@ fn emit_event(
     state.add_message(
         buffer_id,
         Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id,
             timestamp: Utc::now(),
@@ -5578,6 +5651,8 @@ fn emit_e2e_debug(
     state.add_message(
         &target_buffer,
         Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id,
             timestamp: Utc::now(),
@@ -5608,6 +5683,8 @@ fn emit_e2e_message(
     state.add_message(
         buffer_id,
         Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id,
             timestamp: Utc::now(),
@@ -5877,6 +5954,8 @@ pub(crate) fn e2e_event_message(
     highlight: bool,
 ) -> Message {
     Message {
+        redaction_ref: None,
+        redaction_msgid: None,
         log_key: None,
         id,
         timestamp: Utc::now(),
@@ -8050,6 +8129,7 @@ mod tests {
             .iter()
             .find(|m| m.text == "[E2E: awaiting our own identity]")
             .expect("placeholder must be rendered live");
+        assert_eq!(placeholder.redaction_msgid.as_deref(), Some("server-msgid-1"));
         // ...carrying NO @msgid, so the later decrypted CHATHISTORY replay (same
         // server @msgid) isn't deduped against it in surface_history_rows.
         assert!(

@@ -66,7 +66,7 @@ pub enum ShrinkDeliver {
     /// `state.add_message_with_activity(buffer_id, message,
     /// activity_level)` (with `message.text` already substituted) and
     /// runs the secondary side-effects (mention buffer push).
-    Incoming(IncomingDeliver),
+    Incoming(Box<IncomingDeliver>),
     /// `/shrink <url>` manual output line. The loop just appends a
     /// local event with `display` to the buffer.
     Manual { buffer_id: String, display: String },
@@ -317,12 +317,12 @@ fn spawn_incoming_worker(
                         suffix_at: None,
                     });
                 }
-                ShrinkDeliver::Incoming(IncomingDeliver {
+                ShrinkDeliver::Incoming(Box::new(IncomingDeliver {
                     buffer_id: pending.buffer_id,
                     message: pending.message,
                     activity_level: pending.activity_level,
                     push_to_mentions: pending.push_to_mentions,
-                })
+                }))
             });
             match outcome.catch_unwind().await {
                 Ok(deliver_msg) => {
@@ -643,6 +643,8 @@ impl App {
                 // Shrink holds no reservation, so each row orders by itself.
                 id,
                 Message {
+                    redaction_ref: None,
+                    redaction_msgid: None,
                     log_key: None,
                     id,
                     timestamp: chrono::Utc::now(),

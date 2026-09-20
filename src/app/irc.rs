@@ -119,17 +119,25 @@ impl App {
             self.state.set_active_buffer(&server_buf_id);
         }
 
+        self.show_connecting_notice(&server_buf_id, &server_config.label);
+
+        server_buf_id
+    }
+
+    fn show_connecting_notice(&mut self, server_buf_id: &str, label: &str) {
         let id = self.state.next_message_id();
         self.state.add_message(
-            &server_buf_id,
+            server_buf_id,
             Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: Utc::now(),
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
-                text: format!("Connecting to {}...", server_config.label),
+                text: format!("Connecting to {label}..."),
                 highlight: false,
                 event_key: None,
                 event_params: None,
@@ -140,8 +148,6 @@ impl App {
                 translation_suffix_at: None,
             },
         );
-
-        server_buf_id
     }
 
     /// Recompute the keyring's configured-network set from the CURRENT servers
@@ -199,6 +205,8 @@ impl App {
         self.state.add_local_message(
             buffer_id,
             Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: Utc::now(),
@@ -671,6 +679,7 @@ impl App {
                 // Handle BATCH commands (start/end) and collect @batch-tagged messages.
                 if let ::irc::proto::Command::BATCH(ref ref_tag, ref sub, ref params) = msg.command
                 {
+                    let redaction_ref = self.state.retain_wire_redaction(&conn_id, &msg);
                     let tracker = self.batch_trackers.entry(conn_id.clone()).or_default();
                     if let Some(tag) = ref_tag.strip_prefix('+') {
                         // Start batch
@@ -679,6 +688,9 @@ impl App {
                             .map_or_else(String::new, |s| s.to_str().to_string());
                         let batch_params = params.clone().unwrap_or_default();
                         tracker.start_batch(tag, &batch_type, batch_params, msg.tags.clone());
+                        if let Some(identity) = redaction_ref {
+                            tracker.retain_redactions(tag, &[identity]);
+                        }
                         tracing::debug!("batch started: tag={tag} type={batch_type}");
                     } else if let Some(tag) = ref_tag.strip_prefix('-') {
                         // End batch
@@ -701,11 +713,21 @@ impl App {
                     .or_default()
                     .is_batched(&msg)
                 {
+                    if crate::irc::redaction::is_redaction(&msg) {
+                        self.state.receive_redaction(&conn_id, &msg);
+                        self.drain_pending_web_events();
+                    }
+                    let redaction_ref = self.state.retain_wire_redaction(&conn_id, &msg);
+                    let batch_tag = crate::irc::batch::BatchTracker::get_batch_tag_owned(&msg);
                     // Message belongs to an open batch — collect it, don't process now
                     if let Some(tracker) = self.batch_trackers.get_mut(&conn_id) {
                         let mut message = *msg;
                         tracker.inherit_label(&mut message);
                         tracker.add_message(message);
+                        if let (Some(tag), Some(identity)) = (batch_tag, redaction_ref) {
+                            tracker.retain_redactions(&tag, &[identity]);
+                            tracker.refresh_redactions(&tag, &mut self.state, &conn_id);
+                        }
                     }
                 } else {
                     self.dispatch_live_irc_message(&conn_id, &msg);

@@ -213,6 +213,8 @@ impl App {
         self.state.add_message(
             &buf_id,
             Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: Utc::now(),

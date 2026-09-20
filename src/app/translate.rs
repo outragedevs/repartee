@@ -2558,6 +2558,8 @@ impl crate::app::App {
                     (body.clone(), None)
                 };
                 crate::state::buffer::Message {
+                    redaction_ref: None,
+                    redaction_msgid: None,
                     log_key: None,
                     id: self.state.next_message_id(),
                     timestamp: chrono::Utc::now(),
@@ -2615,6 +2617,8 @@ impl crate::app::App {
         self.state.add_local_message_in_order(
             &buf_id,
             crate::state::buffer::Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: chrono::Utc::now(),
@@ -2996,6 +3000,8 @@ mod app_tests {
 
     fn message(id: u64, text: &str) -> Message {
         Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id,
             timestamp: chrono::Utc::now(),
@@ -8206,6 +8212,8 @@ mod ordering_integration {
 
     fn message(id: u64, text: &str) -> Message {
         Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id,
             timestamp: chrono::Utc::now(),

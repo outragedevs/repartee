@@ -901,6 +901,8 @@ pub fn ChatView() -> impl IntoView {
                                 msg.id,
                                 msg.log_id,
                                 if msg.id == 0 { msg.timestamp } else { 0 },
+                                msg.text.clone(),
+                                msg.msg_type.clone(),
                             )
                             children=move |msg| render_message(state, msg)
                         />

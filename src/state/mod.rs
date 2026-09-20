@@ -6,6 +6,8 @@ use tokio::sync::mpsc;
 mod activity;
 mod read_state;
 mod read_identity;
+mod redaction;
+pub mod redaction_registry;
 pub mod buffer;
 pub mod connection;
 pub mod events;
@@ -215,6 +217,7 @@ pub struct AppState {
     pub(crate) web_history_buffers: HashMap<String, String>,
     pub active_buffer_id: Option<String>,
     pub irc_reply_buffer: Option<String>,
+    pub(crate) redaction_registry: redaction_registry::Registry,
     pub previous_buffer_id: Option<String>,
     pub message_counter: u64,
     activity_counter: u64,

@@ -497,6 +497,8 @@ pub(crate) fn rows_to_buffer_messages(
         if last_date.is_none_or(|d| d != local_date) {
             let sep_text = crate::app::backlog::format_date_separator(local_date);
             out.push(Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id: state.next_message_id(),
                 timestamp: ts,
@@ -556,6 +558,8 @@ pub(crate) fn stored_to_message(
         // DISPLAY text — for a translated row, not what crossed the wire — so
         // without this a CHATHISTORY replay of the same line has nothing to
         // match against and is spliced in beside it, untranslated.
+        redaction_ref: None,
+        redaction_msgid: None,
         log_key: Some(stored.msg_id.clone()),
         log_ref_id: None,
         tags: None,

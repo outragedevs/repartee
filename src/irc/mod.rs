@@ -8,7 +8,7 @@ pub mod setname;
 pub mod monitor;
 pub mod names;
 pub mod labels;
-pub(crate) mod redaction;
+pub mod redaction;
 pub mod extban;
 pub mod flood;
 pub mod formatting;
@@ -1064,7 +1064,7 @@ async fn negotiate_caps(
         // Compute capabilities to request
         let mut caps_to_request = server_caps.negotiate(DESIRED_CAPS);
         if params.bouncer_network_id.is_some() && !params.bouncer_control {
-            caps_to_request.extend(cap::bouncer_read_caps(&server_caps));
+            caps_to_request.extend(cap::bouncer_network_caps(&server_caps));
             caps_to_request.extend(server_caps.negotiate(&["draft/pre-away"]));
         }
         if params.bouncer_network_id.is_some() || params.bouncer_control {

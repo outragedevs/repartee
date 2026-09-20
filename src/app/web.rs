@@ -34,6 +34,8 @@ impl App {
         self.state.add_message(
             &buffer_id,
             crate::state::buffer::Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: chrono::Utc::now(),
@@ -293,7 +295,29 @@ impl App {
                 ref message,
             } = event
             {
+                if message.msgid.as_deref()
+                    .and_then(|id| self.state.redaction_key(buffer_id, id))
+                    .and_then(|key| self.state.redaction_registry.get(&key))
+                    .is_some_and(|identity| identity.notice().is_some())
+                {
+                    continue;
+                }
                 self.record_mention(buffer_id, message);
+            }
+            if matches!(event, crate::web::protocol::WebEvent::RedactMessage { .. }) {
+                self.inline_previews.purge();
+                let mut message_ids = Vec::new();
+                self.volatile_mentions.retain(|(_, mention, identity)| {
+                    let keep = identity.as_ref().is_none_or(|identity| identity.notice().is_none());
+                    if !keep { message_ids.push(mention.source_message_id); }
+                    keep
+                });
+                if !message_ids.is_empty() {
+                    structural_change = true;
+                    self.broadcast_web(crate::web::protocol::WebEvent::MentionsRedacted {
+                        message_ids,
+                    });
+                }
             }
             self.broadcast_web(event);
         }
@@ -438,15 +462,21 @@ impl App {
         if self.server_owns_buffer_history(buffer_id) {
             let (conn_id, target) = crate::web::snapshot::split_buffer_id(buffer_id);
             let scope = self.state.connections[conn_id].network_key().to_string();
-            let id = self.volatile_mentions.back().map_or(-1, |(_, mention)| mention.id.saturating_sub(1));
+            let identity = msg.msgid.as_deref().and_then(|id| self.state.redaction_key(buffer_id, id))
+                .map(|key| self.state.redaction_registry.track(key));
+            if identity.as_ref().is_some_and(|identity| identity.notice().is_some()) {
+                return;
+            }
+            let id = self.volatile_mentions.back().map_or(-1, |(_, mention, _)| mention.id.saturating_sub(1));
             self.volatile_mentions.push_back((scope, crate::web::protocol::WireMention {
                 id,
+                source_message_id: msg.id,
                 timestamp: msg.timestamp,
                 buffer_id: buffer_id.to_string(),
                 channel: self.state.buffers.get(buffer_id).map_or(target, |buf| buf.name.as_str()).to_string(),
                 nick: msg.nick.clone().unwrap_or_default(),
                 text: msg.text.clone(),
-            }));
+            }, identity));
             while self.volatile_mentions.len() > 1000 {
                 self.volatile_mentions.pop_front();
             }
@@ -1022,6 +1052,7 @@ impl App {
             .filter(|mention| !Self::mention_uses_server_history(&mention.network, &mention.buffer))
             .map(|mention| crate::web::protocol::WireMention {
                 id: mention.id,
+                source_message_id: 0,
                 timestamp: mention.timestamp,
                 buffer_id: self.mention_target(&mention.network)
                     .map_or_else(String::new, |(id, _)| crate::state::buffer::make_buffer_id(&id, &mention.buffer)),
@@ -1029,7 +1060,7 @@ impl App {
                 nick: mention.nick,
                 text: mention.text,
             }).collect::<Vec<_>>();
-        wire.extend(self.volatile_mentions.iter().map(|(scope, mention)| {
+        wire.extend(self.volatile_mentions.iter().map(|(scope, mention, _)| {
             let mut mention = mention.clone();
             let (_, target) = crate::web::snapshot::split_buffer_id(&mention.buffer_id);
             mention.buffer_id = self.mention_target(scope)
@@ -1038,6 +1069,7 @@ impl App {
         }));
         wire.sort_by_key(|mention| std::cmp::Reverse(mention.timestamp));
         self.broadcast_web(crate::web::protocol::WebEvent::MentionsList {
+            through: self.state.message_counter,
             mentions: wire,
             session_id: Some(session_id.to_string()),
         });

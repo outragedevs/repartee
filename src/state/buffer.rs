@@ -125,6 +125,8 @@ pub struct Message {
     /// No new column: this is the key the log has always kept, just no longer
     /// thrown away on the way back.
     pub log_key: Option<String>,
+    pub redaction_msgid: Option<String>,
+    pub redaction_ref: Option<std::sync::Arc<super::redaction_registry::Identity>>,
 }
 
 /// What the network carried for a row whose display differs from it.

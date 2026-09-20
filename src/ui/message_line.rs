@@ -413,6 +413,8 @@ mod tests {
 
     fn test_message(nick: &str, text: &str, msg_type: MessageType) -> Message {
         Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: 1,
             timestamp: Utc::now(),
@@ -613,6 +615,8 @@ mod tests {
     fn render_event_text(theme_src: &str, event_key: &str, params: &[&str]) -> String {
         let theme = shipped_theme(theme_src);
         let msg = Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: 1,
             timestamp: Utc::now(),
@@ -826,6 +830,8 @@ mod tests {
     #[test]
     fn render_event_message() {
         let msg = Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: 1,
             timestamp: Utc::now(),

@@ -35,6 +35,7 @@ pub struct BatchInfo {
     /// Messages collected while the batch was open.
     pub messages: Vec<IrcMessage>,
     pub message_order: Vec<u64>,
+    pub redaction_refs: Vec<std::sync::Arc<crate::state::redaction_registry::Identity>>,
     pub dropped_messages: usize,
     /// When this batch was opened.
     pub started_at: Instant,
@@ -45,6 +46,46 @@ pub struct BatchInfo {
 }
 
 impl BatchInfo {
+    pub fn retain_redactions(&mut self, references: &[std::sync::Arc<crate::state::redaction_registry::Identity>]) {
+        let mut ids: HashSet<&str> = self.messages.iter().filter_map(|message| {
+            message.tags.as_ref()?.iter().find(|tag| tag.0 == "msgid")?.1.as_deref()
+        }).collect();
+        for message in &self.messages {
+            if let Command::Raw(command, args) = &message.command
+                && command.eq_ignore_ascii_case("REDACT")
+                && let Some(id) = args.get(1)
+            {
+                ids.insert(id);
+            }
+        }
+        if self.batch_type == "DRAFT/MULTILINE"
+            && let Some(id) = self.opener_tags.as_ref().and_then(|tags| {
+                tags.iter().find(|tag| tag.0 == "msgid").and_then(|tag| tag.1.as_deref())
+            })
+        {
+            ids.insert(id);
+        }
+        self.redaction_refs.extend_from_slice(references);
+        self.redaction_refs.retain(|identity| ids.contains(identity.key.2.as_str()));
+        self.redaction_refs.sort_by(|a, b| a.key.cmp(&b.key));
+        self.redaction_refs.dedup_by(|a, b| a.key == b.key);
+    }
+
+    pub fn refresh_redactions(&mut self, state: &mut AppState, conn_id: &str) {
+        let opener_id = (self.batch_type == "DRAFT/MULTILINE").then(|| {
+            self.opener_tags.as_ref()?.iter().find(|tag| tag.0 == "msgid")?.1.as_deref()
+        }).flatten();
+        let mut references: Vec<_> = self.redaction_refs.iter()
+            .filter(|identity| Some(identity.key.2.as_str()) == opener_id)
+            .cloned().collect();
+        references.extend(self.messages.iter().filter_map(|message| {
+            state.retain_wire_redaction(conn_id, message)
+        }));
+        references.sort_by(|a, b| a.key.cmp(&b.key));
+        references.dedup_by(|a, b| a.key == b.key);
+        self.redaction_refs = references;
+    }
+
     pub fn is_live(&self) -> bool {
         !matches!(
             self.batch_type.as_str(),
@@ -150,6 +191,7 @@ impl BatchTracker {
             ref_tag.to_string(),
             BatchInfo {
                 message_order: Vec::new(),
+            redaction_refs: Vec::new(),
                 batch_type: batch_type.to_uppercase(),
                 params,
                 messages: Vec::new(),
@@ -232,6 +274,18 @@ impl BatchTracker {
         }
     }
 
+    pub fn retain_redactions(&mut self, tag: &str, references: &[std::sync::Arc<crate::state::redaction_registry::Identity>]) {
+        if let Some(batch) = self.open.get_mut(tag) {
+            batch.retain_redactions(references);
+        }
+    }
+
+    pub fn refresh_redactions(&mut self, tag: &str, state: &mut AppState, conn_id: &str) {
+        if let Some(batch) = self.open.get_mut(tag) {
+            batch.refresh_redactions(state, conn_id);
+        }
+    }
+
     /// End a batch and return its collected information.
     ///
     /// Returns `None` if no batch with the given tag exists.
@@ -250,7 +304,7 @@ impl BatchTracker {
     }
 
     /// Same as `get_batch_tag` but returns an owned `String`.
-    fn get_batch_tag_owned(msg: &IrcMessage) -> Option<String> {
+    pub(crate) fn get_batch_tag_owned(msg: &IrcMessage) -> Option<String> {
         Self::get_batch_tag(msg).map(str::to_string)
     }
 }
@@ -312,6 +366,9 @@ pub fn process_completed_batch(
             // directions we also collect the conversational rows and splice
             // them into the live buffer.
             use crate::irc::chathistory::Direction;
+            for message in &batch.messages {
+                state.receive_redaction(conn_id, message);
+            }
             let direction = batch.params.first().and_then(|target| {
                 state
                     .connections
@@ -419,7 +476,8 @@ pub fn process_completed_batch(
             // may route to different buffers).
             if !outcome.display_rows.is_empty() {
                 let mut by_buffer: HashMap<(String, String), Vec<Message>> = HashMap::new();
-                for (buf_id, msg) in outcome.display_rows {
+                for (buf_id, mut msg) in outcome.display_rows {
+                    state.attach_redaction_ref(&buf_id, &mut msg);
                     let redirected = request_started.and_then(|started| {
                         match state.redirected_buffer_id(&buf_id, started) {
                             crate::state::BufferRedirect::MovedTo(id) => Some(id.to_string()),
@@ -745,6 +803,8 @@ fn process_netsplit_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo
         state.add_message(
             buf_id,
             Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: ts,
@@ -827,6 +887,8 @@ fn process_netjoin_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo)
         state.add_message(
             buf_id,
             Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: ts,
@@ -1118,6 +1180,7 @@ mod tests {
         // Create NETSPLIT batch
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "NETSPLIT".to_string(),
             params: vec!["hub.net".to_string(), "leaf.net".to_string()],
             started_at: Instant::now(),
@@ -1214,6 +1277,7 @@ mod tests {
             "old".to_string(),
             BatchInfo {
                 message_order: Vec::new(),
+            redaction_refs: Vec::new(),
                 batch_type: "NETSPLIT".to_string(),
                 params: vec![],
                 messages: vec![],
@@ -1256,6 +1320,7 @@ mod tests {
             "old".to_string(),
             BatchInfo {
                 message_order: Vec::new(),
+            redaction_refs: Vec::new(),
                 batch_type: "NETSPLIT".to_string(),
                 params: vec!["hub.example".to_string(), "leaf.example".to_string()],
                 messages: vec![IrcMessage {
@@ -1399,6 +1464,7 @@ mod tests {
 
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "NETJOIN".to_string(),
             params: vec!["hub.example".to_string(), "leaf.example".to_string()],
             started_at: Instant::now(),
@@ -1448,6 +1514,7 @@ mod tests {
 
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -1494,6 +1561,7 @@ mod tests {
 
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["bob".to_string()],
             started_at: Instant::now(),
@@ -1522,6 +1590,7 @@ mod tests {
 
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -1554,6 +1623,7 @@ mod tests {
             .mark_in_flight("#test", crate::irc::chathistory::Direction::Before, 200);
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".into(),
             params: vec!["#test".into()],
             started_at: Instant::now(),
@@ -1600,6 +1670,7 @@ mod tests {
                 .clear_stale(std::time::Duration::ZERO);
             let batch = BatchInfo {
                 message_order: Vec::new(),
+            redaction_refs: Vec::new(),
                 batch_type: "CHATHISTORY".into(),
                 params: vec!["#test".into()],
                 started_at: Instant::now(),
@@ -1622,6 +1693,7 @@ mod tests {
         state.connections.get_mut("test").unwrap().chathistory.mark_in_flight("#test", crate::irc::chathistory::Direction::Before, 200);
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".into(), params: vec!["#test".into()],
             started_at: Instant::now(), opener_tags: None, dropped_messages: 0,
             messages: vec![
@@ -1641,6 +1713,7 @@ mod tests {
         state.pending_web_events.clear();
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".into(),
             params: vec!["Peer".into()],
             started_at: Instant::now(),
@@ -1680,6 +1753,7 @@ mod tests {
         // its full millisecond time and its msgid — not a floored second.
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -1724,6 +1798,7 @@ mod tests {
 
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -1753,6 +1828,7 @@ mod tests {
         let other_ctcp = make_history_privmsg("bob", "#test", "\u{1}VERSION\u{1}", "c1");
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -1787,6 +1863,7 @@ mod tests {
         }
         let full = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -1816,6 +1893,7 @@ mod tests {
             .mark_in_flight("#test", Direction::After, 2);
         let short = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -1848,6 +1926,7 @@ mod tests {
                 .mark_in_flight("#test", direction, 2);
             let batch = BatchInfo {
                 message_order: Vec::new(),
+            redaction_refs: Vec::new(),
                 batch_type: "CHATHISTORY".into(),
                 params: vec!["#test".into()],
                 started_at: Instant::now(),
@@ -1887,6 +1966,7 @@ mod tests {
                 .mark_in_flight("#test", Direction::Before, 1);
             let batch = BatchInfo {
                 message_order: Vec::new(),
+            redaction_refs: Vec::new(),
                 batch_type: "CHATHISTORY".into(),
                 params: vec!["#test".into()],
                 started_at: Instant::now(),
@@ -1924,6 +2004,7 @@ mod tests {
             .mark_in_flight("#test", Direction::After, 1);
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".into(),
             params: vec!["#test".into()],
             started_at: Instant::now(),
@@ -1955,6 +2036,7 @@ mod tests {
         }
         let full = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -1990,6 +2072,8 @@ mod tests {
             .unwrap()
             .messages
             .push_back(Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id: 1,
                 timestamp: live_ts,
@@ -2019,6 +2103,7 @@ mod tests {
         // of the message already shown live (same @msgid → must dedup).
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2063,6 +2148,7 @@ mod tests {
 
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2096,6 +2182,7 @@ mod tests {
 
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2128,6 +2215,7 @@ mod tests {
 
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2162,6 +2250,7 @@ mod tests {
 
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2201,6 +2290,7 @@ mod tests {
 
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2242,6 +2332,7 @@ mod tests {
 
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2272,6 +2363,7 @@ mod tests {
 
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2310,6 +2402,7 @@ mod tests {
 
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2348,6 +2441,7 @@ mod tests {
 
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2463,6 +2557,7 @@ mod tests {
         // QUIT messages use mixed-case nicks (as received from IRC)
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "NETSPLIT".to_string(),
             params: vec!["hub.net".to_string(), "leaf.net".to_string()],
             started_at: Instant::now(),
@@ -2510,6 +2605,7 @@ mod tests {
 
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "NETSPLIT".to_string(),
             params: vec!["hub.net".to_string(), "leaf.net".to_string()],
             started_at: Instant::now(),
@@ -2557,6 +2653,7 @@ mod tests {
 
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "DRAFT/MULTILINE".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2608,6 +2705,7 @@ mod tests {
         };
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "DRAFT/MULTILINE".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2637,6 +2735,7 @@ mod tests {
             .collect();
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "DRAFT/MULTILINE".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2674,6 +2773,7 @@ mod tests {
         // Tracker reports it dropped tail fragments (oversized batch).
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "DRAFT/MULTILINE".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2711,6 +2811,7 @@ mod tests {
             .collect();
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "DRAFT/MULTILINE".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2739,6 +2840,7 @@ mod tests {
         let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "DRAFT/MULTILINE".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2768,6 +2870,7 @@ mod tests {
         let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "DRAFT/MULTILINE".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2808,6 +2911,7 @@ mod tests {
         // Fragments target different channels — a malformed/malicious batch.
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "DRAFT/MULTILINE".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2842,6 +2946,7 @@ mod tests {
         };
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "DRAFT/MULTILINE".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2877,6 +2982,7 @@ mod tests {
         };
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "DRAFT/MULTILINE".to_string(),
             params: vec!["#Test".to_string()],
             started_at: Instant::now(),
@@ -2975,6 +3081,7 @@ mod tests {
 
         let child = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "DRAFT/MULTILINE".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -2993,6 +3100,7 @@ mod tests {
         // Fold into a co-expired CHATHISTORY parent, then process the parent.
         let parent = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
@@ -3013,6 +3121,7 @@ mod tests {
         let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
         let batch = BatchInfo {
             message_order: Vec::new(),
+            redaction_refs: Vec::new(),
             batch_type: "DRAFT/MULTILINE".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),

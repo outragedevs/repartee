@@ -24,6 +24,12 @@ use super::types::{CommandCategory, CommandDef};
 
 static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
     vec![
+        ("redact", CommandDef {
+            handler: crate::irc::redaction::command,
+            description: "Request message deletion: /redact <target> <msgid> [reason]",
+            aliases: &[],
+            category: CommandCategory::Connection,
+        }),
         ("monitor", CommandDef {
             handler: crate::app::monitor::command,
             description: "Watch IRC nick availability and identity updates",

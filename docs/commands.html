@@ -1264,6 +1264,36 @@ version, and project URL.</p>
 <h2>See Also</h2>
 <p>/disconnect, /close</p>
 </div>
+<div class="command-entry" data-command="redact" data-category="Connection">
+<h1>/redact</h1>
+<h2>Syntax</h2>
+<pre><code>/redact &lt;target&gt; &lt;msgid&gt; [reason]
+</code></pre>
+<h2>Description</h2>
+<p>Ask the current network to delete a message in a channel or private conversation.
+Use the exact IRC message ID supplied by the server; IDs are case-sensitive.
+The optional reason may contain spaces. No reason is supplied automatically.</p>
+<p>The connection must be a connected bouncer network that has negotiated
+<code>draft/message-redaction</code> and <code>message-tags</code>. Control connections and connections
+without this support report that redaction is unavailable. The pinned Lurker
+version does not offer this capability.</p>
+<p>The message remains visible until the server confirms deletion with REDACT.
+The server decides which messages you may delete and whether a time limit
+applies. Rejections appear in the originating command buffer when response
+labels are available, otherwise on the originating network. A rejection does
+not delete the message locally.</p>
+<p>Confirmed deletion replaces the message with a notice identifying who deleted
+it and any reason the server supplied. Once detailed deletion metadata expires,
+older messages still remain deleted but may show only a generic deletion notice.
+Recipients that do not support message
+redaction may retain their original copy.</p>
+<h2>Examples</h2>
+<pre><code>/redact #chat opaque-message-id
+/redact Alice another-message-id sent to the wrong conversation
+</code></pre>
+<h2>See Also</h2>
+<p>/msg, /bouncer</p>
+</div>
 <div class="command-entry" data-command="server" data-category="Connection">
 <h1>/server</h1>
 <h2>Syntax</h2>

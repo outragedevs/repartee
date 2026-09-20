@@ -30,6 +30,8 @@ mod invite_fixture;
 #[cfg(test)]
 mod names_fixture;
 #[cfg(test)]
+mod redaction_fixture;
+#[cfg(test)]
 mod live_batch_tests;
 #[cfg(test)]
 mod presence_fixture;
@@ -416,7 +418,7 @@ pub struct App {
     pub lag_pings: HashMap<String, Instant>,
     pub(crate) batch_trackers: HashMap<String, crate::irc::batch::BatchTracker>,
     pub storage: Option<crate::storage::Storage>,
-    pub(crate) volatile_mentions: VecDeque<(String, crate::web::protocol::WireMention)>,
+    pub(crate) volatile_mentions: VecDeque<(String, crate::web::protocol::WireMention, Option<std::sync::Arc<crate::state::redaction_registry::Identity>>)>,
     pub(crate) pending_history_pages: Vec<server_history::PendingHistoryPage>,
     pub(crate) history_discovery: HashMap<String, history_discovery::HistoryDiscovery>,
     pub(crate) labeled_requests: HashMap<String, crate::irc::labels::Labels>,
@@ -1226,6 +1228,8 @@ impl App {
         self.state.add_local_message(
             &buffer_id,
             Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: Utc::now(),
@@ -1332,6 +1336,8 @@ impl App {
         state.add_message(
             &buf_id,
             Message {
+                redaction_ref: None,
+                redaction_msgid: None,
                 log_key: None,
                 id,
                 timestamp: Utc::now(),

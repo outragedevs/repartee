@@ -57,6 +57,11 @@ pub enum WebEvent {
     /// Sent when a transient E2E placeholder is swept after its decrypted line
     /// surfaces — without it the placeholder and the decrypted `InsertMessage`
     /// both stay visible until a full resync.
+    RedactMessage {
+        buffer_id: String,
+        msgid: String,
+        text: String,
+    },
     DeleteMessages {
         buffer_id: String,
         message_ids: Vec<u64>,
@@ -120,7 +125,10 @@ pub enum WebEvent {
         #[serde(default)]
         session_id: Option<String>,
     },
+    MentionsRedacted { message_ids: Vec<u64> },
     MentionsList {
+        #[serde(default)]
+        through: u64,
         mentions: Vec<WireMention>,
         #[serde(default)]
         session_id: Option<String>,
@@ -330,6 +338,8 @@ pub struct ConnectionMeta {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub msgid: Option<String>,
     pub id: u64,
     pub timestamp: i64,
     /// Full-millisecond `@time`; the ordering key for sorted gap-fill inserts

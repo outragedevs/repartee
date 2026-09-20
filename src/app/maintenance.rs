@@ -26,6 +26,8 @@ impl App {
                 self.state.add_message(
                     buffer_id,
                     Message {
+                        redaction_ref: None,
+                        redaction_msgid: None,
                         log_key: None,
                         id,
                         timestamp: Utc::now(),
@@ -124,7 +126,7 @@ impl App {
         self.last_mention_purge = Instant::now();
 
         let seven_days_ago = Utc::now().timestamp() - 7 * 24 * 3600;
-        self.volatile_mentions.retain(|(_, mention)| mention.timestamp >= seven_days_ago);
+        self.volatile_mentions.retain(|(_, mention, _)| mention.timestamp >= seven_days_ago);
 
         if let Some(storage) = &self.storage {
             let db = Arc::clone(&storage.db);
@@ -185,6 +187,8 @@ impl App {
             self.state.add_local_message_in_order(
                 &buf_id,
                 Message {
+                    redaction_ref: None,
+                    redaction_msgid: None,
                     log_key: None,
                     id,
                     timestamp: Utc::now(),
@@ -234,6 +238,8 @@ impl App {
                     self.state.add_message(
                         &buf_id,
                         crate::state::buffer::Message {
+                            redaction_ref: None,
+                            redaction_msgid: None,
                             log_key: None,
                             id: msg_id,
                             timestamp: chrono::Utc::now(),

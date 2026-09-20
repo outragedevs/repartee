@@ -895,6 +895,8 @@ fn make_separator(
 ) -> Message {
     let event_param = text.clone();
     Message {
+        redaction_ref: None,
+        redaction_msgid: None,
         log_key: None,
         id,
         timestamp,
@@ -935,6 +937,8 @@ mod tests {
 
     fn msg(ts: i64, log_id: Option<&str>, event_key: Option<&str>) -> Message {
         Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: 1,
             timestamp: chrono::DateTime::from_timestamp(ts, 0).unwrap(),

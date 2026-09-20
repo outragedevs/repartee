@@ -774,6 +774,8 @@ mod tests {
 
     fn message(id: u64, text: &str) -> Message {
         Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id,
             timestamp: Utc::now(),

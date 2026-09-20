@@ -33,6 +33,7 @@ impl AppState {
             connections: std::collections::HashMap::new(),
             buffers: indexmap::IndexMap::new(),
             web_history_buffers: std::collections::HashMap::new(),
+            redaction_registry: super::redaction_registry::Registry::new(4096),
             active_buffer_id: None,
             previous_buffer_id: None,
             irc_reply_buffer: None,
@@ -89,12 +90,14 @@ impl AppState {
 
     pub fn add_connection(&mut self, conn: Connection) {
         self.connections.insert(conn.id.clone(), conn);
+        self.prune_redaction_scopes();
     }
 
     pub fn remove_connection(&mut self, id: &str) {
         self.reset_connection_read_markers(id);
         self.read_activity.retain(|buffer_id, _| buffer_id.split_once('/').is_none_or(|(conn_id, _)| conn_id != id));
         self.connections.remove(id);
+        self.prune_redaction_scopes();
     }
 
     pub fn update_connection_status(&mut self, id: &str, status: ConnectionStatus) {
@@ -404,7 +407,9 @@ impl AppState {
     /// would also persist the substituted text under a buffer that
     /// no longer maps to it, making `/search` for the original URL
     /// return nothing.
-    pub fn add_message_unshrunk(&mut self, buffer_id: &str, message: Message) {
+    pub fn add_message_unshrunk(&mut self, buffer_id: &str, mut message: Message) {
+        self.attach_redaction_ref(buffer_id, &mut message);
+        self.apply_redaction(buffer_id, &mut message);
         if !self.buffers.contains_key(buffer_id) {
             return;
         }
@@ -619,11 +624,21 @@ impl AppState {
         target: &str,
         nick: &str,
         body: &str,
-        ts: chrono::DateTime<chrono::Utc>,
+        identity: (chrono::DateTime<chrono::Utc>, Option<&str>),
     ) {
         if !self.buffers.contains_key("_mentions") {
             return;
         }
+        let (ts, source_id) = identity;
+        let source_buffer = crate::state::buffer::make_buffer_id(conn_id, target);
+        let source_key = source_id.and_then(|id| self.redaction_key(&source_buffer, id));
+        if source_key.as_ref().is_some_and(|key| {
+            self.redaction_registry.get(key).is_some_and(|identity| identity.notice().is_some())
+        }) {
+            return;
+        }
+        let redaction_ref = source_key.map(|key| self.redaction_registry.track(key));
+        let mention_id = source_id.and_then(|id| self.mention_redaction_id(&source_buffer, id));
         let conn_label = self
             .connections
             .get(conn_id)
@@ -653,9 +668,11 @@ impl AppState {
             event_params: None,
             log_msg_id: None,
             log_ref_id: None,
-            tags: None,
+            tags: mention_id.map(|id| std::collections::HashMap::from([("msgid".into(), id)])),
             wire_origin: None,
             translation_suffix_at: None,
+            redaction_ref,
+            redaction_msgid: None,
             log_key: None,
         };
         self.add_mention_to_buffer(mention_msg);
@@ -664,7 +681,7 @@ impl AppState {
     /// [`Self::fan_out_mention`] for a row released from the reorder queue,
     /// so the aggregate carries the text the channel actually shows.
     fn fan_out_mention_for_row(&mut self, buffer_id: &str, message: &Message) {
-        if !message.highlight {
+        if !message.highlight || self.redaction_notice(buffer_id, message).is_some() {
             return;
         }
         let Some((conn_id, target)) = buffer_id.split_once('/') else {
@@ -680,7 +697,7 @@ impl AppState {
             message.text.clone()
         };
         let (conn_id, target) = (conn_id.to_string(), target.to_string());
-        self.fan_out_mention(&conn_id, &target, &nick, &body, message.timestamp);
+        self.fan_out_mention(&conn_id, &target, &nick, &body, (message.timestamp, message.tags.as_ref().and_then(|tags| tags.get("msgid")).map(String::as_str)));
     }
 
     /// Hold this buffer's queue position for an outgoing echo that is still
@@ -1329,7 +1346,8 @@ impl AppState {
     /// it — timed out, flushed, or the buffer was closed. Holding a chunk of
     /// a message the server has already sent us is a positioning device, and
     /// it must never become a way to lose one.
-    pub fn hold_own_message_chunk(&mut self, buffer_id: &str, order_key: u64, message: Message) {
+    pub fn hold_own_message_chunk(&mut self, buffer_id: &str, order_key: u64, mut message: Message) {
+        self.attach_redaction_ref(buffer_id, &mut message);
         let unheld = match self.translate_queues.get_mut(buffer_id) {
             Some(queue) => queue.hold_in_reserved(order_key, message, ActivityLevel::None),
             None => Some(message),
@@ -1352,8 +1370,11 @@ impl AppState {
         &mut self,
         buffer_id: &str,
         order_key: u64,
-        chunks: Vec<Message>,
+        mut chunks: Vec<Message>,
     ) {
+        for message in &mut chunks {
+            self.attach_redaction_ref(buffer_id, message);
+        }
         if chunks.is_empty() {
             return;
         }
@@ -1412,10 +1433,11 @@ impl AppState {
     fn route_through_translation(
         &mut self,
         buffer_id: &str,
-        message: Message,
+        mut message: Message,
         level: ActivityLevel,
         parked_shrink: ParkedShrinkRules,
     ) -> Option<Message> {
+        self.attach_redaction_ref(buffer_id, &mut message);
         // A buffer with a non-empty queue takes EVERYTHING through the
         // queue, translatable or not. Otherwise a JOIN renders before the
         // lines queued ahead of it and the timeline reorders silently — the
@@ -1918,9 +1940,10 @@ impl AppState {
     pub fn add_message_with_activity_unshrunk(
         &mut self,
         buffer_id: &str,
-        message: Message,
+        mut message: Message,
         level: ActivityLevel,
     ) {
+        self.attach_redaction_ref(buffer_id, &mut message);
         if !self.buffers.contains_key(buffer_id) {
             return;
         }
@@ -1941,9 +1964,10 @@ impl AppState {
     pub fn add_transient_message_with_activity(
         &mut self,
         buffer_id: &str,
-        message: Message,
+        mut message: Message,
         level: ActivityLevel,
     ) {
+        self.attach_redaction_ref(buffer_id, &mut message);
         // Through the queue when there is one. A placeholder is a
         // chronological row like any other: appended directly it renders
         // above the lines queued before it, which is the reordering the queue
@@ -1978,9 +2002,14 @@ impl AppState {
     fn deliver_message_to_buffer(
         &mut self,
         buffer_id: &str,
-        message: Message,
+        mut message: Message,
         level: ActivityLevel,
     ) {
+        let level = if self.apply_redaction(buffer_id, &mut message) {
+            ActivityLevel::None
+        } else {
+            level
+        };
         let server_owned = self.buffer_uses_server_history(buffer_id);
         self.record_read_origin(buffer_id, &message, buffer_id);
         let already_read = server_owned && self.message_already_read(buffer_id, &message);
@@ -2612,6 +2641,12 @@ fn history_row_matches(
     candidate_key: Option<&str>,
     own_nick: Option<&str>,
 ) -> bool {
+    if m.message_type == MessageType::Event
+        && let Some(id) = m.redaction_msgid.as_deref()
+        && candidate.tags.as_ref().and_then(|tags| tags.get("msgid")).is_some_and(|candidate_id| candidate_id == id)
+    {
+        return true;
+    }
     if let Some(cid) = candidate.tags.as_ref().and_then(|t| t.get("msgid"))
         && let Some(mid) = m.tags.as_ref().and_then(|t| t.get("msgid"))
     {
@@ -2765,6 +2800,8 @@ pub mod tests {
 
     pub fn make_test_message(state: &mut AppState, text: &str) -> Message {
         Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: state.next_message_id(),
             timestamp: Utc::now(),
@@ -2825,6 +2862,8 @@ pub mod tests {
         state.suppress_event_display = true;
 
         let event_msg = Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: state.next_message_id(),
             timestamp: Utc::now(),
@@ -2862,6 +2901,8 @@ pub mod tests {
 
         state.suppress_event_display = false;
         let event_msg2 = Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: state.next_message_id(),
             timestamp: Utc::now(),
@@ -3072,6 +3113,8 @@ pub mod tests {
         let mut tags = std::collections::HashMap::new();
         tags.insert("msgid".to_string(), "server-msgid-xyz".to_string());
         let msg = Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: state.next_message_id(),
             timestamp: Utc::now(),
@@ -3104,6 +3147,8 @@ pub mod tests {
         state.log_tx = Some(tx);
 
         let msg = Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: 0,
             timestamp: Utc::now(),
@@ -3142,6 +3187,8 @@ pub mod tests {
         let mut state = make_test_state();
         state.log_tx = Some(tx);
         let msg = Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: 0,
             timestamp: Utc::now(),
@@ -3180,6 +3227,8 @@ pub mod tests {
         // keys and the same message would be stored — and paginated — twice.
         let ts = chrono::Utc::now();
         let build = || Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: 0,
             timestamp: ts,
@@ -3239,6 +3288,8 @@ pub mod tests {
 
         let ts = Utc::now();
         let wire = || Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: 0,
             timestamp: ts,
@@ -3290,6 +3341,8 @@ pub mod tests {
         state.add_buffer(Buffer::for_test("libera", BufferType::Channel, "#rust"));
         let ts = Utc::now();
         let wire = Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: 1,
             timestamp: ts,
@@ -3342,6 +3395,8 @@ pub mod tests {
         let mut state = make_test_state();
         let sent_at = Utc::now();
         let mut echo = Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: 1,
             timestamp: sent_at,
@@ -3427,6 +3482,8 @@ pub mod tests {
         // the same @msgid, would all collide on it and be dropped by the unique
         // index, and `ref_id` would point at a primary stored under a different id.
         let primary = Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: state.next_message_id(),
             timestamp: Utc::now(),
@@ -3446,6 +3503,8 @@ pub mod tests {
         state.add_message("libera/#rust", primary);
 
         let reference = Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: state.next_message_id(),
             timestamp: Utc::now(),
@@ -3488,6 +3547,8 @@ pub mod tests {
 
         // Primary row: full text, log_msg_id set, no ref_id
         let msg1 = Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: state.next_message_id(),
             timestamp: Utc::now(),
@@ -3508,6 +3569,8 @@ pub mod tests {
 
         // Reference row: same text in UI, but ref_id set
         let msg2 = Message {
+            redaction_ref: None,
+            redaction_msgid: None,
             log_key: None,
             id: state.next_message_id(),
             timestamp: Utc::now(),

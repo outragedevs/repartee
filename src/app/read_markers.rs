@@ -1384,7 +1384,7 @@ mod tests {
         let mut app = sending_app();
         let caps = crate::irc::cap::ServerCaps::parse("draft/read-marker soju.im/read");
         assert_eq!(
-            crate::irc::cap::bouncer_read_caps(&caps),
+            crate::irc::cap::bouncer_network_caps(&caps),
             vec!["draft/read-marker", "soju.im/read"]
         );
         let requested = crate::irc::events::handle_cap_new(
