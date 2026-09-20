@@ -33,6 +33,8 @@ pub mod bouncer_certificates;
 mod bouncer_webpush;
 mod bouncer_children;
 mod server_history;
+#[cfg(test)]
+mod history_storage_fixture;
 mod history_discovery;
 mod read_markers;
 mod presence;

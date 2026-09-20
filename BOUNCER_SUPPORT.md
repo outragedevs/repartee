@@ -507,3 +507,10 @@ queue and proving persistent-history exclusion after restart. Provider-filtered
 empty pages, the corresponding Lurker runtime cases and full storage lifecycle
 checks remain required. Existing history progress entries do not close these
 acceptance gates.
+
+A disk-backed regression now exercises both providers' replay and web pagination,
+controlled live/send paths, normal writer shutdown, read-only database inspection
+and reconstruction of the App against the preserved database. Its precise scope
+and remaining process/browser/error-path boundaries are documented in
+`docs/validation/bouncer-history-acceptance.md`; it does not close the full
+history acceptance gate.
