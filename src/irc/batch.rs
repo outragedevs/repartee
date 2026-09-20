@@ -89,7 +89,7 @@ impl BatchInfo {
     pub fn is_live(&self) -> bool {
         !matches!(
             self.batch_type.as_str(),
-            "CHATHISTORY" | "DRAFT/CHATHISTORY-TARGETS" | "NETSPLIT" | "NETJOIN"
+            "CHATHISTORY" | "DRAFT/CHATHISTORY-TARGETS" | "NETSPLIT" | "NETJOIN" | "SOJU.IM/SEARCH"
         )
     }
 
@@ -344,6 +344,7 @@ pub fn process_completed_batch(
     clean_end: bool,
 ) -> Option<GapfillContinuation> {
     match batch.batch_type.as_str() {
+        "SOJU.IM/SEARCH" => None,
         "NETSPLIT" => {
             process_netsplit_batch(state, conn_id, batch);
             None
