@@ -67,6 +67,7 @@ impl App {
             return;
         }
         self.state.add_connection(Connection {
+            own_realname: None,
             id: Self::SHELL_CONN_ID.to_string(),
             label: "Shell".to_string(),
             network_scope: None,

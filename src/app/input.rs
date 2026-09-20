@@ -2826,6 +2826,7 @@ pub mod submit_typing_tests {
     /// `enabled_caps` they can set.
     pub fn make_connection() -> Connection {
         Connection {
+            own_realname: None,
             id: "net".to_string(),
             label: "NetServer".to_string(),
             network_scope: None,

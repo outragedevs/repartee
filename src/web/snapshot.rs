@@ -100,6 +100,7 @@ pub fn build_nick_list(state: &AppState, buffer_id: &str) -> Option<WebEvent> {
         .users
         .values()
         .map(|n| WireNick {
+            realname: n.realname.clone(),
             nick: n.nick.clone(),
             prefix: n.prefix.clone(),
             modes: n.modes.clone(),

@@ -42,6 +42,7 @@ const GREEDY_COMMANDS: &[&str] = &[
     "alias",
     "bouncer",
     "quote",
+    "setname",
     "shell",
     "sh",
 ];
@@ -71,7 +72,7 @@ pub fn parse_command(input: &str) -> Option<ParsedCommand> {
     };
 
     if GREEDY_COMMANDS.contains(&canonical) {
-        if matches!(canonical, "me" | "quit" | "quote") {
+        if matches!(canonical, "me" | "quit" | "quote" | "setname") {
             return Some(ParsedCommand {
                 name: command,
                 args: vec![rest.to_string()],

@@ -499,6 +499,7 @@ mod tests {
 
     fn make_connection() -> Connection {
         Connection {
+            own_realname: None,
             id: "net".to_string(),
             label: "NetServer".to_string(),
             network_scope: None,

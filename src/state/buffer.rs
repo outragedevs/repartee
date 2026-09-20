@@ -162,6 +162,7 @@ pub struct WireOrigin {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct NickEntry {
+    pub realname: Option<String>,
     pub nick: String,
     pub prefix: String,
     pub modes: String,

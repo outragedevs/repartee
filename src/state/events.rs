@@ -2672,6 +2672,7 @@ pub mod tests {
 
     pub fn make_test_connection() -> Connection {
         Connection {
+            own_realname: None,
             id: "libera".to_string(),
             label: "Libera".to_string(),
             network_scope: None,
@@ -3009,6 +3010,7 @@ pub mod tests {
     fn nick_management() {
         let mut state = make_test_state();
         let entry = NickEntry {
+            realname: None,
             nick: "alice".to_string(),
             prefix: "@".to_string(),
             modes: "o".to_string(),
