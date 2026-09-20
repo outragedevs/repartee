@@ -1543,7 +1543,7 @@ mod tests {
         assert_eq!(query.buffer_type, crate::state::buffer::BufferType::Query);
         assert_eq!(query.name, "Peer");
         assert_eq!(query.messages[0].text, "replayed");
-        assert_eq!(query.unread_count, 0);
+        assert_eq!(query.unread_count, 1);
         assert_eq!(state.active_buffer_id.as_deref(), Some(active.as_str()));
         assert!(log_rx.try_recv().is_err());
         assert!(state.pending_web_events.iter().any(|event| matches!(event,

@@ -47,7 +47,11 @@ impl AppState {
     }
 
     pub fn clear_activity(&mut self, buffer_id: &str) {
-        if self.uses_read_markers(buffer_id) { return; }
+        if self.buffer_uses_server_history(buffer_id) { return; }
+        self.clear_visible_activity(buffer_id);
+    }
+
+    pub(crate) fn clear_visible_activity(&mut self, buffer_id: &str) {
         self.activity_order.remove(buffer_id);
         if let Some(state) = self.read_activity.get_mut(buffer_id) {
             state.unread.clear();

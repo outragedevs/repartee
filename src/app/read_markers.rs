@@ -208,7 +208,7 @@ impl App {
                 buffer.unread_count != 0
                     || buffer.activity != crate::state::buffer::ActivityLevel::None
             }) {
-                self.state.clear_activity(&buffer_id);
+                self.state.clear_visible_activity(&buffer_id);
                 self.broadcast_web(crate::web::protocol::WebEvent::ActivityChanged {
                     buffer_id,
                     activity: 0,
@@ -441,16 +441,19 @@ impl App {
         };
         let markers = self.read_markers.entry(conn_id.to_string()).or_default();
         markers.prepare_scope(conn.network_key());
+        let first_confirmation = !markers.confirmed.contains_key(&params[0].to_lowercase());
         if !markers.receive(&params[0], marker)
             && markers.confirmed.get(&params[0].to_lowercase()) != Some(&marker)
         {
             return true;
         }
-        let Some(millis) = marker else {
-            return true;
-        };
         let buffer_id = make_buffer_id(conn_id, &params[0]);
-        self.state.apply_server_read_marker(&buffer_id, millis);
+        if first_confirmation {
+            let pending = markers.desired.get(&params[0].to_lowercase()).copied();
+            self.state.reconcile_server_read_marker(&buffer_id, marker.max(pending));
+        } else if let Some(millis) = marker {
+            self.state.apply_server_read_marker(&buffer_id, millis);
+        }
         self.drain_pending_web_events();
         true
     }
@@ -1117,12 +1120,16 @@ mod tests {
             None,
         );
         app.terminal_focused = false;
+        server_message(&mut app, 2000);
+        app.state.set_active_buffer("account/peer");
         assert!(app.render_terminal_frame());
-        assert_eq!(app.state.buffers["account/peer"].unread_count, 60);
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 61);
         app.terminal_focused = true;
         app.scroll_offset = 1;
         assert!(app.render_terminal_frame());
-        assert_eq!(app.state.buffers["account/peer"].unread_count, 60);
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 61);
+        server_message(&mut app, 3000);
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 62);
         app.scroll_offset = 0;
         assert!(app.render_terminal_frame());
         assert_eq!(app.state.buffers["account/peer"].unread_count, 0);
@@ -1267,6 +1274,27 @@ mod tests {
             captured[2].command,
             irc::proto::Command::Raw("MARKREAD".into(), vec!["Peer".into()])
         );
+    }
+
+    #[tokio::test]
+    async fn reconnect_reconciles_reset_server_markers_without_losing_pending_reads() {
+        for pending_read in [false, true] {
+            let mut app = sending_app();
+            let seen = server_message(&mut app, 1123);
+            app.mark_visible_message_read("account/peer", seen);
+            if !pending_read {
+                assert!(app.handle_read_marker("account", &":bnc MARKREAD Peer timestamp=1970-01-01T00:00:01.123Z".parse().unwrap()));
+            }
+            app.reconnect_read_markers("account");
+            assert!(app.handle_read_marker("account", &":bnc MARKREAD Peer *".parse().unwrap()));
+            assert_eq!(app.state.buffers["account/peer"].unread_count, u32::from(!pending_read));
+            assert_eq!(app.state.buffers["account/peer"].last_read.timestamp_millis(), if pending_read { 1123 } else { 0 });
+            server_message(&mut app, 1000);
+            assert_eq!(app.state.buffers["account/peer"].unread_count, if pending_read { 0 } else { 2 });
+            if pending_read {
+                assert_eq!(app.read_markers["account"].desired.get("peer"), Some(&1123));
+            }
+        }
     }
 
     #[tokio::test]
