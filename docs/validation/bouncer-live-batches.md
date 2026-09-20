@@ -1,6 +1,7 @@
 # Live bouncer batch dispatch validation
 
-Status: implemented on `fix/bouncer-live-batch-dispatch`; round 3 ordering finding fixed; full GPT-5.6 Sol medium review round 4 clean.
+Status: merged in https://github.com/outragedevs/repartee/pull/78 after fixing
+the round 3 ordering finding and a clean full GPT-5.6 Sol medium review round 4.
 
 ## Defect and change
 

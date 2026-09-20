@@ -259,10 +259,16 @@ fixtures against both pinned bouncers, and a clean Sol medium review passed; see
 `docs/validation/bouncer-names.md`.
 
 Explicit NAMES merged in https://github.com/outragedevs/repartee/pull/77.
-The next prerequisite on `fix/bouncer-live-batch-dispatch` repairs live App hooks
-for generic and multiline batches, including own JOIN and NAMES completion;
-see `docs/validation/bouncer-live-batches.md`. Labeled request contexts and general
-nested batch routing remain separate required follow-ups, documented in
-`docs/validation/bouncer-labeled-responses.md`. Remaining increments must still
+Live batch dispatch merged in https://github.com/outragedevs/repartee/pull/78,
+including nested history protection, receive-order preservation, bounded folding
+and expiration. See `docs/validation/bouncer-live-batches.md`.
+
+The current `feat/bouncer-labeled-responses` increment negotiates labels and
+correlates manual WHOIS/WHO/WHOWAS/NAMES/LIST with their originating buffer.
+Native/web routing, ACK, cleanup and a real forwarded Soju WHOIS passed, followed
+by a clean full Sol medium review. See `docs/validation/bouncer-labeled-responses.md`.
+Next, verify and repair unlabeled cross-network reply fallback, especially for
+Lurker, and audit remaining specialized-batch/request variants.
+ Remaining increments must still
 cover other dynamic capability behavior, redaction, ISUPPORT and upstream account
 operations, as well as every other acceptance row above; no remaining row is dropped.

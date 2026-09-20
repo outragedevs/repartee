@@ -139,8 +139,26 @@ impl App {
         self.drain_pending_web_events();
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn dispatch_live_irc_message(&mut self, conn_id: &str, msg: &::irc::proto::Message) {
+        let previous = self.state.irc_reply_buffer.take();
+        self.state.irc_reply_buffer = self.labeled_response_buffer(conn_id, msg);
+        let acknowledgement = matches!(&msg.command, ::irc::proto::Command::Raw(command, _) if command.eq_ignore_ascii_case("ACK"));
+        if !acknowledgement {
+            self.dispatch_live_irc_message_inner(conn_id, msg);
+        }
+        self.state.irc_reply_buffer = previous;
+        if !msg
+            .tags
+            .as_ref()
+            .is_some_and(|tags| tags.iter().any(|tag| tag.0 == "batch"))
+            && let Some(label) = crate::irc::labels::message_label(msg)
+        {
+            self.finish_labeled_response(conn_id, label);
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn dispatch_live_irc_message_inner(&mut self, conn_id: &str, msg: &::irc::proto::Message) {
         self.observe_bouncer_presence(conn_id, msg);
         if self.observe_monitor(conn_id, msg) {
             return;
