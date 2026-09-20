@@ -70,6 +70,10 @@ async fn handle_socket(
     tracing::info!(session_id = %session_id, "sending SyncInit");
     if send_json(&mut ws_tx, &sync_init).await.is_err() {
         tracing::warn!(session_id = %session_id, "failed to send SyncInit");
+        let _ = state
+            .web_cmd_tx
+            .send((WebCommand::WebDisconnect, session_id))
+            .await;
         return;
     }
     tracing::info!(session_id = %session_id, "SyncInit sent, entering event loop");

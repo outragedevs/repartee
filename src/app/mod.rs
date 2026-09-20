@@ -18,6 +18,9 @@ mod bouncer_children;
 mod server_history;
 mod history_discovery;
 mod read_markers;
+mod presence;
+#[cfg(test)]
+mod presence_fixture;
 mod connection_attempt;
 mod log_browser;
 mod maintenance;
@@ -403,6 +406,7 @@ pub struct App {
     pub(crate) volatile_mentions: VecDeque<(String, crate::web::protocol::WireMention)>,
     pub(crate) pending_history_pages: Vec<server_history::PendingHistoryPage>,
     pub(crate) history_discovery: HashMap<String, history_discovery::HistoryDiscovery>,
+    pub(crate) bouncer_presence: presence::BouncerPresence,
     pub(crate) read_markers: HashMap<String, read_markers::ReadMarkers>,
     pub(crate) last_event_purge: Instant,
     pub(crate) last_mention_purge: Instant,
@@ -869,6 +873,7 @@ impl App {
             pending_history_pages: Vec::new(),
             history_discovery: HashMap::new(),
             read_markers: HashMap::new(),
+            bouncer_presence: presence::BouncerPresence::default(),
             volatile_mentions: VecDeque::new(),
             last_event_purge: Instant::now(),
             last_mention_purge: Instant::now(),
@@ -1624,6 +1629,7 @@ impl App {
                     self.purge_stale_chathistory_requests();
                     self.tick_history_discovery();
                     self.tick_read_markers();
+                    self.tick_bouncer_presence();
                     self.check_reconnects();
                     self.measure_lag();
                     self.check_day_changed();
