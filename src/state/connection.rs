@@ -16,6 +16,7 @@ pub enum ConnectionStatus {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Connection {
+    pub own_realname: Option<String>,
     pub id: String,
     pub label: String,
     pub network_scope: Option<String>,

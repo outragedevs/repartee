@@ -10,7 +10,7 @@ import tempfile
 from test_bouncer_binding import PINS, ROOT, run, wait_ready
 
 
-def scenario(implementation, source, auto_away):
+def scenario(implementation, source, auto_away, setname=False):
     with tempfile.TemporaryDirectory(prefix="bouncer-presence-", dir="/tmp") as directory:
         temporary = Path(directory)
         processes = []
@@ -20,7 +20,7 @@ def scenario(implementation, source, auto_away):
                 events = temporary / "events.jsonl"
                 upstream = subprocess.Popen([
                     sys.executable, str(ROOT / "scripts/fixtures/presence-upstream.py"),
-                    str(ready), str(events),
+                    str(ready), str(events), *(["--setname"] if setname else []),
                 ], stdout=log, stderr=log)
                 processes.append(upstream)
                 wait_ready(upstream, ready.exists)
@@ -64,9 +64,18 @@ def scenario(implementation, source, auto_away):
                     "REPARTEE_PRESENCE_PROVIDER": implementation,
                     "REPARTEE_PRESENCE_AUTO_AWAY": str(auto_away).lower(),
                 })
-                run(["make", "test", "TEST_ARGS=pinned_bouncer_presence -- --ignored --nocapture"],
+                test_filter = "pinned_bouncer_presence"
+                if setname:
+                    environment["REPARTEE_SETNAME_BOUND"] = "1"
+                    environment["REPARTEE_BOUNCER_TEST_PROVIDER"] = implementation
+                    test_filter = "pinned_bouncer_setname"
+                run(["make", "test", f"TEST_ARGS={test_filter} -- --ignored --nocapture"],
                     cwd=ROOT, env=environment)
-                print(f"{implementation}: real-upstream App presence passed (AutoAway={auto_away})")
+                if setname and implementation == "soju":
+                    rows = [json.loads(line) for line in events.read_text().splitlines()]
+                    if not any(row.get("realname") == "Fixture changed name %" for row in rows):
+                        raise AssertionError("SETNAME never reached the IRC upstream")
+                print(f"{implementation}: {test_filter} real-upstream fixture passed (AutoAway={auto_away})")
             except Exception:
                 log.flush()
                 log.seek(0)
@@ -87,13 +96,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("implementation", choices=PINS)
     parser.add_argument("source", type=Path)
+    parser.add_argument("--setname", action="store_true")
     args = parser.parse_args()
     source = args.source.resolve()
     head = run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True).stdout.strip()
     if head != PINS[args.implementation]:
         raise RuntimeError("Upstream checkout does not match the audited revision")
-    scenario(args.implementation, source, True)
-    if args.implementation == "soju":
+    scenario(args.implementation, source, True, args.setname)
+    if args.implementation == "soju" and not args.setname:
         scenario(args.implementation, source, False)
 
 

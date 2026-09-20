@@ -1295,6 +1295,29 @@ use <code>/wizard server</code>.</p>
 <h2>See Also</h2>
 <p>/wizard, /connect, /disconnect, /set</p>
 </div>
+<div class="command-entry" data-command="setname" data-category="Connection">
+<h1>/setname</h1>
+<h2>Syntax</h2>
+<pre><code>/setname &lt;real name&gt;
+</code></pre>
+<h2>Description</h2>
+<p>Request a new IRC real name on the active connection. Spaces are preserved inside
+the name. The connection must have negotiated the <code>setname</code> capability; otherwise
+the command reports that the server does not support it.</p>
+<p>Repartee updates the confirmed real name only after the server sends SETNAME.
+Shared channel nick entries and web nick-list tooltips follow incoming changes;
+changes and server rejections are shown as events. This does not change your
+nickname or rewrite the saved local server configuration.</p>
+<p>Soju can store the requested name for an upstream network. If that upstream does
+not support live SETNAME, Soju may reconnect it to apply the change. On a Soju
+control connection this changes the account default. The pinned Lurker version
+does not advertise SETNAME; use its own configuration interface instead.</p>
+<h2>Examples</h2>
+<pre><code>/setname Example User
+</code></pre>
+<h2>See Also</h2>
+<p>/nick, /bouncer, /server</p>
+</div>
 <div class="command-entry" data-command="wizard" data-category="Connection">
 <h1>/wizard</h1>
 <h2>Syntax</h2>

@@ -37,6 +37,7 @@ impl App {
         }
 
         self.state.add_connection(Connection {
+            own_realname: None,
             id: conn_id.to_string(),
             label: server_config.label.clone(),
             network_scope: (server_config.bouncer_network_id.is_some() || server_config.bouncer_control)
@@ -858,6 +859,7 @@ impl App {
                             | ::irc::proto::Command::AWAY(..)
                             | ::irc::proto::Command::CHGHOST(..)
                     );
+                    let state_mutating = state_mutating || matches!(&msg.command, ::irc::proto::Command::Raw(command, _) if command.eq_ignore_ascii_case("SETNAME"));
                     let script_suppressed = self.emit_irc_to_scripts(&conn_id, &msg);
                     if script_suppressed && !state_mutating {
                         // Display suppressed — still keep auxiliary tracking in sync.

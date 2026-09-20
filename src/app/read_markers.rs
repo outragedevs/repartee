@@ -738,6 +738,7 @@ mod tests {
         app.state.add_nick(
             "account/peer",
             crate::state::buffer::NickEntry {
+                realname: None,
                 nick: own.clone(),
                 prefix: String::new(),
                 modes: String::new(),
