@@ -544,6 +544,7 @@ impl App {
         use crate::web::snapshot;
 
         match cmd {
+            WebCommand::WebPush(request) => self.handle_webpush_request(&request, session_id),
             WebCommand::UploadFile { submission } => {
                 if let Ok(mut guard) = submission.lock()
                     && let Some(request) = guard.take() {

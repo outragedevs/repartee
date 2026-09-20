@@ -7,6 +7,7 @@ impl super::App {
         self.reset_server_search(id);
         self.bouncer_metadata.remove(id);
         self.bouncer_certificates.remove(id);
+        self.cancel_bouncer_webpush(id);
         *self.connection_attempts.entry(id.to_string()).or_default() += 1;
         if let Some(task) = self.forwarder_handles.remove(id) {
             task.abort();

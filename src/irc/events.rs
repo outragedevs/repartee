@@ -653,7 +653,7 @@ pub fn handle_cap_new(
             (DESIRED_CAPS.iter().any(|d| d.eq_ignore_ascii_case(cap))
                 || (cap.as_str() == "soju.im/client-cert" && state.connections.get(conn_id).is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some() || conn.origin_config.bouncer_control))
                 || (state.connections.get(conn_id).is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some() && !conn.origin_config.bouncer_control)
-                    && matches!(cap.as_str(), "draft/read-marker" | "soju.im/read" | "draft/message-redaction" | "draft/account-registration" | "soju.im/search" | "draft/metadata-2")))
+                    && matches!(cap.as_str(), "draft/read-marker" | "soju.im/read" | "draft/message-redaction" | "draft/account-registration" | "soju.im/search" | "draft/metadata-2" | "soju.im/webpush")))
                 && enabled.is_none_or(|set| !set.contains(cap.as_str()))
         })
         .cloned()
@@ -8878,6 +8878,20 @@ mod tests {
     }
 
     // ── cap-notify tests ─────────────────────────────────────────────
+
+    #[test]
+    fn cap_new_webpush_requires_a_bound_network() {
+        for (control, network, expected) in [(false, false, false), (true, false, false), (true, true, false), (false, true, true)] {
+            let mut state = make_test_state();
+            let config = &mut state.connections.get_mut("test").unwrap().origin_config;
+            config.bouncer_control = control;
+            config.bouncer_network_id = network.then(|| "1".into());
+            for advertised in ["soju.im/webpush", "SOJU.IM/WEBPUSH", "Soju.Im/WebPush"] {
+                let requested = handle_cap_new(&mut state, "test", Some(advertised), None);
+                assert_eq!(requested.iter().any(|cap| cap == "soju.im/webpush"), expected);
+            }
+        }
+    }
 
     #[test]
     fn cap_new_desired_caps_returns_request_list() {

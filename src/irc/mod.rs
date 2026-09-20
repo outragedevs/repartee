@@ -9,6 +9,7 @@ pub mod monitor;
 pub mod names;
 pub mod labels;
 pub mod metadata;
+pub mod webpush;
 pub mod redaction;
 pub mod extban;
 pub mod flood;
@@ -1087,7 +1088,7 @@ async fn negotiate_caps(
         let mut caps_to_request = server_caps.negotiate(DESIRED_CAPS);
         if params.bouncer_network_id.is_some() && !params.bouncer_control {
             caps_to_request.extend(cap::bouncer_network_caps(&server_caps));
-            caps_to_request.extend(server_caps.negotiate(&["draft/pre-away"]));
+            caps_to_request.extend(server_caps.negotiate(&["draft/pre-away", webpush::CAP]));
         }
         if params.bouncer_network_id.is_some() || params.bouncer_control {
             caps_to_request.extend(server_caps.negotiate(&["soju.im/client-cert"]));

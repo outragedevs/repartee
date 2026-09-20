@@ -216,6 +216,7 @@ fn build_sync_init_from_snapshot(state: &AppHandle, active_buffer_id: Option<Str
 /// Returns `true` if the event has a `session_id` field that doesn't match
 /// the current session — meaning this client should NOT receive it.
 fn is_targeted_to_other(event: &WebEvent, session_id: &str) -> bool {
+    if let WebEvent::WebPush { session_id: target, .. } = event { return target != session_id; }
     let target = match event {
         WebEvent::Messages { session_id, .. }
         | WebEvent::NickList { session_id, .. }
@@ -324,5 +325,19 @@ mod tests {
         };
         assert!(!is_targeted_to_other(&event, "session-a"));
         assert!(!is_targeted_to_other(&event, "session-b"));
+    }
+}
+
+#[cfg(test)]
+mod webpush_privacy_tests {
+    #[test]
+    fn push_response_is_only_delivered_to_requesting_websocket() {
+        let event = super::WebEvent::WebPush {
+            connection_id: "fixture".into(), request_id: "request".into(),
+            session_id: "owner".into(), status: crate::irc::webpush::Status::Ready,
+            scope: Some("opaque-scope".into()), vapid: None,
+        };
+        assert!(!super::is_targeted_to_other(&event, "owner"));
+        assert!(super::is_targeted_to_other(&event, "other-browser"));
     }
 }
