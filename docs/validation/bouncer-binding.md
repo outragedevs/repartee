@@ -224,3 +224,8 @@ writes remain effective. Timed retained rows are reclassified without playback
 notifications; a scope reset without a retained threshold does not reintroduce
 old rows. Regressions cover cap-loss arrivals, web read boundaries, and unknown
 server markers with and without pending local updates.
+
+Pending marker writes retain their original wire target independently of
+normalized lookup keys. Retries after query rename, closure and same-scope
+reconnect use that spelling; changing network scope drops the cached names.
+A non-ASCII target regression verifies both rename and closure paths.

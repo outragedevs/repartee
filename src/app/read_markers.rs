@@ -10,6 +10,7 @@ pub struct ReadMarkers {
     scope: String,
     confirmed: HashMap<String, Option<i64>>,
     desired: HashMap<String, i64>,
+    wire_targets: HashMap<String, String>,
     sent: HashMap<String, (i64, Instant)>,
     queried: HashMap<String, Instant>,
     rejected: HashMap<String, i64>,
@@ -58,7 +59,7 @@ impl ReadMarkers {
         for target in self.desired.keys() {
             targets
                 .entry(target.clone())
-                .or_insert_with(|| target.clone());
+                .or_insert_with(|| self.wire_targets.get(target).cloned().unwrap_or_else(|| target.clone()));
         }
         let mut targets: Vec<_> = targets.into_iter().collect();
         targets.sort_by_key(|(target, _)| {
@@ -282,7 +283,10 @@ impl App {
                     continue;
                 }
                 let desired = markers.desired.get(&target).copied();
-                let mut params = vec![name];
+                if desired.is_some() {
+                    markers.wire_targets.entry(target.clone()).or_insert_with(|| name.clone());
+                }
+                let mut params = vec![markers.wire_targets.get(&target).filter(|_| desired.is_some()).cloned().unwrap_or(name)];
                 if let Some(millis) = desired {
                     if markers.sent.get(&target).is_some_and(|(previous, sent)| {
                         now.duration_since(*sent)
@@ -543,6 +547,39 @@ mod tests {
                 assert!(app.read_markers["account"].pending.is_empty());
                 assert!(app.read_markers["account"].rejected_queries.contains(&name.to_lowercase()));
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_unicode_marker_keeps_wire_name_after_rename_or_close() {
+        for rename in [false, true] {
+            let mut app = sending_app();
+            app.state.remove_buffer("account/peer");
+            app.state.add_buffer_with_focus(crate::state::buffer::Buffer::empty("account", crate::state::buffer::BufferType::Query, "Älice"), false);
+            let mut row = crate::state::events::tests::make_test_message(&mut app.state, "unicode pending read");
+            row.tags = Some(HashMap::from([("time".into(), "1970-01-01T00:00:01.123Z".into())]));
+            let id = row.id;
+            app.state.add_transient_message_with_activity("account/älice", row, crate::state::buffer::ActivityLevel::Activity);
+            app.mark_visible_message_read("account/älice", id);
+            if rename {
+                crate::irc::events::rename_query_buffers_for_test(&mut app.state, "account", "Älice", "Bob", &["account/älice".into()]);
+                app.drain_pending_buffer_rekeys();
+            } else {
+                app.state.remove_buffer("account/älice");
+            }
+            app.reconnect_read_markers("account");
+            app.tick_read_markers();
+            let captured = app.irc_handles["account"].sender().captured();
+            let updates: Vec<_> = captured.iter().filter_map(|message| match &message.command {
+                irc::proto::Command::Raw(command, params) if command == "MARKREAD" && params.len() == 2 => Some(&params[0]),
+                _ => None,
+            }).collect();
+            assert_eq!(updates, [&"Älice".to_string(), &"Älice".to_string()]);
+            assert!(app.handle_read_marker("account", &":bnc MARKREAD Älice timestamp=1970-01-01T00:00:01.123Z".parse().unwrap()));
+            assert!(app.read_markers["account"].desired.is_empty());
+            app.state.connections.get_mut("account").unwrap().network_scope = Some("different-network".into());
+            app.reconnect_read_markers("account");
+            assert!(app.read_markers["account"].wire_targets.is_empty());
         }
     }
 
