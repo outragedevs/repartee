@@ -14,6 +14,9 @@ mod image;
 pub mod input;
 mod irc;
 mod irc_dispatch;
+mod labels;
+#[cfg(test)]
+mod labels_tests;
 pub mod bouncer;
 mod bouncer_children;
 mod server_history;
@@ -416,6 +419,7 @@ pub struct App {
     pub(crate) volatile_mentions: VecDeque<(String, crate::web::protocol::WireMention)>,
     pub(crate) pending_history_pages: Vec<server_history::PendingHistoryPage>,
     pub(crate) history_discovery: HashMap<String, history_discovery::HistoryDiscovery>,
+    pub(crate) labeled_requests: HashMap<String, crate::irc::labels::Labels>,
     pub(crate) monitors: HashMap<String, crate::irc::monitor::MonitorState>,
     pub(crate) bouncer_presence: presence::BouncerPresence,
     pub(crate) read_markers: HashMap<String, read_markers::ReadMarkers>,
@@ -885,6 +889,7 @@ impl App {
             pending_history_pages: Vec::new(),
             history_discovery: HashMap::new(),
             read_markers: HashMap::new(),
+            labeled_requests: HashMap::new(),
             monitors: HashMap::new(),
             bouncer_presence: presence::BouncerPresence::default(),
             volatile_mentions: VecDeque::new(),
@@ -1646,6 +1651,7 @@ impl App {
                     self.tick_bouncer_presence();
                     self.tick_bouncer_mutations();
                     self.tick_monitors();
+                    self.tick_labels();
                     self.check_reconnects();
                     self.measure_lag();
                     self.check_day_changed();
