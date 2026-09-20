@@ -779,6 +779,7 @@ impl App {
                 history_exhausted: false,
                 log_initial_loaded: false,
                 pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
             });
         }
         self.state.set_active_buffer(&query_buf_id);
@@ -2829,6 +2830,7 @@ pub mod submit_typing_tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         }
     }
 
@@ -2945,6 +2947,7 @@ pub mod submit_typing_tests {
             bouncer_mutations: HashMap::new(),
             upstream_auth: HashMap::new(),
             account_registration: HashMap::new(),
+            bouncer_metadata: HashMap::new(),
             server_search: HashMap::new(),
             server_search_views: HashMap::new(),
             bouncer_networks: HashMap::new(),

@@ -547,6 +547,18 @@ pub fn search_messages(
     buffer: Option<&str>,
     limit: usize,
 ) -> rusqlite::Result<Vec<StoredMessage>> {
+    search_messages_filtered(db, query, network, buffer, limit, |_| true)
+}
+
+pub fn search_messages_filtered(
+    db: &Connection,
+    query: &str,
+    network: Option<&str>,
+    buffer: Option<&str>,
+    limit: usize,
+    mut include: impl FnMut(&StoredMessage) -> bool,
+) -> rusqlite::Result<Vec<StoredMessage>> {
+    if limit == 0 { return Ok(Vec::new()); }
     let safe_query = format!("\"{}\"", query.replace('"', "\"\""));
     let mut sql = "SELECT m.* FROM messages m \
                    JOIN messages_fts fts ON m.id = fts.rowid \
@@ -566,25 +578,21 @@ pub fn search_messages(
         use std::fmt::Write;
         let _ = write!(sql, " AND m.buffer = ?{param_idx}");
         dyn_params.push(Box::new(b.to_string()));
-        param_idx += 1;
     }
-    {
-        use std::fmt::Write;
-        let _ = write!(sql, " ORDER BY m.timestamp DESC LIMIT ?{param_idx}");
-    }
-    #[expect(
-        clippy::cast_possible_wrap,
-        reason = "limit will never exceed i64::MAX in practice"
-    )]
-    {
-        dyn_params.push(Box::new(limit as i64));
-    }
+    sql.push_str(" ORDER BY m.timestamp DESC, m.id DESC");
 
     let param_refs: Vec<&dyn ToSql> = dyn_params.iter().map(Box::as_ref).collect();
     let mut stmt = db.prepare(&sql)?;
 
     let rows = stmt.query_map(&*param_refs, |row| map_row(row, false, None))?;
-    let mut results: Vec<StoredMessage> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut results = Vec::new();
+    for row in rows {
+        let message = row?;
+        if include(&message) {
+            results.push(message);
+            if results.len() == limit { break; }
+        }
+    }
     results.reverse();
     Ok(results)
 }

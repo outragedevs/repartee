@@ -73,7 +73,10 @@ pub fn BufferList() -> impl IntoView {
                     } else {
                         name
                     };
-                    let display_name = buffer_display_name(display_name, buf.e2e_enabled);
+                    let mut display_name = buffer_display_name(display_name, buf.e2e_enabled);
+                    if buf.pinned { display_name.push_str(" [pinned]"); }
+                    if buf.muted { display_name.push_str(" [muted]"); }
+                    if buf.blocked { display_name.push_str(" [blocked]"); }
                     views.push(
                         view! {
                             <button type="button" class=class on:click=on_click

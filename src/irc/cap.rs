@@ -32,7 +32,7 @@ pub const DESIRED_CAPS: &[&str] = &[
 ];
 
 pub fn bouncer_network_caps(server: &ServerCaps) -> Vec<String> {
-    server.negotiate(&["draft/read-marker", "soju.im/read", "draft/message-redaction", "draft/account-registration", "soju.im/search"])
+    server.negotiate(&["draft/read-marker", "soju.im/read", "draft/message-redaction", "draft/account-registration", "soju.im/search", crate::irc::metadata::CAP])
 }
 
 /// Parsed representation of server-advertised capabilities from `CAP LS`.

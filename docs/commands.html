@@ -1085,6 +1085,44 @@ an IRC account; those operations are separate.</p>
 <h2>See Also</h2>
 <p>/bouncer, /server, /set</p>
 </div>
+<div class="command-entry" data-command="bmeta" data-category="Connection">
+<h1>/bmeta</h1>
+<h2>Syntax</h2>
+<pre><code>/bmeta &lt;target&gt;
+/bmeta &lt;target&gt; list
+/bmeta &lt;target&gt; pin|mute|block on|off|unset
+/bmeta &lt;target&gt; clear
+/bmeta sync
+/bmeta subscriptions
+</code></pre>
+<h2>Description</h2>
+<p>Read or change Soju&#39;s metadata for a channel or peer on the active bound bouncer
+network. This requires acknowledged <code>draft/metadata-2</code> and <code>batch</code> capabilities.
+Lurker does not advertise this IRC extension.</p>
+<p>Pin, mute and block are independent server-owned flags. <code>unset</code> removes a flag&#39;s
+value; Soju reports the resulting value as off. <code>clear</code> resets all three flags.
+The server determines whether the target exists and whether a change succeeds.
+Sending a request does not optimistically change the local flags.</p>
+<p>With no action, request all three supported values. <code>list</code> requests the target&#39;s
+metadata listing. <code>subscriptions</code> lists the keys subscribed on this connection.
+<code>sync</code> renews the subscription and requests the provider&#39;s current state. The
+command waits for subscription acknowledgements before sending target operations.
+Values and changes are scoped to the bouncer account and network.</p>
+<p>Only one operation runs at a time. Completion waits for the bouncer to process
+an ordered round-trip check after the operation. A failed mutation triggers a
+readback, never an automatic repeat of the change. A timeout leaves the result
+unknown: wait for the outstanding response or reconnect before issuing another
+operation or <code>sync</code>. Readback failure is reported without retrying indefinitely.</p>
+<h2>Examples</h2>
+<pre><code>/bmeta #repartee pin on
+/bmeta #repartee mute off
+/bmeta Alice block on
+/bmeta Alice clear
+/bmeta #repartee
+</code></pre>
+<h2>See Also</h2>
+<p>/bouncer, /bsearch</p>
+</div>
 <div class="command-entry" data-command="bouncer" data-category="Connection">
 <h1>/bouncer</h1>
 <h2>Syntax</h2>

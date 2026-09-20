@@ -1148,6 +1148,7 @@ mod tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         });
 
         // Add users to the channel
@@ -1412,6 +1413,7 @@ mod tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         });
         state.add_nick(
             &buf_id,
@@ -2525,6 +2527,7 @@ mod tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         });
 
         // Add users — add_nick stores keys as lowercase

@@ -78,6 +78,7 @@ impl App {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         };
         self.state
             .buffers
@@ -110,6 +111,9 @@ impl App {
         let identities: std::collections::HashMap<_, _> = self.volatile_mentions.iter()
             .filter_map(|(_, mention, identity)| identity.as_ref().map(|identity| (mention.id, identity.clone())))
             .collect();
+        let origins: std::collections::HashMap<_, _> = rows.iter().filter_map(|row| {
+            self.mention_target(&row.network).map(|(id, _)| (row.id, (id, row.channel.clone(), row.nick.clone())))
+        }).collect();
         for row in &mut rows {
             row.network = self.mention_target(&row.network).map_or_else(
                 || "Previous bouncer network".to_string(),
@@ -119,9 +123,7 @@ impl App {
         // Pre-allocate message IDs before borrowing buffers mutably.
         let base_id = self.state.message_counter + 1;
         self.state.message_counter += rows.len() as u64;
-        let Some(buf) = self.state.buffers.get_mut(Self::MENTIONS_BUFFER_ID) else {
-            return;
-        };
+        let mut messages = Vec::new();
         for (i, row) in rows.iter().enumerate() {
             let mut message = Self::mention_row_to_message(
                 row,
@@ -135,7 +137,15 @@ impl App {
                     message.tags = Some(std::collections::HashMap::from([("msgid".into(), id)]));
                 }
             }
-            buf.messages.push_back(message);
+            if let Some((id, target, source)) = origins.get(&row.id) {
+                self.state.mark_metadata_origin(id, target, source, &mut message);
+            }
+            if self.state.metadata_prepare_row(Self::MENTIONS_BUFFER_ID, &mut message).is_some() {
+                messages.push(message);
+            }
+        }
+        if let Some(buf) = self.state.buffers.get_mut(Self::MENTIONS_BUFFER_ID) {
+            buf.messages.extend(messages);
         }
     }
 

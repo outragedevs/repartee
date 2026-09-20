@@ -396,3 +396,25 @@ async fn capability_withdrawal_discards_completed_results_before_the_next_tick()
         assert!(app.state.buffers["first/#room"].messages.is_empty());
     }
 }
+
+#[tokio::test]
+async fn metadata_filtering_counts_only_visible_search_results() {
+    let (mut app, _) = app();
+    app.state.set_metadata("first", "Alice", crate::irc::metadata::Key::Blocked, true);
+    search(&mut app);
+    receive(&mut app, "first", ":server BATCH +result soju.im/search");
+    for nick in ["Alice", "Bob"] {
+        receive(&mut app, "first", &format!("@batch=result;msgid={nick};time=2024-01-01T00:00:00Z :{nick}!u@h PRIVMSG #room :needle"));
+    }
+    receive(&mut app, "first", ":server BATCH -result");
+    let rows = &app.state.buffers["first/*search*"].messages;
+    assert_eq!(rows.iter().filter(|row| row.nick.is_some()).count(), 1);
+    assert!(rows.iter().any(|row| row.text.contains("1 search results")));
+    assert!(!rows.iter().any(|row| row.text.contains("2 search results")));
+    app.state.set_metadata("first", "Bob", crate::irc::metadata::Key::Blocked, true);
+    search(&mut app);
+    receive(&mut app, "first", ":server BATCH +empty soju.im/search");
+    receive(&mut app, "first", "@batch=empty;time=2024-01-01T00:00:00Z :Bob!u@h PRIVMSG #room :needle");
+    receive(&mut app, "first", ":server BATCH -empty");
+    assert!(app.state.buffers["first/*search*"].messages.iter().any(|row| row.text.contains("0 search results")));
+}

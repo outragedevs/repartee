@@ -146,6 +146,7 @@ impl App {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         });
     }
 

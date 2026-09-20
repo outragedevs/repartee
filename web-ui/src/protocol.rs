@@ -88,6 +88,12 @@ pub enum WebEvent {
         #[serde(default = "default_true")]
         activate: bool,
     },
+    BufferMetadataChanged {
+        buffer_id: String,
+        pinned: bool,
+        muted: bool,
+        blocked: bool,
+    },
     BufferE2eChanged {
         buffer_id: String,
         enabled: bool,
@@ -322,6 +328,12 @@ pub struct BufferMeta {
     pub modes: Option<String>,
     #[serde(default)]
     pub e2e_enabled: bool,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub blocked: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
