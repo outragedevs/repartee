@@ -455,7 +455,7 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
 
 /// Get the list of channels to auto-rejoin after reconnecting.
 pub fn channels_to_rejoin(state: &AppState, conn_id: &str) -> Vec<String> {
-    if state.connections.get(conn_id).is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some() || conn.origin_config.bouncer_control) {
+    if state.connections.get(conn_id).is_some_and(|conn| conn.bouncer_network_id().is_some() || conn.bouncer_control()) {
         return Vec::new();
     }
     // Collect channels from existing channel buffers for this connection
@@ -661,8 +661,8 @@ pub fn handle_cap_new(
         .iter()
         .filter(|cap| {
             (DESIRED_CAPS.iter().any(|d| d.eq_ignore_ascii_case(cap))
-                || (cap.as_str() == "soju.im/client-cert" && state.connections.get(conn_id).is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some() || conn.origin_config.bouncer_control))
-                || (state.connections.get(conn_id).is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some() && !conn.origin_config.bouncer_control)
+                || (cap.as_str() == "soju.im/client-cert" && state.connections.get(conn_id).is_some_and(|conn| conn.bouncer_network_id().is_some() || conn.bouncer_control()))
+                || (state.connections.get(conn_id).is_some_and(|conn| conn.bouncer_network_id().is_some() && !conn.bouncer_control())
                     && matches!(cap.as_str(), "draft/read-marker" | "soju.im/read" | "draft/message-redaction" | "draft/account-registration" | "soju.im/search" | "draft/metadata-2" | "soju.im/webpush")))
                 && enabled.is_none_or(|set| !set.contains(cap.as_str()))
         })
@@ -6192,6 +6192,7 @@ mod tests {
             network_label: None,
             id: "test".to_string(),
             label: "TestServer".to_string(),
+            bouncer_identity: None,
             network_scope: None,
             status: ConnectionStatus::Connected,
             own_handle: None,
@@ -11169,6 +11170,7 @@ mod tests {
             network_label: None,
             id: "other".into(),
             label: "Other".into(),
+            bouncer_identity: None,
             network_scope: None,
             status: ConnectionStatus::Connected,
             own_handle: None,

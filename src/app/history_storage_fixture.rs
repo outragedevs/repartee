@@ -41,7 +41,17 @@ fn prepare(path: &Path, seed: bool) -> App {
         .unwrap();
     let user = std::env::var("REPARTEE_BOUNCER_TEST_USER").unwrap();
     let pass_mode = std::env::var("REPARTEE_BOUNCER_TEST_PASS");
-    if pass_mode.as_deref() == Ok("combined") {
+    let legacy = std::env::var("REPARTEE_BOUNCER_TEST_LEGACY").as_deref() == Ok("1");
+    if legacy {
+        let network = if std::env::var("REPARTEE_BOUNCER_TEST_PROVIDER").as_deref() == Ok("soju") {
+            "fixture".to_string()
+        } else {
+            std::env::var("REPARTEE_BOUNCER_TEST_NETID").unwrap()
+        };
+        config.username = Some(format!("{user}/{network}"));
+        config.password = Some("fixture-password".into());
+        config.channels = vec!["#must-not-autojoin".into()];
+    } else if pass_mode.as_deref() == Ok("combined") {
         config.password = Some(format!("{user}:fixture-password"));
         config.username = Some("ignored".into());
     } else if pass_mode.as_deref() == Ok("user") {
@@ -51,7 +61,9 @@ fn prepare(path: &Path, seed: bool) -> App {
         config.sasl_user = Some(user);
         config.sasl_pass = Some("fixture-password".into());
     }
-    config.bouncer_network_id = Some(std::env::var("REPARTEE_BOUNCER_TEST_NETID").unwrap());
+    if !legacy {
+        config.bouncer_network_id = Some(std::env::var("REPARTEE_BOUNCER_TEST_NETID").unwrap());
+    }
     app.setup_connection("fixture", &config);
     if seed {
         let scope = app.state.connections["fixture"].network_key();
@@ -228,11 +240,14 @@ fn verify_disk(path: &Path) {
     let mut statement = database
         .prepare("SELECT text FROM messages ORDER BY id")
         .unwrap();
-    let rows: Vec<String> = statement
+    let mut rows: Vec<String> = statement
         .query_map([], |row| row.get(0))
         .unwrap()
         .map(Result::unwrap)
         .collect();
+    if std::env::var("REPARTEE_BOUNCER_TEST_LEGACY").as_deref() == Ok("1") {
+        rows.retain(|text| text != "Connecting to fixture...");
+    }
     assert_eq!(
         rows,
         [

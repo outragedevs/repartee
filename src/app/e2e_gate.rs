@@ -129,7 +129,7 @@ impl AppState {
         conn_id: &str,
         target: &str,
     ) -> crate::e2e::error::Result<bool> {
-        let Some(conn) = self.connections.get(conn_id).filter(|conn| conn.origin_config.bouncer_network_id.is_some() || conn.origin_config.bouncer_control) else {
+        let Some(conn) = self.connections.get(conn_id).filter(|conn| conn.bouncer_network_id().is_some() || conn.bouncer_control()) else {
             return Ok(false);
         };
         let Some(manager) = self.e2e_manager.as_ref() else { return Ok(false) };
@@ -1122,6 +1122,7 @@ mod tests {
             network_label: None,
             id: "test".to_string(),
             label: "TestServer".to_string(),
+            bouncer_identity: None,
             network_scope: None,
             status: crate::state::connection::ConnectionStatus::Connected,
             own_handle: None,

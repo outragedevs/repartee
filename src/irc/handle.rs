@@ -215,6 +215,14 @@ pub struct IrcSender {
 }
 
 impl IrcSender {
+    pub(crate) fn set_autojoin_enabled(&self, enabled: bool) {
+        match &self.wire {
+            Wire::Live(sender) => sender.set_autojoin_enabled(enabled),
+            #[cfg(test)]
+            _ => {},
+        }
+    }
+
     pub(crate) fn new(sender: irc::client::Sender, penalty_threshold_ms: u64) -> Self {
         Self {
             wire: Wire::Live(sender),
@@ -621,6 +629,7 @@ fn build_batched_joins(
 /// Handle to a connected IRC client, holding the connection ID and send half.
 #[derive(Debug)]
 pub struct IrcHandle {
+    pub(crate) bouncer_identity: Option<super::bouncer::Identity>,
     pub(crate) sasl_authenticated: bool,
     pub(crate) account_registration_rules: Option<String>,
     pub conn_id: String,
@@ -664,6 +673,7 @@ impl IrcHandle {
             local_ip,
             outgoing_handle,
             reader_handle: None,
+            bouncer_identity: None,
             account_registration_rules: None,
             sasl_authenticated: false,
         }

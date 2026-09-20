@@ -20,12 +20,43 @@ pub fn normalize_network_id(value: &str) -> Result<String, String> {
     Err("Bouncer network ID must be a positive decimal integer".to_string())
 }
 
+pub(super) fn legacy_child_username(config: &crate::config::ServerConfig, username: &str, network: &str) -> Result<Option<String>> {
+    if config.bouncer_network_id.is_none() || config.password.as_deref().is_none_or(str::is_empty)
+        || [&config.sasl_user, &config.sasl_pass, &config.sasl_mechanism,
+            &config.sasl_key_path, &config.client_cert_path].iter().any(|value| value.is_some())
+    {
+        return Ok(None);
+    }
+    if network.is_empty() || network.chars().any(char::is_whitespace) || network.contains(['\0', '\r', '\n']) {
+        return Err(eyre!("This network name cannot be selected using PASS; configure SASL authentication"));
+    }
+    let account = username.split(['/', '@']).next().unwrap_or_default();
+    let client = username.split_once('@').map_or("", |(_, client)| client.split('/').next().unwrap_or_default());
+    Ok(Some(format!("{account}/{network}@{client}")))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Identity {
+    Control,
+    Network(String),
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum Selection<'a> {
+    Automatic,
+    Control,
+    Network(&'a str),
+}
+
 pub(super) async fn confirm_registration(
     stream: &mut irc::client::ClientStream,
-    expected: Option<&str>,
+    expected: Selection<'_>,
     early_messages: &mut Vec<Message>,
-) -> Result<()> {
-    let mut confirmed = expected.is_none();
+) -> Result<Identity> {
+    let mut confirmed = match expected {
+        Selection::Network(_) => None,
+        Selection::Automatic | Selection::Control => Some(Identity::Control),
+    };
     let mut tracker = super::batch::BatchTracker::default();
     let mut welcomed = false;
     for message in early_messages.iter() {
@@ -52,11 +83,9 @@ pub(super) async fn confirm_registration(
             }
             Command::ERROR(_) => return Err(eyre!("Bouncer closed registration")),
             Command::Response(Response::RPL_ENDOFMOTD | Response::ERR_NOMOTD, _) => {
-                if !confirmed {
-                    return Err(eyre!("Bouncer did not confirm the requested network ID"));
-                }
+                let identity = confirmed.ok_or_else(|| eyre!("Bouncer did not confirm the requested network ID"))?;
                 early_messages.push(message);
-                return Ok(());
+                return Ok(identity);
             }
             _ => {}
         }
@@ -67,7 +96,7 @@ pub(super) async fn confirm_registration(
     ))
 }
 
-fn confirm_identity(message: &Message, tracker: &mut super::batch::BatchTracker, expected: Option<&str>, confirmed: &mut bool) -> Result<()> {
+fn confirm_identity(message: &Message, tracker: &mut super::batch::BatchTracker, expected: Selection<'_>, confirmed: &mut Option<Identity>) -> Result<()> {
     let completed;
     let tokens = match &message.command {
         Command::BATCH(reference, kind, params) => {
@@ -89,15 +118,20 @@ fn confirm_identity(message: &Message, tracker: &mut super::batch::BatchTracker,
         _ => return Ok(()),
     };
     for token in tokens.unwrap_or_default() {
-        if token == "-BOUNCER_NETID" { *confirmed = expected.is_none(); }
-        if let Some(value) = token.strip_prefix("BOUNCER_NETID=") {
-            let Some(expected) = expected else {
-                return Err(eyre!("Bouncer control login selected a network; remove the network selector from the login"));
+        if token == "-BOUNCER_NETID" {
+            *confirmed = match expected {
+                Selection::Network(_) => None,
+                Selection::Automatic | Selection::Control => Some(Identity::Control),
             };
-            if normalize_network_id(value).as_deref() != Ok(expected) {
-                return Err(eyre!("Bouncer selected a different network than requested"));
+        }
+        if let Some(value) = token.strip_prefix("BOUNCER_NETID=") {
+            let network = normalize_network_id(value).map_err(|error| eyre!(error))?;
+            match expected {
+                Selection::Control => return Err(eyre!("Bouncer control login selected a network; remove the network selector from the login")),
+                Selection::Network(expected) if network != expected => return Err(eyre!("Bouncer selected a different network than requested")),
+                Selection::Automatic | Selection::Network(_) => {},
             }
-            *confirmed = true;
+            *confirmed = Some(Identity::Network(network));
         }
     }
     Ok(())

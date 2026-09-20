@@ -71,6 +71,7 @@ impl App {
             network_label: None,
             id: Self::SHELL_CONN_ID.to_string(),
             label: "Shell".to_string(),
+            bouncer_identity: None,
             network_scope: None,
             status: ConnectionStatus::Connected,
             own_handle: None,

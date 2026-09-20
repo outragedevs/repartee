@@ -79,7 +79,7 @@ impl super::App {
             }
             let conn = &self.state.connections[&id];
             if conn.status != crate::state::connection::ConnectionStatus::Connected
-                || conn.origin_config.bouncer_control
+                || conn.bouncer_control()
                 || conn.isupport_parsed.get("MONITOR").is_none()
             {
                 continue;
@@ -111,7 +111,7 @@ pub fn command(app: &mut super::App, args: &[String]) {
         .state
         .connections
         .get(&id)
-        .is_some_and(|conn| conn.origin_config.bouncer_control)
+        .is_some_and(crate::state::connection::Connection::bouncer_control)
     {
         add_local_event(
             app,

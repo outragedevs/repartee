@@ -77,7 +77,7 @@ fn command_with_secret(app: &mut super::App, args: &[String], secret: impl FnOnc
     };
     let supported = app.state.connections.get(&id).is_some_and(|conn| {
         conn.status == crate::state::connection::ConnectionStatus::Connected
-            && conn.origin_config.bouncer_network_id.is_some() && !conn.origin_config.bouncer_control
+            && conn.bouncer_network_id().is_some() && !conn.bouncer_control()
             && conn.origin_config.tls && conn.origin_config.tls_verify
     });
     let mechanism = if clear { "ANONYMOUS" } else { "PLAIN" };

@@ -92,6 +92,7 @@ impl App {
             network_label: None,
                 id: conn_id.clone(),
                 label: net_label.clone(),
+                bouncer_identity: None,
                 network_scope: Some(net.clone()),
                 status: ConnectionStatus::Connected,
                 own_handle: None,

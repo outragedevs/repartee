@@ -54,7 +54,7 @@ fn prepare(app: &super::App, buffer_id: &str) -> Result<(Filehost, Credentials, 
         return Err("Select a channel or private conversation before uploading".into());
     }
     let conn = app.state.connections.get(&buffer.connection_id).ok_or("No connection")?;
-    if conn.status != ConnectionStatus::Connected || !conn.server_owns_history() || conn.origin_config.bouncer_control {
+    if conn.status != ConnectionStatus::Connected || !conn.server_owns_history() || conn.bouncer_control() {
         return Err("Uploads require a connected bouncer network".into());
     }
     let endpoint = conn.isupport_parsed.get("soju.im/FILEHOST").ok_or("The bouncer does not advertise FILEHOST")?;

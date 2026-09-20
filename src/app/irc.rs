@@ -12,6 +12,43 @@ use crate::state::connection::{Connection, ConnectionStatus};
 use super::App;
 
 impl App {
+    fn apply_bouncer_identity(&mut self, id: &str, identity: Option<&crate::irc::bouncer::Identity>) {
+        let Some(conn) = self.state.connections.get_mut(id) else { return; };
+        if conn.origin_config.bouncer_control || conn.origin_config.bouncer_network_id.is_some() {
+            return;
+        }
+        let scope = identity.map(|identity| {
+            let mut scoped = conn.origin_config.clone();
+            scoped.username = Some(scoped.username.as_deref().unwrap_or(&self.config.general.username)
+                .split(['/', '@']).next().unwrap_or_default().to_string());
+            if let Some(login) = scoped.sasl_user.as_mut()
+                && let Some(separator) = login.find(['/', '@'])
+            {
+                login.truncate(separator);
+            }
+            match identity {
+                crate::irc::bouncer::Identity::Control => scoped.bouncer_control = true,
+                crate::irc::bouncer::Identity::Network(network) => scoped.bouncer_network_id = Some(network.clone()),
+            }
+            config::network_scope::network_scope(id, &scoped, &self.config.general.username)
+        });
+        let changed = conn.network_scope != scope;
+        conn.network_scope = scope;
+        conn.bouncer_identity = identity.cloned();
+        if identity.is_some() {
+            conn.joined_channels.clear();
+        }
+        if changed {
+            let buffers: Vec<_> = self.state.buffers.values()
+                .filter(|buffer| buffer.connection_id == id && buffer.buffer_type != BufferType::Server)
+                .map(|buffer| buffer.id.clone()).collect();
+            for buffer in buffers {
+                self.state.remove_buffer(&buffer);
+            }
+        }
+        self.refresh_e2e_configured_networks();
+    }
+
     /// Set up connection state, server buffer, and "Connecting..." message.
     /// Returns the server buffer ID. Shared by autoconnect and /connect command.
     pub fn setup_connection(
@@ -41,6 +78,7 @@ impl App {
             network_label: None,
             id: conn_id.to_string(),
             label: server_config.label.clone(),
+            bouncer_identity: None,
             network_scope: (server_config.bouncer_network_id.is_some() || server_config.bouncer_control)
                 .then(|| config::network_scope::network_scope(account_id, server_config, &self.config.general.username)),
             status: ConnectionStatus::Connecting,
@@ -360,6 +398,7 @@ impl App {
                 if let Some(conn) = self.state.connections.get_mut(&handle.conn_id) {
                     conn.local_ip = handle.local_ip;
                 }
+                self.apply_bouncer_identity(&handle.conn_id, handle.bouncer_identity.as_ref());
                 // A new session for this `conn_id`. Bumping here — rather
                 // than on disconnect — is what makes a captured generation
                 // mean "the session I was written for": a reconnect moves it,
@@ -393,7 +432,7 @@ impl App {
                     conn.multiline = multiline_limits;
                 }
                 self.reconnect_bouncer_presence(&conn_id);
-                if self.state.connections.get(&conn_id).is_some_and(|conn| conn.origin_config.bouncer_control) {
+                if self.state.connections.get(&conn_id).is_some_and(crate::state::connection::Connection::bouncer_control) {
                     self.bouncer_networks.insert(conn_id.clone(), crate::irc::bouncer::NetworkRegistry::default());
                     if !self.state.connections[&conn_id].enabled_caps.contains(crate::irc::bouncer::NETWORKS_NOTIFY_CAP)
                         && let Some(handle) = self.irc_handles.get(&conn_id)
@@ -403,7 +442,7 @@ impl App {
                 }
                 if let Some(conn) = self.state.connections.get(&conn_id)
                     && conn.server_owns_history()
-                    && !conn.origin_config.bouncer_control
+                    && !conn.bouncer_control()
                     && !conn.enabled_caps.contains("draft/chathistory")
                 {
                     let buffer_id = crate::state::buffer::make_buffer_id(&conn_id, &conn.label);
@@ -450,7 +489,7 @@ impl App {
 
                 // Config channels (used for eager buffer creation + rejoin filtering)
                 let explicit_binding = self.state.connections.get(&conn_id)
-                    .is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some() || conn.origin_config.bouncer_control);
+                    .is_some_and(|conn| conn.bouncer_network_id().is_some() || conn.bouncer_control());
                 let config_channels: Vec<String> = self
                     .config
                     .servers
@@ -769,6 +808,49 @@ impl App {
 #[cfg(test)]
 mod activity_rename_tests {
     use super::*;
+
+    #[test]
+    fn discovered_bouncer_scope_preserves_login_and_isolates_rebinding() {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let mut connection = crate::state::events::tests::make_test_connection();
+        connection.origin_config.username = Some("account/network@laptop".into());
+        connection.origin_config.sasl_user = Some("account/network@laptop".into());
+        let original = connection.origin_config.clone();
+        app.state.add_connection(connection);
+        app.state.e2e_manager.as_ref().unwrap().keyring().set_channel_config(
+            &crate::e2e::keyring::ChannelConfig {
+                channel: crate::e2e::scoped_context(&original.label, "#secret"),
+                enabled: true,
+                mode: crate::e2e::keyring::ChannelMode::Normal,
+            },
+        ).unwrap();
+        app.apply_bouncer_identity("libera", Some(&crate::irc::bouncer::Identity::Network("42".into())));
+        assert!(matches!(
+            app.state.e2e_send_plan_for_target("libera", "#secret", "private content"),
+            Err(crate::app::e2e_gate::E2eRefusal::BouncerScopeChanged)
+        ));
+        let conn = &app.state.connections["libera"];
+        assert!(conn.server_owns_history());
+        assert_eq!(conn.bouncer_network_id(), Some("42"));
+        assert_eq!(conn.origin_config.username, original.username);
+        assert!(conn.origin_config.bouncer_network_id.is_none());
+        assert!(conn.joined_channels.is_empty());
+        let scope = conn.network_key().to_string();
+        app.state.add_buffer(Buffer::for_test("libera", BufferType::Channel, "#old-network"));
+        let origin = &mut app.state.connections.get_mut("libera").unwrap().origin_config;
+        origin.username = Some("account/renamed@desktop".into());
+        origin.sasl_user = Some("account/renamed@desktop".into());
+        app.apply_bouncer_identity("libera", Some(&crate::irc::bouncer::Identity::Network("42".into())));
+        assert_eq!(app.state.connections["libera"].network_key(), scope);
+        assert!(app.state.buffers.contains_key("libera/#old-network"));
+        app.apply_bouncer_identity("libera", Some(&crate::irc::bouncer::Identity::Network("43".into())));
+        assert_ne!(app.state.connections["libera"].network_key(), scope);
+        assert!(!app.state.buffers.contains_key("libera/#old-network"));
+        app.apply_bouncer_identity("libera", Some(&crate::irc::bouncer::Identity::Control));
+        assert!(app.state.connections["libera"].bouncer_control());
+        app.apply_bouncer_identity("libera", None);
+        assert!(!app.state.connections["libera"].server_owns_history());
+    }
 
     #[test]
     fn dcc_nick_change_keeps_older_unread_chat_first() {

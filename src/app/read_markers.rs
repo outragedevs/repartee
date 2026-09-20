@@ -235,7 +235,7 @@ impl App {
         let mut budget = 8;
         for (conn_id, conn) in &self.state.connections {
             if !conn.server_owns_history()
-                || conn.origin_config.bouncer_control
+                || conn.bouncer_control()
                 || conn.status != crate::state::connection::ConnectionStatus::Connected
             {
                 continue;
@@ -427,7 +427,7 @@ impl App {
             return true;
         };
         if !conn.server_owns_history()
-            || conn.origin_config.bouncer_control
+            || conn.bouncer_control()
             || !(conn.enabled_caps.contains("draft/read-marker")
                 || conn.enabled_caps.contains("soju.im/read"))
         {

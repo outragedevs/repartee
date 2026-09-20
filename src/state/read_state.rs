@@ -44,7 +44,7 @@ impl AppState {
                 .split_once('/')
                 .and_then(|(id, _)| self.connections.get(id))
                 .is_some_and(|conn| {
-                    !conn.origin_config.bouncer_control
+                    !conn.bouncer_control()
                         && (conn.enabled_caps.contains("draft/read-marker")
                             || conn.enabled_caps.contains("soju.im/read"))
                 })

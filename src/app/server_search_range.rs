@@ -29,7 +29,7 @@ impl crate::app::App {
         if self.server_search.contains_key(id) { add_local_event(self, "A search is unresolved; wait for its reply or reconnect"); return; }
         let range = match parse(args) { Ok(range) => range, Err(error) => { add_local_event(self, error); return; } };
         let Some(conn) = self.state.connections.get(id).filter(|conn|
-            conn.server_owns_history() && !conn.origin_config.bouncer_control
+            conn.server_owns_history() && !conn.bouncer_control()
             && conn.status == crate::state::connection::ConnectionStatus::Connected
             && ["draft/chathistory", "batch", "server-time", "message-tags"].iter().all(|cap| conn.enabled_caps.contains(*cap))) else {
             add_local_event(self, "Range history requires a connected bouncer network with history, batch, server-time and message-tags support"); return;

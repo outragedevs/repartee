@@ -26,7 +26,7 @@ impl super::App {
     fn webpush_configuration(&self, id: &str) -> Option<(String, String)> {
         let conn = self.state.connections.get(id)?;
         if conn.status != ConnectionStatus::Connected || !conn.origin_config.tls || !conn.origin_config.tls_verify
-            || conn.origin_config.bouncer_control || conn.origin_config.bouncer_network_id.is_none()
+            || conn.bouncer_control() || conn.bouncer_network_id().is_none()
             || !conn.enabled_caps.contains(webpush::CAP)
             || !self.irc_handles.get(id).is_some_and(|handle| handle.sasl_authenticated) { return None; }
         let vapid = conn.isupport_parsed.get("VAPID")?;
