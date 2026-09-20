@@ -19,6 +19,7 @@ mod server_history;
 mod history_discovery;
 mod read_markers;
 mod presence;
+mod bouncer_management;
 #[cfg(test)]
 mod presence_fixture;
 mod connection_attempt;
@@ -390,6 +391,7 @@ pub struct App {
     pub ui_regions: Option<UiRegions>,
     pub irc_handles: HashMap<String, IrcHandle>,
     pub(crate) bouncer_children: HashMap<String, bouncer_children::ChildNetwork>,
+    pub(crate) bouncer_mutations: HashMap<String, bouncer_management::Pending>,
     pub(crate) bouncer_networks: HashMap<String, crate::irc::bouncer::NetworkRegistry>,
     pub(crate) connection_attempts: HashMap<String, u64>,
     pub(crate) forwarder_handles: HashMap<String, tokio::task::JoinHandle<()>>,
@@ -857,6 +859,7 @@ impl App {
             ui_regions: None,
             irc_handles: HashMap::new(),
             bouncer_children: HashMap::new(),
+            bouncer_mutations: HashMap::new(),
             bouncer_networks: HashMap::new(),
             connection_attempts: HashMap::new(),
             forwarder_handles: HashMap::new(),
@@ -1630,6 +1633,7 @@ impl App {
                     self.tick_history_discovery();
                     self.tick_read_markers();
                     self.tick_bouncer_presence();
+                    self.tick_bouncer_mutations();
                     self.check_reconnects();
                     self.measure_lag();
                     self.check_day_changed();

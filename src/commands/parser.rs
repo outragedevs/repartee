@@ -40,6 +40,7 @@ const GREEDY_COMMANDS: &[&str] = &[
     "disconnect",
     "set",
     "alias",
+    "bouncer",
     "quote",
     "shell",
     "sh",

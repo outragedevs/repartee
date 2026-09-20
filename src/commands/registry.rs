@@ -29,7 +29,7 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
             "bouncer",
             CommandDef {
                 handler: crate::app::bouncer::command,
-                description: "Discover and connect to bouncer networks",
+                description: "Discover, connect to and manage bouncer networks",
                 aliases: &[],
                 category: CommandCategory::Connection,
             },

@@ -19,6 +19,7 @@ mod fs_secure;
 mod image_preview;
 mod irc;
 mod nick_color;
+mod diagnostics;
 mod scripting;
 mod session;
 mod shell;
@@ -45,7 +46,7 @@ mod web;
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use color_eyre::eyre::{Result, eyre};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter, prelude::*};
 
 const BACKEND_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const BACKEND_CONNECT_RETRY: std::time::Duration = std::time::Duration::from_millis(50);
@@ -73,10 +74,12 @@ fn setup_logging() {
     // without forcing the user to remember `RUST_LOG=info` first. Users can
     // still raise/lower the level via `RUST_LOG`.
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(log_file)
-        .with_ansi(false)
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer()
+            .with_writer(log_file)
+            .with_ansi(false)
+            .with_filter(diagnostics::IrcWireFilter))
         .init();
 }
 
