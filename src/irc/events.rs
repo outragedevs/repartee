@@ -1061,6 +1061,10 @@ pub fn ingest_chathistory_batch(
         .and_then(|c| c.own_handle.clone());
 
     for msg in ordered {
+        if crate::irc::redaction::is_redaction(msg) {
+            skipped += 1;
+            continue;
+        }
         let tags = extract_tags(msg);
 
         if let Some(ts) = tags
