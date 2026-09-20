@@ -376,7 +376,7 @@ async fn pinned_bouncer_partial_history() {
     assert_eq!(count("direct persistence control"), 1);
 }
 
-async fn observe_partial_row(app: &mut App) {
+async fn observe_partial_row(app: &mut App) -> String {
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             while let Ok(event) = app.irc_rx.try_recv() {
@@ -389,12 +389,12 @@ async fn observe_partial_row(app: &mut App) {
                 app.handle_irc_event(event);
                 if let Some(tag) = partial {
                     assert!(app.batch_trackers["fixture"].is_open(&tag));
-                    return;
+                    return tag;
                 }
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.expect("partial history row was not received");
+    }).await.expect("partial history row was not received")
 }
 
 #[tokio::test]
@@ -404,7 +404,8 @@ async fn pinned_bouncer_stalled_history() {
     let path = directory.path().join("messages.db");
     let control = std::env::var("REPARTEE_BOUNCER_FAULT_CONTROL").unwrap();
     let mode = std::env::var("REPARTEE_BOUNCER_STALL_MODE").unwrap();
-    assert!(matches!(mode.as_str(), "timeout" | "cancel"));
+    assert!(matches!(mode.as_str(), "timeout" | "cancel" | "batch-expiry" | "request-expiry"));
+    let expired = mode.ends_with("expiry");
     let http = reqwest::Client::new();
     let mut app = prepare(&path, true);
     until(&mut app, "settled history", |app| {
@@ -418,23 +419,37 @@ async fn pinned_bouncer_stalled_history() {
     let command = "/bsearch between history-peer 2024-01-01T00:00:10Z 2024-01-01T00:00:20Z 3";
     app.state.set_active_buffer("fixture/history-peer");
     app.handle_submit(command);
-    observe_partial_row(&mut app).await;
+    let observed_at = std::time::Instant::now();
+    let partial_tag = observe_partial_row(&mut app).await;
     assert!(app.server_search.contains_key("fixture"));
     assert!(!app.state.buffers["fixture/*search*"].messages.iter().any(|row| row.nick.is_some()));
     if mode == "cancel" {
         app.handle_submit("/bsearch cancel");
     } else {
-        tokio::time::timeout(Duration::from_secs(40), async {
+        tokio::time::timeout(Duration::from_secs(110), async {
             loop {
                 while let Ok(event) = app.irc_rx.try_recv() { app.handle_irc_event(event); }
                 app.purge_expired_batches();
                 app.purge_stale_chathistory_requests();
                 app.tick_history_discovery();
                 app.tick_server_search();
-                if app.state.buffers["fixture/*search*"].messages.iter().any(|row| row.text.contains("Search timed out")) { break; }
+                let batch_expired = app.batch_trackers.get("fixture").is_none_or(|tracker| !tracker.is_open(&partial_tag));
+                let ready = match mode.as_str() {
+                    "batch-expiry" => batch_expired,
+                    "request-expiry" => batch_expired && app.state.connections["fixture"].chathistory.pending_count() == 0,
+                    _ => app.state.buffers["fixture/*search*"].messages.iter().any(|row| row.text.contains("Search timed out")),
+                };
+                if ready { break; }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }).await.expect("real search deadline did not expire");
+    }
+    if mode == "request-expiry" {
+        assert!(observed_at.elapsed() >= Duration::from_secs(89));
+        assert!(app.state.connections["fixture"].chathistory.has_ambiguous_reply());
+    } else if mode == "batch-expiry" {
+        assert!(observed_at.elapsed() >= Duration::from_secs(59));
+        assert!(app.state.connections["fixture"].chathistory.pending_count() > 0);
     }
     assert_eq!(app.state.connections["fixture"].status, crate::state::connection::ConnectionStatus::Connected);
     app.handle_submit(command);
@@ -445,9 +460,29 @@ async fn pinned_bouncer_stalled_history() {
     assert_eq!(status["released"], false);
     let released: serde_json::Value = http.post(format!("{control}/release")).send().await.unwrap().json().await.unwrap();
     assert!(released["released_bytes"].as_u64().unwrap() > 0);
-    until(&mut app, "late batch discarded", |app| !app.server_search.contains_key("fixture")).await;
+    if expired {
+        consume_history_barrier(&mut app).await;
+        assert!(app.server_search.contains_key("fixture"));
+        app.handle_submit(command);
+        assert!(app.state.buffers["fixture/*search*"].messages.back().unwrap().text.contains("A search is unresolved"));
+    } else {
+        until(&mut app, "late batch discarded", |app| !app.server_search.contains_key("fixture")).await;
+    }
     assert!(!app.state.buffers["fixture/*search*"].messages.iter().any(|row| row.nick.is_some()));
     assert_eq!(app.state.buffers["fixture/history-peer"].messages.iter().map(|row| row.id).collect::<Vec<_>>(), baseline);
+    if expired {
+        app.handle_submit("/disconnect");
+        until(&mut app, "disconnect quarantined range", |app| {
+            app.state.connections["fixture"].status == crate::state::connection::ConnectionStatus::Disconnected
+                && !app.irc_handles.contains_key("fixture")
+        }).await;
+        let config = app.state.connections["fixture"].origin_config.clone();
+        app.start_connection_attempt("fixture", config);
+        until(&mut app, "reconnect after expired range", |app| {
+            app.state.connections["fixture"].status == crate::state::connection::ConnectionStatus::Connected
+                && app.state.connections["fixture"].chathistory.pending_count() == 0
+        }).await;
+    }
     app.handle_submit(command);
     assert!(app.server_search.contains_key("fixture"));
     until(&mut app, "new range complete", |app| !app.server_search.contains_key("fixture")).await;
@@ -460,4 +495,23 @@ async fn pinned_bouncer_stalled_history() {
     assert_eq!(count("fixture-history-%"), 0);
     assert_eq!(count("preserved legacy row"), 1);
     assert_eq!(count("direct persistence control"), 1);
+}
+
+async fn consume_history_barrier(app: &mut App) {
+    let barrier = "partial-history-drained";
+    app.irc_handles["fixture"].sender().send(irc::proto::Command::PING(barrier.into(), None)).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            while let Ok(event) = app.irc_rx.try_recv() {
+                let mut inner = &event;
+                while let crate::irc::IrcEvent::Attempt(_, _, nested) = inner { inner = nested; }
+                let reached = matches!(inner, crate::irc::IrcEvent::Message(_, message)
+                    if matches!(&message.command, irc::proto::Command::PONG(first, second)
+                        if first == barrier || second.as_deref() == Some(barrier)));
+                app.handle_irc_event(event);
+                if reached { return; }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("history stream barrier did not arrive");
 }

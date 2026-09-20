@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def run(command, **kwargs):
-    return subprocess.run(command, check=True, text=True, timeout=180, **kwargs)
+    return subprocess.run(command, check=True, text=True, timeout=kwargs.pop("timeout", 180), **kwargs)
 
 
 def wait_ready(process, predicate):
@@ -57,7 +57,7 @@ def main():
     parser.add_argument("source", type=Path)
     parser.add_argument("--test-filter", default="pinned_bouncer_")
     parser.add_argument("--daemon-image", help="Run the real daemon/browser lifecycle fixture using this container image")
-    parser.add_argument("--history-stall", choices=("timeout", "cancel"), help="Hold a partial history response, then deliver it late")
+    parser.add_argument("--history-stall", choices=("timeout", "cancel", "batch-expiry", "request-expiry"), help="Hold a partial history response, then deliver it late")
     parser.add_argument("--partial-history", action="store_true", help="Cut an actual history batch after its first message")
     parser.add_argument("--history-range", action="store_true", help="Probe BETWEEN against the real provider")
     parser.add_argument("--tls-case", choices=("valid", "untrusted", "wrong-host"))
@@ -168,7 +168,8 @@ def main():
                         cwd=ROOT, env=environment)
                 else:
                     run(["make", "test", f"TEST_ARGS={test_args}"],
-                        cwd=ROOT, env=environment)
+                        cwd=ROOT, env=environment,
+                        timeout=600 if args.history_stall in ("batch-expiry", "request-expiry") else 180)
                 print(f"{args.implementation}: {'history-range' if args.history_range else args.test_filter} fixture passed")
             except Exception:
                 log.flush()
