@@ -317,3 +317,13 @@ network binding, reconnect and credential rejection. Full Sol medium reviews 1
 and 2 are clean; 2567 native and 144 web tests passed, and WASM was rebuilt.
 See `docs/validation/bouncer-oauthbearer.md`. Remaining acceptance rows, including
 upstream account operations, remain in scope.
+
+OAUTHBEARER merged in https://github.com/outragedevs/repartee/pull/85.
+Upstream SASL is now implemented on `feat/bouncer-upstream-sasl`: `/auth` uses
+separate password secret references, supports explicit clearing of Soju's saved
+credentials, checks both transport hops, and preserves account identity for
+history ownership. Actual Soju storage/reconnect and native/web command paths
+passed, as did Lurker rejection. Full Sol medium review round 4 is clean after
+three findings were fixed with regressions. See
+`docs/validation/bouncer-upstream-sasl.md`. REGISTER/VERIFY and the remaining
+full-matrix acceptance rows remain in scope.
