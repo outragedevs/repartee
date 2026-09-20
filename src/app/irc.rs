@@ -817,7 +817,18 @@ mod activity_rename_tests {
         connection.origin_config.sasl_user = Some("account/network@laptop".into());
         let original = connection.origin_config.clone();
         app.state.add_connection(connection);
+        app.state.e2e_manager.as_ref().unwrap().keyring().set_channel_config(
+            &crate::e2e::keyring::ChannelConfig {
+                channel: crate::e2e::scoped_context(&original.label, "#secret"),
+                enabled: true,
+                mode: crate::e2e::keyring::ChannelMode::Normal,
+            },
+        ).unwrap();
         app.apply_bouncer_identity("libera", Some(&crate::irc::bouncer::Identity::Network("42".into())));
+        assert!(matches!(
+            app.state.e2e_send_plan_for_target("libera", "#secret", "private content"),
+            Err(crate::app::e2e_gate::E2eRefusal::BouncerScopeChanged)
+        ));
         let conn = &app.state.connections["libera"];
         assert!(conn.server_owns_history());
         assert_eq!(conn.bouncer_network_id(), Some("42"));
