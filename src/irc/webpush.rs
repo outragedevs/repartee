@@ -127,6 +127,7 @@ mod tests {
 #[serde(tag = "action")]
 pub enum Action {
     Get,
+    Lookup { scope: String },
     Register { scope: String, vapid: String, subscription: Subscription },
     Unregister { scope: String, endpoint: String },
 }
@@ -155,4 +156,13 @@ pub enum Status {
     Busy,
     Failed,
     Unknown,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BrowserContext {
+    pub label: String,
+    pub nick: String,
+    pub chantypes: String,
+    pub statusmsg: String,
+    pub casemapping: String,
 }

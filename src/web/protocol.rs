@@ -18,6 +18,7 @@ pub enum WebEvent {
         status: crate::irc::webpush::Status,
         scope: Option<String>,
         vapid: Option<String>,
+        context: Option<crate::irc::webpush::BrowserContext>,
     },
     /// Initial state sync on WebSocket connect.
     SyncInit {

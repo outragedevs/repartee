@@ -6,6 +6,7 @@ mod emotes;
 mod format;
 mod nick_color;
 mod protocol;
+mod push;
 mod state;
 mod ws;
 
