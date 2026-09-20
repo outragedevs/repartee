@@ -57,16 +57,17 @@ def main():
     parser.add_argument("source", type=Path)
     parser.add_argument("--test-filter", default="pinned_bouncer_")
     parser.add_argument("--daemon-image", help="Run the real daemon/browser lifecycle fixture using this container image")
+    parser.add_argument("--history-stall", choices=("timeout", "cancel"), help="Hold a partial history response, then deliver it late")
     parser.add_argument("--partial-history", action="store_true", help="Cut an actual history batch after its first message")
     parser.add_argument("--history-range", action="store_true", help="Probe BETWEEN against the real provider")
     parser.add_argument("--tls-case", choices=("valid", "untrusted", "wrong-host"))
     parser.add_argument("--pass-auth", nargs="?", const="user", choices=("user", "combined"))
     parser.add_argument("--target-tie", action="store_true", help="Seed 1001 conversations sharing a timestamp")
     args = parser.parse_args()
-    if args.partial_history:
-        if args.history_range or args.tls_case or args.pass_auth or args.daemon_image or args.target_tie or args.test_filter != "pinned_bouncer_":
+    if args.partial_history or args.history_stall:
+        if (args.partial_history and args.history_stall) or args.history_range or args.tls_case or args.pass_auth or args.daemon_image or args.target_tie or args.test_filter != "pinned_bouncer_":
             parser.error("--partial-history is a standalone partial-batch scenario")
-        args.test_filter = "pinned_bouncer_partial_history"
+        args.test_filter = "pinned_bouncer_stalled_history" if args.history_stall else "pinned_bouncer_partial_history"
     if args.history_range and (args.tls_case or args.pass_auth or args.daemon_image or args.target_tie or args.test_filter != "pinned_bouncer_"):
         parser.error("--history-range is a standalone provider protocol scenario")
     if args.tls_case:
@@ -138,11 +139,13 @@ def main():
                         seed(temporary / "main.db")
                     settings = {"port": port, "network": 1, "user": "fixture"}
                 environment = os.environ.copy()
-                if args.partial_history:
+                if args.partial_history or args.history_stall:
                     from bouncer_partial_batch_proxy import PartialBatchProxy
-                    fault = faults.enter_context(PartialBatchProxy(settings["port"]))
+                    fault = faults.enter_context(PartialBatchProxy(settings["port"], stall=bool(args.history_stall)))
                     settings["port"] = fault.port
                     environment["REPARTEE_BOUNCER_FAULT_CONTROL"] = fault.control_url
+                    if args.history_stall:
+                        environment["REPARTEE_BOUNCER_STALL_MODE"] = args.history_stall
                 environment.update({
                     "REPARTEE_BOUNCER_TEST_PORT": str(settings["port"]),
                     "REPARTEE_BOUNCER_TEST_NETID": str(settings["network"]),
@@ -156,7 +159,7 @@ def main():
                     environment["REPARTEE_OAUTH_TEST_CA"] = str(temporary / f"{authority}-ca.pem")
                 test_args = f"{args.test_filter} -- --ignored"
                 if args.test_filter == "pinned_bouncer_":
-                    test_args += " --skip pinned_bouncer_partial_history --skip pinned_bouncer_bounded_history --skip pinned_bouncer_tls_validation --skip pinned_bouncer_discovery_limit --skip pinned_bouncer_service --skip pinned_bouncer_presence --skip pinned_bouncer_network_management --skip pinned_bouncer_setname --skip pinned_bouncer_monitor --skip pinned_bouncer_no_monitor --skip pinned_bouncer_invites --skip pinned_bouncer_names --skip pinned_bouncer_channel_context --skip pinned_bouncer_network_icon"
+                    test_args += " --skip pinned_bouncer_stalled_history --skip pinned_bouncer_partial_history --skip pinned_bouncer_bounded_history --skip pinned_bouncer_tls_validation --skip pinned_bouncer_discovery_limit --skip pinned_bouncer_service --skip pinned_bouncer_presence --skip pinned_bouncer_network_management --skip pinned_bouncer_setname --skip pinned_bouncer_monitor --skip pinned_bouncer_no_monitor --skip pinned_bouncer_invites --skip pinned_bouncer_names --skip pinned_bouncer_channel_context --skip pinned_bouncer_network_icon"
                 if args.history_range:
                     from probe_bouncer_history_ranges import probe
                     print(json.dumps(probe(settings, args.implementation), indent=2))

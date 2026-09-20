@@ -375,3 +375,89 @@ async fn pinned_bouncer_partial_history() {
     assert_eq!(count("preserved legacy row"), 1);
     assert_eq!(count("direct persistence control"), 1);
 }
+
+async fn observe_partial_row(app: &mut App) {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            while let Ok(event) = app.irc_rx.try_recv() {
+                let mut inner = &event;
+                while let crate::irc::IrcEvent::Attempt(_, _, nested) = inner { inner = nested; }
+                let partial = if let crate::irc::IrcEvent::Message(_, message) = inner
+                    && matches!(&message.command, irc::proto::Command::PRIVMSG(_, text) if text == "fixture-history-11") {
+                    crate::irc::batch::BatchTracker::get_batch_tag_owned(message)
+                } else { None };
+                app.handle_irc_event(event);
+                if let Some(tag) = partial {
+                    assert!(app.batch_trackers["fixture"].is_open(&tag));
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("partial history row was not received");
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable pinned bouncer and stalled-batch proxy"]
+async fn pinned_bouncer_stalled_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("messages.db");
+    let control = std::env::var("REPARTEE_BOUNCER_FAULT_CONTROL").unwrap();
+    let mode = std::env::var("REPARTEE_BOUNCER_STALL_MODE").unwrap();
+    assert!(matches!(mode.as_str(), "timeout" | "cancel"));
+    let http = reqwest::Client::new();
+    let mut app = prepare(&path, true);
+    until(&mut app, "settled history", |app| {
+        app.state.connections["fixture"].status == crate::state::connection::ConnectionStatus::Connected
+            && app.state.buffers.contains_key("fixture/history-peer")
+            && app.state.connections["fixture"].chathistory.pending_count() == 0
+    }).await;
+    let baseline: Vec<_> = app.state.buffers["fixture/history-peer"].messages.iter().map(|row| row.id).collect();
+    let armed: serde_json::Value = http.post(format!("{control}/arm")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(armed["armed"], true);
+    let command = "/bsearch between history-peer 2024-01-01T00:00:10Z 2024-01-01T00:00:20Z 3";
+    app.state.set_active_buffer("fixture/history-peer");
+    app.handle_submit(command);
+    observe_partial_row(&mut app).await;
+    assert!(app.server_search.contains_key("fixture"));
+    assert!(!app.state.buffers["fixture/*search*"].messages.iter().any(|row| row.nick.is_some()));
+    if mode == "cancel" {
+        app.handle_submit("/bsearch cancel");
+    } else {
+        tokio::time::timeout(Duration::from_secs(40), async {
+            loop {
+                while let Ok(event) = app.irc_rx.try_recv() { app.handle_irc_event(event); }
+                app.purge_expired_batches();
+                app.purge_stale_chathistory_requests();
+                app.tick_history_discovery();
+                app.tick_server_search();
+                if app.state.buffers["fixture/*search*"].messages.iter().any(|row| row.text.contains("Search timed out")) { break; }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }).await.expect("real search deadline did not expire");
+    }
+    assert_eq!(app.state.connections["fixture"].status, crate::state::connection::ConnectionStatus::Connected);
+    app.handle_submit(command);
+    assert!(app.state.buffers["fixture/*search*"].messages.back().unwrap().text.contains("A search is unresolved"));
+    let status: serde_json::Value = http.post(format!("{control}/status")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(status["forwarded_rows"], 1);
+    assert_eq!(status["faulted"], true);
+    assert_eq!(status["released"], false);
+    let released: serde_json::Value = http.post(format!("{control}/release")).send().await.unwrap().json().await.unwrap();
+    assert!(released["released_bytes"].as_u64().unwrap() > 0);
+    until(&mut app, "late batch discarded", |app| !app.server_search.contains_key("fixture")).await;
+    assert!(!app.state.buffers["fixture/*search*"].messages.iter().any(|row| row.nick.is_some()));
+    assert_eq!(app.state.buffers["fixture/history-peer"].messages.iter().map(|row| row.id).collect::<Vec<_>>(), baseline);
+    app.handle_submit(command);
+    assert!(app.server_search.contains_key("fixture"));
+    until(&mut app, "new range complete", |app| !app.server_search.contains_key("fixture")).await;
+    let rows: Vec<_> = app.state.buffers["fixture/*search*"].messages.iter().filter(|row| row.nick.is_some()).map(|row| row.text.as_str()).collect();
+    assert_eq!(rows, ["fixture-history-11", "fixture-history-12", "fixture-history-13"]);
+    direct_irc_control(&mut app);
+    Box::pin(close(app)).await;
+    let database = crate::storage::db::open_readonly_at(path.to_str().unwrap()).unwrap();
+    let count = |pattern: &str| database.query_row("SELECT COUNT(*) FROM messages WHERE text LIKE ?1", [pattern], |row| row.get::<_, i64>(0)).unwrap();
+    assert_eq!(count("fixture-history-%"), 0);
+    assert_eq!(count("preserved legacy row"), 1);
+    assert_eq!(count("direct persistence control"), 1);
+}

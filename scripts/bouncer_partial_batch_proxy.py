@@ -5,7 +5,7 @@ from probe_bouncer_history_ranges import parse
 
 
 class PartialBatchProxy(FaultProxy):
-    def __init__(self, port):
+    def __init__(self, port, stall=False):
         super().__init__(port)
         self.armed = False
         self.requested = False
@@ -13,6 +13,10 @@ class PartialBatchProxy(FaultProxy):
         self.rows = 0
         self.faulted = False
         self.buffers = {}
+        self.stall = stall
+        self.held = bytearray()
+        self.held_destination = None
+        self.released = False
 
     def extra_control(self, path):
         with self.lock:
@@ -21,14 +25,27 @@ class PartialBatchProxy(FaultProxy):
                     return {'armed': False}
                 self.armed = True
                 return {'armed': True}
+            if path == '/release' and self.held_destination is not None:
+                size = len(self.held)
+                self.held_destination.sendall(self.held)
+                self.held.clear()
+                self.held_destination = None
+                self.released = True
+                return {'released_bytes': size}
             if path == '/status':
                 return {'requested': self.requested, 'batch_opened': self.batch is not None,
-                        'forwarded_rows': self.rows, 'faulted': self.faulted}
+                        'forwarded_rows': self.rows, 'faulted': self.faulted,
+                        'held_bytes': len(self.held), 'released': self.released}
         return None
 
     def forward(self, pair, source, data):
         with self.lock:
             armed = self.armed
+            if source is pair[1] and self.held_destination is not None:
+                self.held.extend(data)
+                return True
+            if self.faulted:
+                return super().forward(pair, source, data)
         key = (pair, source)
         buffered = self.buffers.get(key, b'') + data
         destination = pair[1] if source is pair[0] else pair[0]
@@ -49,6 +66,11 @@ class PartialBatchProxy(FaultProxy):
                         self.rows += 1
                         self.faulted = True
                         self.armed = False
+                        if self.stall:
+                            self.held_destination = destination
+                            self.held.extend(buffered)
+                            self.buffers.clear()
+                            return True
                     self.buffers.clear()
                     self.cut()
                     return False
