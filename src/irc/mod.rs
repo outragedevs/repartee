@@ -3,6 +3,7 @@ pub mod batch;
 pub mod bouncer;
 pub mod cap;
 pub mod chathistory;
+pub mod channel_context;
 mod client_cert;
 pub mod events;
 pub mod setname;

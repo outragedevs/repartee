@@ -168,8 +168,9 @@ impl super::App {
             let target_matches = crate::irc::isupport::casefold(target, mapping) == crate::irc::isupport::casefold(&pending.target, mapping);
             let incoming_private = !target.starts_with(|c| channel_types.contains(c))
                 && crate::irc::isupport::casefold(&nick, mapping) == crate::irc::isupport::casefold(&pending.target, mapping);
-            if !target_matches && !incoming_private { return None; }
             let mut tags: std::collections::HashMap<_, _> = wire.tags.as_ref()?.iter().filter_map(|tag| tag.1.as_ref().map(|value| (tag.0.clone(), value.clone()))).filter(|(key, _)| key != "batch" && key != "label").collect();
+            let context = crate::irc::channel_context::resolve(&self.state, id, target, wire.prefix.as_ref(), Some(&tags), Some(&pending.target));
+            if !target_matches && !incoming_private && context.is_none() { return None; }
             tags.insert(TARGET_TAG.clone(), pending.target.clone());
             tags.insert(SCOPE_TAG.clone(), scope.clone());
             let timestamp = chrono::DateTime::parse_from_rfc3339(tags.get("time")?).ok()?.with_timezone(&chrono::Utc);

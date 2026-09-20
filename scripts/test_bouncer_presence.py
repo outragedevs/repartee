@@ -13,7 +13,7 @@ import tempfile
 from test_bouncer_binding import PINS, ROOT, run, wait_ready
 
 
-def scenario(implementation, source, auto_away, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, filehost=False, oauth=False, upstream_auth=False, account_registration=False, server_search=False, metadata=False, certificates=False):
+def scenario(implementation, source, auto_away, setname=False, monitor=False, monitor_unavailable=False, invites=False, names=False, redaction=False, filehost=False, oauth=False, upstream_auth=False, account_registration=False, server_search=False, metadata=False, certificates=False, channel_context=False):
     with tempfile.TemporaryDirectory(prefix="bouncer-presence-", dir="/tmp") as directory:
         temporary = Path(directory)
         processes = []
@@ -45,7 +45,8 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                     *(["--monitor"] if monitor or monitor_unavailable else []),
                     *(["--monitor-unavailable"] if monitor_unavailable else []),
                     *(["--invites"] if invites else []),
-                    *(["--names"] if names else []),
+                    *(["--names"] if names or channel_context else []),
+                    *(["--channel-context"] if channel_context else []),
                     *(["--redaction"] if redaction or server_search or metadata else []),
                     *(["--upstream-auth"] if upstream_auth else []),
                     *(["--account-registration"] if account_registration else []),
@@ -165,6 +166,8 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                     test_filter = "pinned_bouncer_server_search"
                 if metadata:
                     test_filter = "pinned_bouncer_metadata"
+                if channel_context:
+                    test_filter = "pinned_bouncer_channel_context"
                 if certificates:
                     test_filter = "pinned_bouncer_certificates"
                     if implementation == "soju":
@@ -208,6 +211,7 @@ def main():
     parser.add_argument("--monitor", action="store_true")
     parser.add_argument("--monitor-unavailable", action="store_true")
     parser.add_argument("--invites", action="store_true")
+    parser.add_argument("--channel-context", action="store_true")
     parser.add_argument("--names", action="store_true")
     parser.add_argument("--redaction", action="store_true")
     parser.add_argument("--server-search", action="store_true")
@@ -226,8 +230,8 @@ def main():
     head = run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True).stdout.strip()
     if head != PINS[args.implementation]:
         raise RuntimeError("Upstream checkout does not match the audited revision")
-    scenario(args.implementation, source, True, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.filehost, args.oauth, args.upstream_auth, args.account_registration, args.server_search, args.metadata, args.certificates)
-    if args.implementation == "soju" and not args.setname and not args.monitor and not args.monitor_unavailable and not args.invites and not args.names and not args.redaction and not args.filehost and not args.oauth and not args.upstream_auth and not args.account_registration and not args.server_search and not args.metadata and not args.certificates:
+    scenario(args.implementation, source, True, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.filehost, args.oauth, args.upstream_auth, args.account_registration, args.server_search, args.metadata, args.certificates, args.channel_context)
+    if args.implementation == "soju" and not args.setname and not args.monitor and not args.monitor_unavailable and not args.invites and not args.names and not args.redaction and not args.filehost and not args.oauth and not args.upstream_auth and not args.account_registration and not args.server_search and not args.metadata and not args.certificates and not args.channel_context:
         scenario(args.implementation, source, False)
 
 

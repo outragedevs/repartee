@@ -41,6 +41,8 @@ pub mod monitor;
 #[cfg(test)]
 mod invite_fixture;
 #[cfg(test)]
+mod channel_context_fixture;
+#[cfg(test)]
 mod names_fixture;
 #[cfg(test)]
 mod redaction_fixture;

@@ -1135,7 +1135,9 @@ pub fn ingest_chathistory_batch(
         // silently drop the row) and route our own PM to a buffer named after
         // ourselves instead of the peer. Match add_message's comparison.
         let is_own = nick.eq_ignore_ascii_case(&our_nick);
-        let metadata_target = if is_channel(target) || is_own { target.as_str() } else { nick.as_str() };
+        let context = super::channel_context::resolve(state, conn_id, target, msg.prefix.as_ref(), tags.as_ref(), batch.params.first().map(String::as_str));
+        let display_target = context.as_deref().unwrap_or(target);
+        let metadata_target = if context.is_some() || is_channel(target) || is_own { display_target } else { nick.as_str() };
         if state.metadata_policy(conn_id, metadata_target, Some(&nick)).blocked {
             skipped += 1;
             continue;
@@ -1174,8 +1176,8 @@ pub fn ingest_chathistory_batch(
 
         // Channel messages route to the channel buffer; PMs route to the
         // peer's nick buffer (or our own target for echoed history).
-        let buffer_name = if is_channel(target) || is_own {
-            target.as_str()
+        let buffer_name = if context.is_some() || is_channel(target) || is_own {
+            display_target
         } else {
             nick.as_str()
         };
@@ -1435,7 +1437,9 @@ fn handle_privmsg(
     tags: Option<HashMap<String, String>>,
 ) {
     let (nick, ident, host) = extract_nick_userhost(prefix);
-    let target_is_channel = is_channel(target);
+    let context = super::channel_context::resolve(state, conn_id, target, prefix, tags.as_ref(), None);
+    let display_target = context.as_deref().unwrap_or(target);
+    let target_is_channel = context.is_some() || is_channel(target);
     // IRC nicks are case-insensitive: an echo-message echo may carry our nick
     // in a different case. Match case-insensitively (as ingest_chathistory_batch
     // does) so we still recognise our own echo — capture our handle from it and
@@ -1456,7 +1460,7 @@ fn handle_privmsg(
     // ensures that when the server echoes our PM to "bob", it routes to the
     // "bob" query buffer instead of creating one named after ourselves.
     let buffer_name = if target_is_channel || is_own {
-        target
+        display_target
     } else {
         &nick
     };
@@ -1587,7 +1591,7 @@ fn handle_privmsg(
             IgnoreLevel::Msgs
         };
         let channel = if target_is_channel {
-            Some(target)
+            Some(display_target)
         } else {
             None
         };
@@ -1598,7 +1602,11 @@ fn handle_privmsg(
             Some(&host),
             &ignore_level,
             channel,
-        ) {
+        ) || (context.is_some() && should_ignore(
+            &state.ignores, &nick, Some(&ident), Some(&host),
+            &if is_action { IgnoreLevel::Actions } else if is_ctcp { IgnoreLevel::Ctcps } else { IgnoreLevel::Msgs },
+            None,
+        )) {
             // An ignore mask can match US — `*!*@*` on a noisy channel, or any
             // pattern that happens to cover our own host. The decoration was
             // consumed just above, so this reflection is now the ONLY thing
@@ -1789,7 +1797,7 @@ fn handle_privmsg(
             if is_mention && target_is_channel && !deferred {
                 let nick = nick_saved.unwrap_or_default();
                 let action_body = format!("* {nick} {action_text}");
-                state.fan_out_mention(conn_id, target, &nick, &action_body, (ts, mention_msgid.as_deref()));
+                state.fan_out_mention(conn_id, display_target, &nick, &action_body, (ts, mention_msgid.as_deref()));
             }
 
             return;
@@ -1889,7 +1897,7 @@ fn handle_privmsg(
             }
 
             // PM tilde storm — many unique ~ nicks PMing us = botnet
-            if !target_is_channel {
+            if !is_channel(target) {
                 let storm = state.flood_state.check_pm_tilde_storm(&nick, now);
                 if storm.suppressed() {
                     if storm == crate::irc::flood::FloodResult::Triggered {
@@ -1995,7 +2003,7 @@ fn handle_privmsg(
     // Push to mentions buffer — channel highlights only (not PMs/queries).
     if is_mention && target_is_channel && !deferred_for_translation {
         let nick = nick_saved.unwrap_or_default();
-        state.fan_out_mention(conn_id, target, &nick, text, (ts, mention_msgid.as_deref()));
+        state.fan_out_mention(conn_id, display_target, &nick, text, (ts, mention_msgid.as_deref()));
     }
 }
 
@@ -2008,8 +2016,10 @@ fn handle_notice(
     tags: Option<HashMap<String, String>>,
 ) {
     let nick = extract_nick(prefix);
+    let context = super::channel_context::resolve(state, conn_id, target, prefix, tags.as_ref(), None);
+    let display_target = context.as_deref().unwrap_or(target);
     // Server notices or pre-registration notices go to status buffer
-    let is_server_notice = nick.is_none() || is_server_prefix(prefix);
+    let is_server_notice = nick.is_none() || (is_server_prefix(prefix) && context.is_none());
 
     // Resolved up here because the typing clear below needs it, and that has to
     // happen before the ignore check can return.
@@ -2030,8 +2040,8 @@ fn handle_notice(
             .connections
             .get(conn_id)
             .map_or("Status", |c| c.label.as_str())
-    } else if is_channel(target) || is_own {
-        target
+    } else if context.is_some() || is_channel(target) || is_own {
+        display_target
     } else {
         nick.as_deref().unwrap_or("Status")
     };
@@ -2067,8 +2077,8 @@ fn handle_notice(
     // --- Ignore check (skip for server notices) ---
     if !is_server_notice {
         let (n, ident, host) = extract_nick_userhost(prefix);
-        let channel = if is_channel(target) {
-            Some(target)
+        let channel = if context.is_some() || is_channel(target) {
+            Some(display_target)
         } else {
             None
         };
@@ -6163,7 +6173,7 @@ mod tests {
         clippy::too_many_lines,
         reason = "flat fixture used by every test in this module"
     )]
-    fn make_test_state() -> AppState {
+    pub(super) fn make_test_state() -> AppState {
         let mut state = AppState::new();
         state.add_connection(Connection {
             own_realname: None,
@@ -12163,3 +12173,7 @@ mod activity_label_tests {
         assert_eq!(state.next_activity_buffer().as_deref(), Some("libera/#newer"));
     }
 }
+
+#[cfg(test)]
+#[path = "channel_context_tests.rs"]
+mod channel_context_tests;

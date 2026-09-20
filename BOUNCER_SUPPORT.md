@@ -465,3 +465,14 @@ values, public-message isolation and matching read-marker routing. The worker
 fixture injects push events and does not claim to exercise push delivery over
 the network. Native/live/history channel-context routing remains a separate
 required increment; this correction does not complete that acceptance item.
+
+## Native/live/history channel-context routing
+
+Both channel-context tag names now select existing channel buffers for private
+user PRIVMSG/NOTICE messages, including web events and channel history replay.
+History context must match the batch target. E2E and CTCP retain the original
+wire recipient; ignores and metadata policy remain enforced. Real pinned Soju
+and Lurker fixtures pass live delivery and channel history retrieval with no
+local log writes. See `docs/validation/bouncer-channel-context.md` for scope,
+provider differences and reproducible commands. SAFERATE publication, ICON and
+the complete acceptance matrix remain open.
