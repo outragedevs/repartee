@@ -65,12 +65,13 @@ commands, provider differences and detailed limits.
 | File upload | `src/app/filehost_fixture.rs::pinned_bouncer_filehost`, backend/client upload checks and actual browser picker/provider runs. OPTIONS/POST, returned URL and transport protections are recorded in [FILEHOST](bouncer-filehost.md). | [83](https://github.com/outragedevs/repartee/pull/83) | G2, G5 |
 | Client certificates | `src/app/bouncer_certificates_fixture.rs`: real create/list/delete, EXTERNAL reconnect, revoked-cert rejection and missing-cert failure; Lurker unsupported path. Browser command test is recorded. [Certificates](bouncer-client-certificates.md). | [91](https://github.com/outragedevs/repartee/pull/91) | G2, G5 |
 | Push notifications | `src/app/bouncer_webpush*.rs`, `scripts/test_bouncer_webpush.py`, browser/service-worker regressions: real subscription, encrypted delivery, route/read dismissal, reload/disable, retry and cleanup. [Protocol](bouncer-webpush.md), [browser final evidence](bouncer-webpush-browser.md#final-review). | [92](https://github.com/outragedevs/repartee/pull/92), [93](https://github.com/outragedevs/repartee/pull/93), [96](https://github.com/outragedevs/repartee/pull/96) | G5, G9 |
-| Bouncer service commands | Ordinary `/msg` reaches `src/commands/handlers_irc.rs::cmd_msg`; Soju implements BouncerServ in `service.go`. No dedicated Repartee BouncerServ fixture was found in this audit. Generic raw forwarding is insufficient evidence. | No dedicated acceptance PR | G7 |
+| Bouncer service commands | `pinned_bouncer_service` exercises actual Soju mutations/errors/empty history and Lurker forwarding/rejection through native commands and the compiled web UI, on control and bound connections. [Service acceptance](bouncer-service-commands.md). | Dedicated service acceptance fixture | G5, G9 |
 | Channel context (additional discovered surface) | `src/irc/channel_context.rs`, `src/app/channel_context_fixture.rs`: current and legacy tags, private/live/history/search routing; push scope and read routing. [Channel context](bouncer-channel-context.md). | [96](https://github.com/outragedevs/repartee/pull/96), [97](https://github.com/outragedevs/repartee/pull/97) | G5 |
 
 ## Finite remaining gates
 
-These are required work, not waived limitations. “No evidence found” means
+Open rows are required work, not waived limitations. G7 is now covered by the
+dedicated acceptance fixture; the other gates remain open. “No evidence found” means
 completion is unproven, not that a production bug has been established.
 
 | Gate | Current evidence and next closure condition |
@@ -81,14 +82,14 @@ completion is unproven, not that a production bug has been established.
 | G4 — full history query family | `Direction` implements LATEST/BEFORE/AFTER/AROUND, and TARGETS is separate. BETWEEN is absent from the structured request state and from the provider fixtures. Verify a supported native/web range-retrieval path (including bounds, limits, cancellation and storage exclusion); implement missing behavior rather than counting an untested `/quote` command as support. |
 | G5 — combined account/network/client lifecycle | Unit tests cover many isolated transitions, and real fixtures cover one account plus multiple clients for selected features. Establish one reproducible matrix with two accounts and two networks, overlapping IDs/labels, independent client traffic, upstream offline/online, rename/delete/recreate and a provider process restart. Verify identity, history/markers/metadata/presence isolation, no repeated autojoin, and native/web state. Reuse existing cases where their exact assertions suffice; do not claim the one-account daemon test proves the entire matrix. |
 | G6 — actual focus/visibility transitions | Presence documentation explicitly records that the earlier browser environment did not produce real focus/visibility changes. Exercise actual foreground/background/hidden transitions, native attach/detach and two-client presence/read behavior. Controller injection and heartbeat alone do not prove event delivery from the platform. |
-| G7 — service conversation contract | Exercise actual Soju BouncerServ commands/replies through native and web entry points, including quoted arguments, percent text, failures and correct network/control routing, using only disposable accounts. Preserve supported Lurker forwarding/rejection behavior. Prove that command payloads are not unexpectedly rewritten and that reply/history handling remains correct. |
+| G7 — service conversation contract | Covered by `pinned_bouncer_service` and actual WebKit runs on both pinned providers: quoted/percent/backslash payloads, Soju database-verified mutations and failures, bound/current versus control routing, successful empty service history preserving live rows, browser reload and local-log exclusion. Lurker forwards exactly the two bound messages and rejects both control sends. See [reproducible evidence](bouncer-service-commands.md); native coverage is command/state, not terminal pixel rendering. |
 | G8 — interrupted history/search batches | Existing unit tests cover timeouts, cancellation, late/orphan rows and scoping. PR 107 adds real TCP loss after completed operations. Add bounded actual-daemon evidence for an interrupted or timed-out in-flight history/search response, then inspect storage/diagnostics and recovery. Do not relabel the completed-operation disconnect as a partial-batch test. |
 | G9 — final reconciliation and release gate | After G1–G8, reconcile every row against the resulting code and authoritative outcomes, update user configuration/command documentation, and run the required final native/web checks and applicable real-provider/browser scenarios on the final tree. Confirm exact reviewed-head merges, clean main matching origin/main and no remaining required artifact or release dependency. Only then can the full goal be marked complete. |
 
 ## Current validation anchor
 
 The latest unchanged implementation passed `make clippy` before `make test`:
-2686 native tests and 146 web tests passed, with 25 native provider fixtures
+2686 native tests and 146 web tests passed, with 26 native provider fixtures
 explicitly ignored by the default suite. The provider fixtures are separate
 runs; their exclusion must not be reported as 100% integration coverage.
 

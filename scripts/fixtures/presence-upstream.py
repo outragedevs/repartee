@@ -134,6 +134,10 @@ class PresenceServer:
                 elif command == 'PONG' and self.history_traffic and params and params[-1] == 'memory-offline-stored':
                     with self.events.open('a') as output:
                         output.write(json.dumps({'offline_ack': True}) + '\n')
+                elif command == 'PRIVMSG' and registered and len(params) == 2 and params[0].lower() == 'bouncerserv':
+                    with self.events.open('a') as output:
+                        output.write(json.dumps({'service_forwarded': params[1]}) + '\n')
+                    send(f':BouncerServ!peer@fixture.local PRIVMSG {nick} :upstream received: {params[1]}')
                 elif command == 'PRIVMSG' and registered and self.history_traffic and len(params) == 2:
                     if params[0] == 'FixtureControl' and params[1] in ('memory-history-0', 'memory-history-1'):
                         with self.events.open('a') as output:
