@@ -512,7 +512,9 @@ impl App {
         use crate::web::snapshot;
 
         match cmd {
+            WebCommand::Presence { present } => self.update_presence_browser(session_id, present),
             WebCommand::WebConnect { initial_buffer_id } => {
+                self.register_presence_browser(session_id);
                 if let Some(buffer_id) = initial_buffer_id {
                     self.web_active_buffers
                         .insert(session_id.to_string(), buffer_id);
@@ -661,6 +663,7 @@ impl App {
                 }
             }
             WebCommand::WebDisconnect => {
+                self.remove_presence_browser(session_id);
                 self.release_web_history(session_id);
                 self.web_active_buffers.remove(session_id);
                 self.web_buffer_unconfirmed.remove(session_id);

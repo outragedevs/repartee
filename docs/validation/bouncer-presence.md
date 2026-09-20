@@ -1,0 +1,96 @@
+# Bouncer presence validation
+
+Status: implementation under review. Read-marker PR 70 is merged.
+Application-level real-bouncer integration passes; clean review is pending.
+
+## Pinned-source behavior
+
+Use the same Lurker and Soju commits recorded in `BOUNCER_SUPPORT.md`.
+
+- Both implementations accept preregistration AWAY when draft/pre-away is
+  negotiated. A bound background connection must start with AWAY * before CAP END.
+- Soju tracks away per downstream. With network AutoAway enabled, an upstream
+  becomes present when any downstream is present; with AutoAway disabled the
+  bouncer leaves upstream away unchanged.
+- Lurker AWAY * marks only that downstream absent. A nonempty manual reason sets
+  account-wide away, while bare AWAY clears account-wide away, including manual
+  away. A generated child resuming automatically must not clear manual intent
+  set through another child of the same configured account.
+- A control connection is not user presence. Neither a headless daemon nor an
+  open browser socket proves that a person is viewing the conversation.
+
+## Required acceptance evidence
+
+1. Registration starts bound bouncer connections absent using negotiated
+   draft/pre-away, with no transient present interval. Direct IRC is unchanged.
+2. A focused attached terminal or authenticated focused/visible browser reports
+   presence. Detach, blur, hidden tabs, disconnect and stale browser reports
+   retire that source. Multiple local sources combine without fighting.
+3. Explicit /away intent survives reconnect within the appropriate scope and
+   takes precedence over automatic focus changes. Independent accounts stay
+   isolated; Lurker account-wide behavior differs from Soju network behavior.
+4. Transitions and retries are bounded. A failed write is not recorded as sent.
+5. Disposable real upstream/server fixtures exercise two downstream clients,
+   Lurker manual away and Soju AutoAway disabled. Integration tests must drive
+   Repartee itself; raw-protocol probes alone do not prove client behavior.
+6. Native/web clippy and tests, WASM build, and a clean pinned gpt-5.6-sol medium
+   review are required before merging this stage.
+
+## Existing research evidence
+
+Disposable raw-protocol prototypes already verified two-client aggregate away
+transitions against both real pinned bouncers and a local IRC upstream. Lurker
+manual away survives another client's AWAY * but is cleared by bare AWAY. The
+Soju disabled-AutoAway case also passed. These prototypes are test infrastructure
+research; the application-level checks below now exercise the same behavior.
+
+
+## Initial implementation checks
+
+The native presence controller combines confirmed terminal focus with registered
+browser reports, expires presence reports after 45 seconds, sends state
+transitions and retains explicit away intent through reconnect. Soju intent is
+network-scoped; Lurker intent is shared across generated sibling network scopes.
+Provider recognition uses Soju 004 and Lurker's own BOUNCER_NETID 005.
+
+Browser sockets install focus/blur/visibility listeners and a 15-second report
+heartbeat, removed when that socket loop exits. The first report follows SyncInit.
+
+Seven controller regressions cover focus transitions, source aggregation/expiry,
+manual away scope/reconnect and exclusion of direct/control connections. The TCP
+registration fixture verifies pre-away negotiation and BIND/AWAY/CAP END order.
+These passed with the full 2458 native and 142 web test suite and clean project
+clippy. This is not yet evidence for all acceptance rows above.
+
+## Real-bouncer application checks
+
+`scripts/test_bouncer_presence.py PROVIDER SOURCE` starts the pinned bouncer and
+an isolated local IRC upstream, then runs the ignored `pinned_bouncer_presence`
+test through `make test`. Both clients are actual App instances using the normal
+connection, IRC event, terminal-input and web-command paths.
+
+The Soju run passes twice, with network AutoAway enabled and disabled. The Lurker
+run passes with account AutoAway enabled. Recorded upstream AWAY transitions
+cover preregistration absence without a transient present interval, two-client
+aggregation, terminal blur, a second client's browser presence, explicit manual
+away, reconnect and manual clear. The disabled-Soju run verifies that all these
+client changes leave upstream away untouched.
+
+The browser source in this fixture is driven through the App web-command handler;
+it does not prove browser focus/visibility event delivery. A separate Playwright
+WebKit run against the actual WASM bundle confirms the initial Presence report
+after SyncInit and the 15-second heartbeat, without JavaScript errors. Switching
+pages in that environment did not change document.hasFocus()/document.hidden,
+so native focus/visibility event delivery remains unverified. The WASM build passes.
+
+The controller additionally tests a failed send followed by a recovered sender:
+no successful state is cached on failure, a retry within five seconds is skipped,
+and the next eligible attempt sends exactly one transition.
+
+## Review corrections
+
+The first pinned Sol medium review found that network-scoped Soju intent could
+survive deletion while a sibling network remained and leak into a reused network
+ID. Intent now records the identified provider. Only Lurker retains intent through
+a surviving sibling; Soju requires the exact network scope. A regression deletes
+and reuses the original scope for both providers and checks the resulting AWAY.

@@ -1060,6 +1060,7 @@ async fn negotiate_caps(
         let mut caps_to_request = server_caps.negotiate(DESIRED_CAPS);
         if params.bouncer_network_id.is_some() && !params.bouncer_control {
             caps_to_request.extend(cap::bouncer_read_caps(&server_caps));
+            caps_to_request.extend(server_caps.negotiate(&["draft/pre-away"]));
         }
         if params.bouncer_network_id.is_some() || params.bouncer_control {
             caps_to_request.push(bouncer::NETWORKS_CAP.to_string());
@@ -1198,6 +1199,10 @@ async fn negotiate_caps(
                 "BOUNCER".to_string(),
                 vec!["BIND".to_string(), network_id.to_string()],
             ))?;
+        }
+
+        if params.bouncer_network_id.is_some() && !params.bouncer_control && enabled_caps.contains("draft/pre-away") {
+            sender.send(Command::AWAY(Some("*".into())))?;
         }
 
         // Send CAP END to finish capability negotiation.
