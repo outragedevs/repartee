@@ -50,8 +50,8 @@ test('notification navigation stays on application origin and encodes remote tar
 
 
 test('channel-context messages route and format as channel notifications', () => {
-    for (const command of ['PRIVMSG', 'NOTICE']) {
-        const result = notification(`@+draft/channel-context=#Room[ :Alice!u@h ${command} Me :hello`, config);
+    for (const tag of ['+channel-context', '+draft/channel-context']) for (const command of ['PRIVMSG', 'NOTICE']) {
+        const result = notification(`@${tag}=#Room[ :Alice!u@h ${command} Me :hello`, config);
         assert.equal(result.target, '#Room[');
         assert.equal(result.body, 'Alice: hello');
         assert.equal(fold(result.target), notification('MARKREAD #room{ :timestamp=2026-09-20T10:00:00Z', config).target);
@@ -60,4 +60,28 @@ test('channel-context messages route and format as channel notifications', () =>
         assert.equal(notification(`@+draft/channel-context=${context} :Alice!u@h PRIVMSG Me :hello`, config).target, 'Alice');
     }
     assert.equal(notification('@+draft/channel-context=+local :Alice!u@h PRIVMSG Me :hello', {...config, chantypes:'#&+'}).target, '+local');
+});
+
+
+test('channel context never redirects public, status-targeted or server traffic', () => {
+    for (const tag of ['+channel-context', '+draft/channel-context']) {
+        for (const command of ['PRIVMSG', 'NOTICE']) {
+            for (const target of ['#actual', '@#actual', '+#actual']) {
+                const result = notification(`@${tag}=#other :Alice!u@h ${command} ${target} :hello`, config);
+                assert.equal(result.target, '#actual');
+            }
+            for (const target of ['*', '$*.example', 'Me,Bob']) {
+                assert.equal(notification(`@${tag}=#other :Alice!u@h ${command} ${target} :hello`, config).target, 'Alice');
+            }
+            assert.equal(notification(`@${tag}=#other :irc.example ${command} Me :hello`, config).target, 'irc.example');
+        }
+    }
+});
+
+test('final channel-context tag takes precedence without falling back from invalid values', () => {
+    const both = '@+channel-context=#final;+draft/channel-context=#draft :Alice!u@h PRIVMSG Me :hello';
+    assert.equal(notification(both, config).target, '#final');
+    for (const context of ['', 'Bob', '#bad\\sroom']) {
+        assert.equal(notification(`@+channel-context=${context};+draft/channel-context=#draft :Alice!u@h PRIVMSG Me :hello`, config).target, 'Alice');
+    }
 });
