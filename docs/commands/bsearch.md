@@ -8,6 +8,7 @@ description: Search history stored by a bouncer
 ## Syntax
 
     /bsearch <target> [-from nick] [-after timestamp] [-before timestamp] [-limit 1..100] -- <text>
+    /bsearch between <target> <first RFC3339 time> <last RFC3339 time> [1..1000]
     /bsearch context <row>
     /bsearch cancel
 
@@ -53,3 +54,11 @@ a replacement request. A failed request is reported separately from zero matches
 ## See Also
 
 /bouncer, /log
+
+## Bounded history
+
+`/bsearch between` retrieves messages strictly between two timestamps. It works in the terminal and web command input, including on bouncers without `soju.im/search`. Use ascending bounds for the earliest messages in the interval or descending bounds for the newest; results are displayed oldest-first. The default limit is 100 and the maximum accepted input is 1000, clamped to the server limit.
+
+    /bsearch between Alice 2024-01-01T00:00:10Z 2024-01-01T00:00:20Z 50
+
+The results use the temporary search view and are not written to local history. `/bsearch cancel` stops displaying the pending response; wait for its terminal reply or reconnect before starting another request. A timed-out unlabelled history request requires reconnecting before a new range request, so delayed replies cannot be mistaken for new results.

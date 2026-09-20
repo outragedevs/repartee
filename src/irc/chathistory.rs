@@ -88,6 +88,7 @@ pub fn rfc3339_millis(unix_ms: i64) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
     Around,
+    Between,
     /// Older messages (scroll-up).
     Before,
     /// Newer messages (reconnect gap-fill).
@@ -102,6 +103,7 @@ impl Direction {
     pub const fn subcommand(self) -> &'static str {
         match self {
             Self::Around => "AROUND",
+            Self::Between => "BETWEEN",
             Self::Before => "BEFORE",
             Self::After => "AFTER",
             Self::Latest => "LATEST",

@@ -1,6 +1,6 @@
 # Bounded history provider acceptance
 
-This is provider wire-protocol evidence for G4, not completed Repartee range retrieval. The structured client request state, native/web entry points, cancellation and storage-exclusion acceptance remain to be implemented.
+This records provider wire-protocol evidence and the Repartee bounded-history command for G4. Real-provider interruption during an in-flight range remains open.
 
 ## Reproduction
 
@@ -29,6 +29,19 @@ Both bounds are exclusive. Descending bounds select the newest rows in the inter
 
 Both providers advertise **timestamp-only references**. Lurker emits message IDs when message-tags is negotiated, but still rejects those actual returned IDs as BETWEEN bounds with `INVALID_MSGREFTYPE`. Soju rejects `msgid=` bounds with `INVALID_PARAMS`. Presence of message IDs is therefore not evidence that a provider accepts them as history anchors; the client must honor `MSGREFTYPES`.
 
+## Repartee command and storage acceptance
+
+`/bsearch between <target> <first RFC3339 time> <last RFC3339 time> [1..1000]` sends a tracked BETWEEN request, honoring the server limit. It uses the ephemeral search view, independent of the `soju.im/search` capability. Existing search cancellation, labels, timeout quarantine and reconnect cleanup also apply. Results outside the requested interval are discarded.
+
+```sh
+NODE_PATH=/path/to/playwright/node_modules python3 scripts/test_bouncer_binding.py soju /path/to/soju --test-filter pinned_bouncer_bounded_history
+NODE_PATH=/path/to/playwright/node_modules python3 scripts/test_bouncer_binding.py lurker /path/to/lurker --test-filter pinned_bouncer_bounded_history
+```
+
+Both passed against actual providers. The App fixture submits the ascending request through native `handle_submit`, descending and equal bounds through `WebCommand::RunCommand`, and compares exact returned rows. The fixture also serves the actual WASM frontend to WebKit, submits both range directions through the input, checks exact rendered rows and reloads the browser without duplicating results. Install Playwright and its WebKit runtime before running it. It shuts down the actual SQLite writer and checks the database: the pre-existing legacy row and direct-IRC positive control remain, with no bouncer-history rows. Only the two known away/unaway diagnostic texts in the server or special search buffer are additionally allowed; browser presence triggers those existing local events.
+
+Deterministic tests cover limit clamping without SEARCH support, cancellation and discarded late results, exclusive-bound response validation, invalid selectors and errors releasing request state. Existing context tests cover the shared labelled batch routing and timeout lifecycle.
+
 ## Remaining G4 acceptance
 
-Add a two-bound request to Repartee, expose a native/web retrieval path, and verify real-provider bounds and limits through that path. Cover cancellation, failed requests, delayed batches, connection/target isolation and absence of bouncer-history writes to local storage. This probe establishes expected provider behavior only and does not close G4.
+Interrupt an actual provider while its range batch is in flight. Extend coverage of concurrent connection/target isolation and delayed range replies. These checks are still required before closing G4.

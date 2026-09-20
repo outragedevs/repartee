@@ -259,3 +259,45 @@ async fn pinned_bouncer_persistent_history() {
     Box::pin(close(reopened)).await;
     verify_disk(&path);
 }
+
+#[tokio::test]
+#[ignore = "requires a disposable pinned bouncer fixture"]
+async fn pinned_bouncer_bounded_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("messages.db");
+    let mut app = prepare(&path, true);
+    until(&mut app, "connected history", |app| {
+        app.state.connections["fixture"].status == crate::state::connection::ConnectionStatus::Connected
+            && app.state.buffers.contains_key("fixture/history-peer")
+            && !app.state.connections["fixture"].chathistory.any_in_flight("history-peer")
+    }).await;
+    for (web, first, last, expected) in [
+        (false, 10, 20, vec![11, 12, 13]),
+        (true, 20, 10, vec![17, 18, 19]),
+        (true, 10, 10, vec![]),
+    ] {
+        let command = format!("/bsearch between history-peer 2024-01-01T00:00:{first:02}Z 2024-01-01T00:00:{last:02}Z 3");
+        app.state.set_active_buffer("fixture/history-peer");
+        if web {
+            app.handle_web_command(WebCommand::RunCommand { buffer_id: "fixture/history-peer".into(), text: command }, "range-browser");
+        } else {
+            app.handle_submit(&command);
+        }
+        assert!(app.server_search.contains_key("fixture"));
+        until(&mut app, "range complete", |app| !app.server_search.contains_key("fixture")).await;
+        let rows: Vec<_> = app.state.buffers["fixture/*search*"].messages.iter()
+            .filter(|row| row.nick.is_some()).map(|row| row.text.clone()).collect();
+        assert_eq!(rows, expected.into_iter().map(|index| format!("fixture-history-{index}")).collect::<Vec<_>>());
+    }
+    super::filehost_browser_fixture::run(&mut app, "scripts/fixtures/history-range-browser.cjs").await;
+    direct_irc_control(&mut app);
+    Box::pin(close(app)).await;
+    let database = crate::storage::db::open_readonly_at(path.to_str().unwrap()).unwrap();
+    let mut statement = database.prepare("SELECT buffer, text FROM messages ORDER BY id").unwrap();
+    let rows: Vec<(String, String)> = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap().map(Result::unwrap).collect();
+    let rows: Vec<_> = rows.into_iter().filter(|(buffer, text)| !(matches!(buffer.as_str(), "fixture" | "*search*") && matches!(text.as_str(),
+        "%Z56b6c2You are now marked as away%N" | "%Z56b6c2You are no longer marked as away%N")))
+        .map(|(_, text)| text).collect();
+    assert_eq!(rows, ["preserved legacy row", "Connecting to direct...", "direct persistence control"]);
+}

@@ -15,6 +15,7 @@ pub struct Pending {
     limit: usize,
     discard: bool,
     context: bool,
+    bounds: Option<(i64, i64)>,
     label: Option<String>,
 }
 
@@ -61,6 +62,10 @@ fn query(args: &[String]) -> Result<Query, &'static str> {
 
 pub fn command(app: &mut super::App, args: &[String]) {
     let Some(id) = app.active_conn_id().map(str::to_string) else { add_local_event(app, "No active connection"); return; };
+    if args.first().is_some_and(|arg| arg == "between") {
+        app.open_history_range(&id, &args[1..]);
+        return;
+    }
     if args.first().is_some_and(|arg| arg == "context") {
         app.open_search_context(&id, &args[1..]);
         return;
@@ -95,7 +100,7 @@ pub fn command(app: &mut super::App, args: &[String]) {
         app.state.pending_web_events.push(crate::web::protocol::WebEvent::DeleteMessages { buffer_id: view.clone(), message_ids });
     }
     app.state.set_active_buffer(&view);
-    app.server_search.insert(id.clone(), Pending { started: Instant::now(), target: query.target.clone(), limit: query.limit, discard: false, context: false, label: None });
+    app.server_search.insert(id.clone(), Pending { started: Instant::now(), target: query.target.clone(), limit: query.limit, discard: false, context: false, bounds: None, label: None });
     app.search_note(&id, &format!("Searching {} (up to {} results); /bsearch cancel to stop displaying this request", query.target, query.limit));
 }
 
@@ -119,7 +124,7 @@ impl super::App {
         if context && crate::irc::labels::message_label(message) != pending.label.as_deref() { return false; }
         if context && pending.label.is_none() && let Command::Raw(command, args) = &message.command
             && command.eq_ignore_ascii_case("FAIL")
-            && !args.iter().any(|arg| arg.eq_ignore_ascii_case(&pending.target) || arg.eq_ignore_ascii_case("AROUND")) { return false; }
+            && !args.iter().any(|arg| arg.eq_ignore_ascii_case(&pending.target) || arg.eq_ignore_ascii_case(if pending.bounds.is_some() { "BETWEEN" } else { "AROUND" })) { return false; }
         let expected = if context { "CHATHISTORY" } else { "SEARCH" };
         let error = match &message.command {
             Command::Raw(command, args) if command.eq_ignore_ascii_case("FAIL") && args.first().is_some_and(|arg| arg.eq_ignore_ascii_case(expected)) => args.last(),
@@ -177,6 +182,10 @@ impl super::App {
             Some((nick, body.clone(), kind, tags, timestamp, format!("{ident}@{host}"), target.clone()))
         }).collect::<Option<Vec<_>>>();
         let Some(mut rows) = rows else { self.search_note(id, "Search response contained invalid results; results discarded"); return; };
+        if pending.bounds.is_some_and(|(first, last)| rows.iter().any(|(_, _, _, _, timestamp, _, _)| {
+            let time = timestamp.timestamp_millis();
+            time <= first.min(last) || time >= first.max(last)
+        })) { self.search_note(id, "History response exceeded the requested bounds; results discarded"); return; }
         rows.retain(|(nick, ..)| !self.state.metadata_policy(id, &pending.target, Some(nick)).blocked);
         let raw_count = rows.len();
         let rows: Vec<_> = rows.into_iter().filter_map(|(nick, raw, kind, tags, timestamp, handle, target)| {
@@ -188,7 +197,7 @@ impl super::App {
             Some((nick, text, kind, tags, timestamp))
         }).collect();
         if rows.len() < raw_count { self.search_note(id, "Some protocol messages or encrypted rows could not be displayed; server-side text matching cannot search encrypted plaintext"); }
-        self.search_note(id, &format!("{} {} in {}; /bsearch context <row> opens surrounding history (rows count from 1)", rows.len(), if pending.context { "context messages" } else { "search results" }, pending.target));
+        self.search_note(id, &format!("{} {} in {}; /bsearch context <row> opens surrounding history (rows count from 1)", rows.len(), if pending.bounds.is_some() { "range messages" } else if pending.context { "context messages" } else { "search results" }, pending.target));
         for (nick, text, kind, tags, timestamp) in rows {
             let message_id = self.state.next_message_id();
             let mut message = Message { id: message_id, timestamp, message_type: kind, nick: Some(nick), nick_mode: None,
@@ -231,7 +240,7 @@ impl super::App {
             let message_ids = buffer.messages.drain(..).map(|message| message.id).collect();
             self.state.pending_web_events.push(crate::web::protocol::WebEvent::DeleteMessages { buffer_id: view.clone(), message_ids });
         }
-        self.server_search.insert(id.into(), Pending { started: Instant::now(), target: target.clone(), limit: 50, discard: false, context: true, label });
+        self.server_search.insert(id.into(), Pending { started: Instant::now(), target: target.clone(), limit: 50, discard: false, context: true, bounds: None, label });
         self.state.set_active_buffer(&view);
         self.search_note(id, &format!("Loading context from {target} around {}", crate::irc::chathistory::rfc3339_millis(timestamp)));
     }
@@ -243,7 +252,8 @@ impl super::App {
         if !self.search_context_pending(id, target) { return ours; }
         let expected = self.server_search.get(id).and_then(|pending| pending.label.as_deref());
         if label != expected { return ours; }
-        if clean_end && let Some(conn) = self.state.connections.get_mut(id) { conn.chathistory.complete_target(target, 0, None, false); }
+        if clean_end && let Some(conn) = self.state.connections.get_mut(id)
+            && let Some(pending) = self.server_search.get(id) { conn.chathistory.complete_target(&pending.target, 0, None, false); }
         for message in &batch.messages { self.state.receive_redaction(id, message); }
         let mut display = batch.clone();
         display.messages.retain(|message| matches!(message.command, Command::PRIVMSG(..) | Command::NOTICE(..)));
@@ -271,3 +281,6 @@ mod tests;
 #[cfg(test)]
 #[path = "server_search_fixture.rs"]
 mod fixture;
+
+#[path = "server_search_range.rs"]
+mod range;
