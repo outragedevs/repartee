@@ -22,6 +22,7 @@ class PresenceServer:
         self.history_peer = None
         self.history_traffic = history_traffic
         self.next_connection = 0
+        self.record_joins = False
 
     def record(self, connection, nick, away):
         with self.events.open('a') as output:
@@ -139,13 +140,15 @@ class PresenceServer:
                         output.write(json.dumps({'service_forwarded': params[1]}) + '\n')
                     send(f':BouncerServ!peer@fixture.local PRIVMSG {nick} :upstream received: {params[1]}')
                 elif command == 'PRIVMSG' and registered and self.history_traffic and len(params) == 2:
-                    if params[0] == 'FixtureControl' and params[1] in ('memory-history-0', 'memory-history-1'):
+                    if params[0] == 'FixtureControl' and params[1].startswith('matrix-incoming-'):
+                        send(f':Alice!peer@fixture.local PRIVMSG {nick} :{params[1]}')
+                    elif params[0] == 'FixtureControl' and params[1] in ('memory-history-0', 'memory-history-1'):
                         with self.events.open('a') as output:
                             output.write(json.dumps({'control': params[1]}) + '\n')
                         send(f':Alice!peer@fixture.local PRIVMSG {nick} :fixture-memory-incoming-{params[1][-1]}')
                     elif params[0].lower() == 'alice':
                         with self.events.open('a') as output:
-                            output.write(json.dumps({'outgoing': params[1]}) + '\n')
+                            output.write(json.dumps({'outgoing': params[1], 'nick': nick, 'connection': connection}) + '\n')
                         send(f':{nick}!fixture@localhost PRIVMSG Alice :{params[1]}')
                 elif command == 'PRIVMSG' and registered and self.channel_context and params == ['FixtureControl', 'channel-context']:
                     send(f'@+draft/channel-context=#context :Alice!peer@fixture.local NOTICE {nick} :context live notice')
@@ -244,6 +247,9 @@ class PresenceServer:
                     numeric = '306' if away is not None else '305'
                     send(f':fixture.local {numeric} {nick} :Away state updated')
                 elif command == 'JOIN' and registered and params:
+                    if self.record_joins:
+                        with self.events.open('a') as output:
+                            output.write(json.dumps({'join': params[0], 'nick': nick, 'connection': connection}) + '\n')
                     for channel in params[0].split(','):
                         send(f':{nick}!fixture@localhost JOIN {channel}')
                         send(f':fixture.local 353 {nick} = {channel} :{nick}{" @Alice Bob" if self.names else ""}')
@@ -295,10 +301,12 @@ async def main():
     parser.add_argument('--account-registration', action='store_true')
     parser.add_argument('--history-traffic', action='store_true')
     parser.add_argument('--history-control', type=Path)
+    parser.add_argument('--record-joins', action='store_true')
     args = parser.parse_args()
     if args.history_traffic and not args.history_control:
         parser.error("--history-traffic requires --history-control")
     fixture = PresenceServer(args.events, args.setname, args.monitor, args.monitor_unavailable, args.invites, args.names, args.redaction, args.upstream_auth, args.account_registration, args.channel_context, args.network_icon, args.history_traffic)
+    fixture.record_joins = args.record_joins
     server = await asyncio.start_server(fixture.client, '127.0.0.1', 0)
     args.ready.write_text(json.dumps({'port': server.sockets[0].getsockname()[1]}))
     async with server:

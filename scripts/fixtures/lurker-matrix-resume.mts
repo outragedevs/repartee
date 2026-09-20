@@ -18,9 +18,13 @@ const { startBouncer, stopBouncer } = await load('server/services/bouncer.ts');
 for (const account of settings.accounts) {
   const user = findUserByUsername(account.user);
   for (const network of listNetworksForUser(user.id)) {
-    const upstream = new FakeUpstream('tester');
-    upstream.network = network;
-    manager.connectionsForUser(user.id).set(network.id, upstream);
+    if (network.host === '127.0.0.1') {
+      if (!manager.startNetwork(user.id, network.id)) throw new Error('Restored upstream activation refused');
+    } else {
+      const upstream = new FakeUpstream('tester');
+      upstream.network = network;
+      manager.connectionsForUser(user.id).set(network.id, upstream);
+    }
   }
 }
 const server = await startBouncer(settings.port, '127.0.0.1');

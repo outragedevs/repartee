@@ -88,6 +88,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="bouncer-binding-", dir="/tmp") as directory:
         temporary = Path(directory)
         process = None
+        matrix_upstream = None
         if args.tls_case:
             tls_material(temporary, args.tls_case)
         with contextlib.ExitStack() as faults, (temporary / "server.log").open("w+") as log:
@@ -152,6 +153,16 @@ def main():
                     settings = {"port": port, "network": 1, "user": "fixture"}
                 environment = os.environ.copy()
                 if args.account_matrix:
+                    upstream_ready = temporary / 'matrix-upstream.json'
+                    events = temporary / 'matrix-events.jsonl'
+                    matrix_upstream = subprocess.Popen([
+                        'python3', str(ROOT / 'scripts/fixtures/presence-upstream.py'), str(upstream_ready), str(events),
+                        '--history-traffic', '--history-control', str(temporary / 'unused-history-trigger'), '--record-joins',
+                    ], stdout=log, stderr=log)
+                    wait_ready(matrix_upstream, upstream_ready.exists)
+                    environment['REPARTEE_MATRIX_UPSTREAM_PORT'] = str(json.loads(upstream_ready.read_text())['port'])
+                    environment['REPARTEE_MATRIX_UPSTREAM_EVENTS'] = str(events)
+                    environment['REPARTEE_MATRIX_PROVIDER'] = args.implementation
                     control = temporary / "matrix-control.json"
                     environment["REPARTEE_BOUNCER_MATRIX_CONTROL"] = str(control)
                     if args.implementation == "soju":
@@ -207,11 +218,20 @@ def main():
                         timeout=600 if args.history_stall in ("batch-expiry", "request-expiry") else 180)
                 print(f"{args.implementation}: {'history-range' if args.history_range else args.test_filter} fixture passed")
             except Exception:
+                if args.account_matrix and (temporary / 'matrix-events.jsonl').exists():
+                    print((temporary / 'matrix-events.jsonl').read_text())
                 log.flush()
                 log.seek(0)
                 print(log.read())
                 raise
             finally:
+                if matrix_upstream is not None:
+                    matrix_upstream.terminate()
+                    try:
+                        matrix_upstream.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        matrix_upstream.kill()
+                        matrix_upstream.wait(timeout=5)
                 if process is not None:
                     process.terminate()
                     try:

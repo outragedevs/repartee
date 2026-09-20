@@ -1633,7 +1633,7 @@ fn handle_privmsg(
             id: buffer_id.clone(),
             connection_id: conn_id.to_string(),
             buffer_type: BufferType::Query,
-            name: nick.clone(),
+            name: buffer_name.to_string(),
             messages: VecDeque::new(),
             activity: ActivityLevel::None,
             unread_count: 0,

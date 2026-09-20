@@ -54,12 +54,20 @@ if (matrix) {
       fs.unlinkSync(control);
       const owner = accounts[request.account];
       let id = request.network;
-      if (request.action === 'rename') networks.updateNetwork(id, owner.user.id, { name: 'renamed' });
+      if (request.action === 'online') {
+        manager.disposeNetwork(owner.user.id, id, 'fixture activation');
+        networks.updateNetwork(id, owner.user.id, { host: '127.0.0.1', port: request.port, tls: false, nick: request.nick });
+        if (!manager.startNetwork(owner.user.id, id)) throw new Error('Matrix upstream activation refused');
+      } else if (request.action === 'offline') manager.stopNetwork(owner.user.id, id, 'fixture offline');
+      else if (request.action === 'rename') networks.updateNetwork(id, owner.user.id, { name: 'renamed' });
       else if (request.action === 'delete') {
         manager.disposeNetwork(owner.user.id, id, 'fixture deletion');
         networks.deleteNetwork(id, owner.user.id);
       } else if (request.action === 'create') {
         id = harnessModule.seedNetwork(owner.user, { networkName: 'renamed', nick: 'tester' }).network.id;
+        manager.disposeNetwork(owner.user.id, id, 'fixture recreation');
+        networks.updateNetwork(id, owner.user.id, { host: '127.0.0.1', port: request.port, tls: false, nick: 'matrix-recreated' });
+        if (!manager.startNetwork(owner.user.id, id)) throw new Error('Recreated upstream activation refused');
       } else throw new Error('Unknown matrix action');
       manager.networkChanged(owner.user.id, id);
       response = { network: id };
