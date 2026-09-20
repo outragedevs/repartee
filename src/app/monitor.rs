@@ -287,26 +287,11 @@ mod tests {
 #[ignore = "requires a disposable pinned bouncer fixture"]
 #[expect(clippy::too_many_lines)]
 async fn pinned_bouncer_monitor() {
-    fn client() -> crate::app::App {
-        let mut app = crate::app::input::submit_typing_tests::test_app();
-        app.config.general.flood_protection = false;
-        let mut config: crate::config::ServerConfig = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]\nbouncer_network_id='1'").unwrap();
-        config.port = std::env::var("REPARTEE_BOUNCER_TEST_PORT")
-            .unwrap()
-            .parse()
-            .unwrap();
-        config.sasl_user = Some(std::env::var("REPARTEE_BOUNCER_TEST_USER").unwrap());
-        config.sasl_pass = Some("fixture-password".into());
-        app.setup_connection("fixture", &config);
-        app.state.set_active_buffer("fixture/fixture");
-        app.start_connection_attempt("fixture", config);
-        app
-    }
     async fn until(
         apps: &mut [&mut crate::app::App],
         predicate: impl Fn(&crate::app::App) -> bool + Send + Sync,
     ) {
-        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
             loop {
                 for app in apps.iter_mut() {
                     while let Ok(event) = app.irc_rx.try_recv() {
@@ -320,8 +305,20 @@ async fn pinned_bouncer_monitor() {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         })
-        .await
-        .expect("MONITOR bouncer response did not arrive");
+        .await;
+        assert!(
+            result.is_ok(),
+            "MONITOR bouncer response did not arrive: {:?}",
+            apps.iter()
+                .map(|app| (
+                    app.state.connections["fixture"]
+                        .isupport_parsed
+                        .get("MONITOR"),
+                    app.state.connections["fixture"].enabled_caps.clone(),
+                    app.monitors.get("fixture").map(MonitorState::rows),
+                ))
+                .collect::<Vec<_>>()
+        );
     }
     fn web(app: &mut crate::app::App, text: &str) {
         app.handle_web_command(
@@ -332,8 +329,17 @@ async fn pinned_bouncer_monitor() {
             "browser",
         );
     }
-    let mut first = client();
-    let mut second = client();
+    fn control(app: &crate::app::App, text: &str) {
+        app.irc_handles["fixture"]
+            .sender()
+            .send(irc::proto::Command::PRIVMSG(
+                "FixtureControl".into(),
+                text.into(),
+            ))
+            .unwrap();
+    }
+    let mut first = monitor_fixture_client();
+    let mut second = monitor_fixture_client();
     until(&mut [&mut first, &mut second], |app| {
         app.state.connections["fixture"]
             .isupport_parsed
@@ -411,6 +417,74 @@ async fn pinned_bouncer_monitor() {
     })
     .await;
     assert_eq!(first.monitors["fixture"].peers.len(), 1);
+    control(&first, "account-off");
+    until(&mut [&mut first, &mut second], |app| {
+        !app.state.connections["fixture"]
+            .enabled_caps
+            .contains("account-notify")
+    })
+    .await;
+    assert!(first.monitors["fixture"].peers["alice"].account.is_none());
+    control(&first, "account-on");
+    until(&mut [&mut first, &mut second], |app| {
+        app.state.connections["fixture"]
+            .enabled_caps
+            .contains("account-notify")
+    })
+    .await;
+    control(&first, "account-change");
+    until(&mut [&mut first], |app| {
+        app.monitors["fixture"].peers["alice"].account.as_deref() == Some("restored-account")
+    })
+    .await;
+    assert!(!second.monitors["fixture"].peers.contains_key("alice"));
+    control(&first, "monitor-off");
+    if std::env::var("REPARTEE_PRESENCE_PROVIDER").unwrap() == "soju" {
+        until(&mut [&mut first, &mut second], |app| {
+            app.state.connections["fixture"]
+                .isupport_parsed
+                .get("MONITOR")
+                .is_none()
+        })
+        .await;
+        assert_eq!(first.monitors["fixture"].peers["alice"].online, None);
+    } else {
+        until(&mut [&mut first, &mut second], |app| {
+            app.state.buffers.values().any(|buffer| {
+                buffer
+                    .messages
+                    .iter()
+                    .any(|message| message.text.contains("control-complete monitor-off"))
+            })
+        })
+        .await;
+        assert!(
+            first.state.connections["fixture"]
+                .isupport_parsed
+                .get("MONITOR")
+                .is_some()
+        );
+        assert!(
+            second.state.connections["fixture"]
+                .isupport_parsed
+                .get("MONITOR")
+                .is_some()
+        );
+    }
+    control(&first, "monitor-on");
+    until(&mut [&mut first, &mut second], |app| {
+        app.state.buffers.values().any(|buffer| {
+            buffer
+                .messages
+                .iter()
+                .any(|message| message.text.contains("control-complete monitor-on"))
+        }) && app.monitors["fixture"].synchronized()
+            && app.monitors["fixture"]
+                .peers
+                .values()
+                .all(|peer| peer.online.is_some())
+    })
+    .await;
     web(&mut first, "/monitor clear");
     until(&mut [&mut first], |app| {
         app.monitors["fixture"].peers.is_empty()
@@ -422,4 +496,86 @@ async fn pinned_bouncer_monitor() {
         app.cancel_connection_attempt("fixture");
         app.irc_handles.remove("fixture");
     }
+}
+
+#[cfg(test)]
+fn monitor_fixture_client() -> crate::app::App {
+    let mut app = crate::app::input::submit_typing_tests::test_app();
+    app.config.general.flood_protection = false;
+    let mut config: crate::config::ServerConfig = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]\nbouncer_network_id='1'").unwrap();
+    config.port = std::env::var("REPARTEE_BOUNCER_TEST_PORT")
+        .unwrap()
+        .parse()
+        .unwrap();
+    config.sasl_user = Some(std::env::var("REPARTEE_BOUNCER_TEST_USER").unwrap());
+    config.sasl_pass = Some("fixture-password".into());
+    app.setup_connection("fixture", &config);
+    app.state.set_active_buffer("fixture/fixture");
+    app.start_connection_attempt("fixture", config);
+    app
+}
+
+#[cfg(test)]
+#[tokio::test]
+#[ignore = "requires a disposable pinned bouncer fixture"]
+async fn pinned_bouncer_no_monitor() {
+    let mut app = monitor_fixture_client();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            while let Ok(event) = app.irc_rx.try_recv() {
+                app.handle_irc_event(event);
+            }
+            if app.state.connections["fixture"].status
+                == crate::state::connection::ConnectionStatus::Connected
+                && app.state.connections["fixture"]
+                    .isupport_parsed
+                    .get("CHANTYPES")
+                    .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        app.state.connections["fixture"]
+            .isupport_parsed
+            .get("MONITOR")
+            .is_none()
+    );
+    command(&mut app, &["add".into(), "Alice".into()]);
+    assert!(app.monitors["fixture"].peers.is_empty());
+    assert!(
+        app.state.buffers["fixture/fixture"]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("not currently advertised"))
+    );
+    app.irc_handles["fixture"]
+        .sender()
+        .send(irc::proto::Command::MONITOR("L".into(), None))
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            while let Ok(event) = app.irc_rx.try_recv() {
+                app.handle_irc_event(event);
+            }
+            app.tick_monitors();
+            if app.state.buffers["fixture/fixture"]
+                .messages
+                .iter()
+                .any(|message| message.text.contains("MONITOR is currently unavailable"))
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(app.monitors["fixture"].peers.is_empty());
+    app.cancel_connection_attempt("fixture");
+    app.irc_handles.remove("fixture");
 }
