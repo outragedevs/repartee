@@ -37,6 +37,9 @@ fn command_with_secret(app: &mut super::App, args: &[String], secret: impl FnOnc
         add_local_event(app, "No active connection");
         return;
     };
+    if app.has_account_registration_pending(&id) {
+        add_local_event(app, "An account registration operation is unresolved; wait for its reply or reconnect"); return;
+    }
     let clear = args == ["clear", "-YES"];
     let allow_insecure = args.get(1).is_some_and(|arg| arg == "-allow-insecure-upstream");
     let login_args = args.get(if allow_insecure { 2.. } else { 1.. }).unwrap_or_default();
@@ -95,6 +98,10 @@ fn command_with_secret(app: &mut super::App, args: &[String], secret: impl FnOnc
 }
 
 impl super::App {
+    pub(crate) fn has_upstream_auth_pending(&self, id: &str) -> bool {
+        self.upstream_auth.get(id).is_some_and(|session| session.pending.is_some())
+    }
+
     fn upstream_auth_event(&mut self, id: &str, text: &str) {
         if let Some(conn) = self.state.connections.get(id) {
             let buffer = crate::state::buffer::make_buffer_id(id, &conn.label);

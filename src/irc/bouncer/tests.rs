@@ -83,7 +83,7 @@ async fn registration(reply: Reply, bound: bool) {
         let advertised = if matches!(reply, Reply::NoCapability) {
             "sasl=PLAIN"
         } else {
-            "sasl=PLAIN batch soju.im/bouncer-networks soju.im/bouncer-networks-notify draft/pre-away"
+            "sasl=PLAIN batch soju.im/bouncer-networks soju.im/bouncer-networks-notify draft/pre-away draft/account-registration=email-required,min-password-length=8"
         };
         write
             .write_all(format!(":fixture CAP * LS :{advertised}\r\n").as_bytes())
@@ -222,6 +222,7 @@ async fn registration(reply: Reply, bound: bool) {
     let result = attempt.await;
     if matches!(reply, Reply::Success | Reply::ControlSuccess) {
         let (handle, mut events) = result.unwrap();
+        assert_eq!(handle.account_registration_rules.as_deref(), (bound && !control).then_some("email-required,min-password-length=8"));
         let mut connected = false;
         let mut confirmed = false;
         while let Some(event) = events.recv().await {

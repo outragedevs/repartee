@@ -2944,6 +2944,7 @@ pub mod submit_typing_tests {
             bouncer_children: HashMap::new(),
             bouncer_mutations: HashMap::new(),
             upstream_auth: HashMap::new(),
+            account_registration: HashMap::new(),
             bouncer_networks: HashMap::new(),
             connection_attempts: HashMap::new(),
             forwarder_handles: HashMap::new(),

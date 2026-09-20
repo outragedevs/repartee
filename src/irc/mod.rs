@@ -63,6 +63,7 @@ pub enum IrcEvent {
 
 /// Result of `IRCv3` capability negotiation.
 struct NegotiateResult {
+    account_registration_rules: Option<String>,
     /// Capabilities successfully enabled via `CAP REQ` / `CAP ACK`.
     enabled_caps: HashSet<String>,
     /// Human-readable diagnostic messages for the status buffer.
@@ -806,7 +807,8 @@ pub async fn connect_server(
     } else {
         negotiation.await
     };
-    let neg = result?;
+    let mut neg = result?;
+    let account_registration_rules = neg.account_registration_rules.take();
 
     let (tx, rx) = mpsc::channel(4096);
     let id = conn_id.to_string();
@@ -911,6 +913,7 @@ pub async fn connect_server(
 
     let mut handle = IrcHandle::new(id2, sender, local_ip, outgoing.0.take());
     handle.reader_handle = Some(reader);
+    handle.account_registration_rules = account_registration_rules;
     Ok((handle, rx))
 }
 
@@ -1245,6 +1248,7 @@ async fn negotiate_caps(
     };
 
     Ok(NegotiateResult {
+        account_registration_rules: enabled_caps.contains("draft/account-registration").then(|| server_caps.value("draft/account-registration").unwrap_or("").to_string()),
         enabled_caps,
         diagnostics: diag,
         early_messages,

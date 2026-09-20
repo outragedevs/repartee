@@ -327,3 +327,14 @@ passed, as did Lurker rejection. Full Sol medium review round 4 is clean after
 three findings were fixed with regressions. See
 `docs/validation/bouncer-upstream-sasl.md`. REGISTER/VERIFY and the remaining
 full-matrix acceptance rows remain in scope.
+
+Upstream account registration is implemented on `feat/bouncer-account-registration`:
+REGISTER/VERIFY use secret references, negotiated rules and separate account
+state, with native/web command routing. Actual Soju verification-required
+persistence, invalid-code retry, success, reconnect and duplicate-account handling
+passed; pinned Lurker refuses the unsupported operation. Initial CAP rule retention,
+case-insensitive replies, capability withdrawal and authenticated history ownership
+have regressions. Clippy, 2585 native and 144 web tests passed; full Sol medium
+review round 2 is clean. See `docs/validation/bouncer-account-registration.md`.
+Server search, metadata, certificates, WebPush and the remaining full-matrix
+acceptance rows remain in scope.
