@@ -2109,7 +2109,7 @@ impl AppState {
             return false;
         }
         if self.buffers.get(buffer_id).is_some_and(|buffer| {
-            (self.irc_reply_buffer.is_some() || buffer.buffer_type == crate::state::buffer::BufferType::Server)
+            (self.irc_reply_buffer.is_some() || matches!(buffer.buffer_type, crate::state::buffer::BufferType::Server | crate::state::buffer::BufferType::Special))
                 && self.connections.get(&buffer.connection_id)
                     .is_some_and(Connection::server_owns_history)
         }) {
