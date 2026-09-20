@@ -1,6 +1,6 @@
 use super::App;
 
-async fn until(app: &mut App, predicate: impl Fn(&App) -> bool + Send + Sync) {
+async fn until(app: &mut App, stage: &str, predicate: impl Fn(&App) -> bool + Send + Sync) {
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
             while let Ok(event) = app.irc_rx.try_recv() {
@@ -13,7 +13,12 @@ async fn until(app: &mut App, predicate: impl Fn(&App) -> bool + Send + Sync) {
         }
     })
     .await
-    .expect("Bouncer NAMES did not populate the channel");
+    .unwrap_or_else(|_| {
+        panic!(
+            "Bouncer NAMES stage {stage} timed out; capabilities: {:?}",
+            app.state.connections["fixture"].enabled_caps
+        )
+    });
 }
 
 fn populated(app: &App) -> bool {
@@ -31,6 +36,54 @@ fn populated(app: &App) -> bool {
     })
 }
 
+async fn labeled_names(app: &mut App) {
+    app.irc_handles["fixture"]
+        .sender()
+        .send(irc::proto::Command::CAP(
+            None,
+            irc::proto::command::CapSubCommand::REQ,
+            None,
+            Some("labeled-response".into()),
+        ))
+        .unwrap();
+    until(app, "labeled-response ACK", |app| {
+        app.state.connections["fixture"]
+            .enabled_caps
+            .contains("labeled-response")
+    })
+    .await;
+    app.state
+        .buffers
+        .get_mut("fixture/#one")
+        .unwrap()
+        .users
+        .clear();
+    app.channel_query_in_flight.remove("fixture");
+    app.channel_query_queues.remove("fixture");
+    let request: irc::proto::Message = "@label=fixture-names NAMES #one".parse().unwrap();
+    app.irc_handles["fixture"].sender().send(request).unwrap();
+    let mut saw_labeled_batch = false;
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            while let Ok(event) = app.irc_rx.try_recv() {
+                let mut payload = &event;
+                while let crate::irc::IrcEvent::Attempt(_, _, inner) = payload {
+                    payload = inner;
+                }
+                if let crate::irc::IrcEvent::Message(_, message) = payload {
+                    saw_labeled_batch |= matches!(&message.command, irc::proto::Command::BATCH(_, Some(kind), _) if kind.to_str().eq_ignore_ascii_case("labeled-response"))
+                        && message.tags.as_ref().is_some_and(|tags| tags.iter().any(|tag| tag.0 == "label" && tag.1.as_deref() == Some("fixture-names")));
+                }
+                app.handle_irc_event(event);
+            }
+            if saw_labeled_batch && populated(app) && app.channel_query_in_flight.contains_key("fixture") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.expect("labeled NAMES did not run the App completion hooks");
+}
+
 #[tokio::test]
 #[ignore = "requires a disposable pinned bouncer fixture"]
 async fn pinned_bouncer_names() {
@@ -46,7 +99,7 @@ async fn pinned_bouncer_names() {
     app.setup_connection("fixture", &config);
     app.state.set_active_buffer("fixture/fixture");
     app.start_connection_attempt("fixture", config.clone());
-    until(&mut app, |app| {
+    until(&mut app, "transport transition", |app| {
         app.state.connections["fixture"].status
             == crate::state::connection::ConnectionStatus::Connected
     })
@@ -62,19 +115,22 @@ async fn pinned_bouncer_names() {
         .sender()
         .send(irc::proto::Command::JOIN("#one,#two".into(), None, None))
         .unwrap();
-    until(&mut app, populated).await;
+    until(&mut app, "channel population", populated).await;
+    if soju {
+        labeled_names(&mut app).await;
+    }
     app.irc_handles["fixture"]
         .sender()
         .send_quit("fixture reconnect")
         .unwrap();
-    until(&mut app, |app| {
+    until(&mut app, "transport transition", |app| {
         app.state.connections["fixture"].status
             == crate::state::connection::ConnectionStatus::Disconnected
     })
     .await;
     assert!(!populated(&app));
     app.start_connection_attempt("fixture", config);
-    until(&mut app, populated).await;
+    until(&mut app, "channel population", populated).await;
     for channel in ["#one", "#two"] {
         let crate::web::protocol::WebEvent::NickList { nicks, .. } =
             crate::web::snapshot::build_nick_list(&app.state, &format!("fixture/{channel}"))
