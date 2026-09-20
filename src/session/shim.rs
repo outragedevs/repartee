@@ -307,7 +307,7 @@ const fn is_detach_key(ev: &crossterm::event::Event) -> bool {
     matches!(
         ev,
         Event::Key(KeyEvent {
-            code: KeyCode::Char('\\' | 'z'),
+            code: KeyCode::Char('\\' | '4' | 'z'),
             modifiers,
             ..
         }) if modifiers.contains(KeyModifiers::CONTROL)
@@ -411,9 +411,11 @@ mod tests {
         assert!(matches!(receiver.try_recv().unwrap(), ShimMessage::Resize { cols: 100, rows: 30 }));
         assert!(forward_terminal_sample(&sender, &mut last_size, Some(Event::Resize(90, 25)), None));
         assert!(matches!(receiver.try_recv().unwrap(), ShimMessage::Resize { cols: 90, rows: 25 }));
-        let detach = Event::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
-        assert!(forward_terminal_sample(&sender, &mut last_size, Some(detach), Some((160, 50))));
-        assert!(matches!(receiver.try_recv().unwrap(), ShimMessage::Detach));
+        for code in ['z', '\\', '4'] {
+            let detach = Event::Key(KeyEvent::new(KeyCode::Char(code), KeyModifiers::CONTROL));
+            assert!(forward_terminal_sample(&sender, &mut last_size, Some(detach), Some((160, 50))));
+            assert!(matches!(receiver.try_recv().unwrap(), ShimMessage::Detach));
+        }
         assert!(receiver.try_recv().is_err());
         assert_eq!(last_size, (90, 25));
     }

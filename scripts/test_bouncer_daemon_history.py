@@ -13,6 +13,7 @@ from pathlib import Path
 
 from bouncer_fault_proxy import FaultProxy
 from bouncer_partial_batch_proxy import PartialBatchProxy
+from bouncer_native_attach import verify_native_attach
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_NAME = re.search(r'pub const APP_NAME: &str = "([^"]+)"', (ROOT / 'src/constants.rs').read_text()).group(1)
@@ -26,6 +27,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('image')
     args = parser.parse_args()
+    if os.environ.get('REPARTEE_DAEMON_NATIVE_ATTACH') == '1' and (
+        not os.environ.get('REPARTEE_DAEMON_LIVE_HISTORY')
+        or os.environ.get('REPARTEE_PRESENCE_AUTO_AWAY') != 'true'
+    ):
+        parser.error('Native attach acceptance requires the live-history fixture with AutoAway enabled')
     with tempfile.TemporaryDirectory(prefix='bouncer-daemon-', dir='/tmp') as directory, ExitStack() as resources:
         provider_port = int(os.environ['REPARTEE_BOUNCER_TEST_PORT'])
         partial = os.environ.get('REPARTEE_DAEMON_PARTIAL_HISTORY') == '1'
@@ -89,6 +95,8 @@ bouncer_network_id = '{os.environ['REPARTEE_BOUNCER_TEST_NETID']}'
                 else:
                     raise TimeoutError('Disposable daemon HTTPS readiness timed out')
                 run(['node', str(ROOT / ('scripts/fixtures/daemon-live-browser.cjs' if os.environ.get('REPARTEE_DAEMON_LIVE_HISTORY') else 'scripts/fixtures/daemon-history-browser.cjs'))], env=environment)
+                if os.environ.get('REPARTEE_DAEMON_NATIVE_ATTACH') == '1':
+                    verify_native_attach(container, APP_NAME, data / f'{APP_NAME}.log')
                 run(['docker', 'stop', '-t', '20', container], capture_output=True)
                 exit_code = run(['docker', 'inspect', '-f', '{{.State.ExitCode}}', container], capture_output=True).stdout.strip()
                 assert exit_code == '0', f'Unclean daemon exit: {exit_code}'
