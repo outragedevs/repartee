@@ -983,6 +983,7 @@ fn ensure_query_buffer(app: &mut App, conn_id: &str, target: &str, skip_channels
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         });
     }
     buffer_id

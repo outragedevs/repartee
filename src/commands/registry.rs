@@ -607,6 +607,15 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
             },
         ),
         (
+            "bmeta",
+            CommandDef {
+                handler: crate::app::bouncer_metadata::command,
+                description: "Manage bouncer pin, mute and block metadata",
+                aliases: &[],
+                category: CommandCategory::Connection,
+            },
+        ),
+        (
             "bsearch",
             CommandDef {
                 handler: crate::app::server_search::command,

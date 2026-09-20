@@ -7,6 +7,7 @@ mod activity;
 mod read_state;
 mod read_identity;
 mod redaction;
+mod metadata;
 pub mod redaction_registry;
 pub mod buffer;
 pub mod connection;
@@ -214,6 +215,8 @@ pub struct RedirectEra {
 pub struct AppState {
     pub connections: HashMap<String, Connection>,
     pub buffers: IndexMap<String, Buffer>,
+    pub(crate) bouncer_metadata: HashMap<(String, String), crate::irc::metadata::Flags>,
+    pub(crate) metadata_casemappings: HashMap<String, String>,
     pub(crate) web_history_buffers: HashMap<String, String>,
     pub active_buffer_id: Option<String>,
     pub irc_reply_buffer: Option<String>,

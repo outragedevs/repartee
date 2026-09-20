@@ -32,6 +32,8 @@ impl AppState {
         Self {
             connections: std::collections::HashMap::new(),
             buffers: indexmap::IndexMap::new(),
+            bouncer_metadata: std::collections::HashMap::new(),
+            metadata_casemappings: std::collections::HashMap::new(),
             web_history_buffers: std::collections::HashMap::new(),
             redaction_registry: super::redaction_registry::Registry::new(4096),
             active_buffer_id: None,
@@ -114,6 +116,9 @@ impl AppState {
     }
 
     pub(crate) fn add_buffer_with_focus(&mut self, mut buffer: Buffer, activate: bool) {
+        if matches!(buffer.buffer_type, crate::state::buffer::BufferType::Channel | crate::state::buffer::BufferType::Query) {
+            buffer.metadata = self.metadata_flags(&buffer.connection_id, &buffer.name);
+        }
         if let Some(timestamp) = self.read_activity.get(&buffer.id)
             .and_then(|read| read.through)
             .and_then(chrono::DateTime::from_timestamp_millis)
@@ -131,6 +136,9 @@ impl AppState {
             nick_count: u32::try_from(buffer.users.len()).unwrap_or(u32::MAX),
             modes: buffer.modes.clone(),
             e2e_enabled: false,
+            pinned: buffer.metadata.pinned,
+            muted: buffer.metadata.muted,
+            blocked: buffer.metadata.blocked,
         };
         self.activity_order.remove(&buffer.id);
         if buffer.activity != ActivityLevel::None {
@@ -318,7 +326,8 @@ impl AppState {
 
     // === Messages ===
 
-    pub fn add_message(&mut self, buffer_id: &str, message: Message) {
+    pub fn add_message(&mut self, buffer_id: &str, mut message: Message) {
+        if self.metadata_prepare_row(buffer_id, &mut message).is_none() { return; }
         // Honour script-driven event display suppression. State mutation runs
         // up the call chain before this point; this gate only hides the JOIN/
         // PART/QUIT/etc. event line so scripts that returned Suppress for a
@@ -408,6 +417,7 @@ impl AppState {
     /// no longer maps to it, making `/search` for the original URL
     /// return nothing.
     pub fn add_message_unshrunk(&mut self, buffer_id: &str, mut message: Message) {
+        if self.metadata_prepare_row(buffer_id, &mut message).is_none() { return; }
         self.attach_redaction_ref(buffer_id, &mut message);
         self.apply_redaction(buffer_id, &mut message);
         if !self.buffers.contains_key(buffer_id) {
@@ -468,7 +478,8 @@ impl AppState {
         self.add_local_message(buffer_id, message);
     }
 
-    pub fn add_local_message(&mut self, buffer_id: &str, message: Message) {
+    pub fn add_local_message(&mut self, buffer_id: &str, mut message: Message) {
+        if self.metadata_prepare_row(buffer_id, &mut message).is_none() { return; }
         self.pending_web_events
             .push(crate::web::protocol::WebEvent::NewMessage {
                 buffer_id: buffer_id.to_string(),
@@ -545,9 +556,11 @@ impl AppState {
     pub fn add_message_with_activity(
         &mut self,
         buffer_id: &str,
-        message: Message,
+        mut message: Message,
         level: ActivityLevel,
     ) -> bool {
+        let Some(max_level) = self.metadata_prepare_row(buffer_id, &mut message) else { return false; };
+        let level = level.min(max_level);
         // Translation dispatch runs BEFORE shrink: the two are mutually
         // exclusive per line and translation wins. Two external round-trips
         // on one line is worse than losing shrink on a translated buffer.
@@ -626,6 +639,8 @@ impl AppState {
         body: &str,
         identity: (chrono::DateTime<chrono::Utc>, Option<&str>),
     ) {
+        let flags = self.metadata_policy(conn_id, target, Some(nick));
+        if flags.muted || flags.blocked { return; }
         if !self.buffers.contains_key("_mentions") {
             return;
         }
@@ -656,7 +671,7 @@ impl AppState {
             self.nick_color_sat,
             self.nick_color_lit,
         );
-        let mention_msg = Message {
+        let mut mention_msg = Message {
             id: self.next_message_id(),
             timestamp: ts,
             message_type: MessageType::MentionLog,
@@ -675,6 +690,7 @@ impl AppState {
             redaction_msgid: None,
             log_key: None,
         };
+        self.mark_metadata_origin(conn_id, target, nick, &mut mention_msg);
         self.add_mention_to_buffer(mention_msg);
     }
 
@@ -1943,6 +1959,8 @@ impl AppState {
         mut message: Message,
         level: ActivityLevel,
     ) {
+        let Some(max_level) = self.metadata_prepare_row(buffer_id, &mut message) else { return; };
+        let level = level.min(max_level);
         self.attach_redaction_ref(buffer_id, &mut message);
         if !self.buffers.contains_key(buffer_id) {
             return;
@@ -2005,6 +2023,8 @@ impl AppState {
         mut message: Message,
         level: ActivityLevel,
     ) {
+        let Some(max_level) = self.metadata_prepare_row(buffer_id, &mut message) else { return; };
+        let level = level.min(max_level);
         let level = if self.apply_redaction(buffer_id, &mut message) {
             ActivityLevel::None
         } else {
@@ -2013,7 +2033,10 @@ impl AppState {
         let server_owned = self.buffer_uses_server_history(buffer_id);
         self.record_read_origin(buffer_id, &message, buffer_id);
         let already_read = server_owned && self.message_already_read(buffer_id, &message);
-        if server_owned {
+        let track_local_activity = !server_owned && self.buffers.get(buffer_id)
+            .and_then(|buffer| self.connections.get(&buffer.connection_id))
+            .is_some_and(Connection::server_owns_history);
+        if server_owned || (track_local_activity && self.active_buffer_id.as_deref() != Some(buffer_id)) {
             self.record_read_activity(buffer_id, &message, level);
         }
         // Queue web events for broadcast.
@@ -2040,7 +2063,7 @@ impl AppState {
             enforce_scrollback(buf, self.scrollback_limit);
             // Only escalate activity if this is not the active buffer
             let is_active = self.active_buffer_id.as_deref() == Some(buffer_id);
-            if !server_owned && !already_read && !is_active && level > buf.activity {
+            if !server_owned && !track_local_activity && !already_read && !is_active && level > buf.activity {
                 buf.activity = level;
                 buf.unread_count += 1;
                 self.pending_web_events
@@ -2051,7 +2074,7 @@ impl AppState {
                     });
             }
         }
-        if server_owned {
+        if server_owned || track_local_activity {
             self.refresh_read_activity(buffer_id);
         }
     }
@@ -2185,10 +2208,15 @@ impl AppState {
         self.surface_history_page_from_target(buffer_id, rows, before, buffer_id);
     }
 
-    pub(crate) fn surface_history_page_from_target(&mut self, buffer_id: &str, mut rows: Vec<Message>, before: bool, origin: &str) {
+    fn prepare_metadata_history_rows(&self, rows: &mut Vec<Message>, before: bool, origin: &str) {
+        rows.retain_mut(|message| self.metadata_prepare_row(origin, message).is_some());
         if before {
             rows.reverse();
         }
+    }
+
+    pub(crate) fn surface_history_page_from_target(&mut self, buffer_id: &str, mut rows: Vec<Message>, before: bool, origin: &str) {
+        self.prepare_metadata_history_rows(&mut rows, before, origin);
         // Timestamps of rows actually spliced in — used to clear any matching
         // "[E2E: awaiting our own identity]" placeholder afterwards. The
         // placeholder is transient (no @msgid, deliberately un-dedupable so
@@ -2795,6 +2823,7 @@ pub mod tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         }
     }
 

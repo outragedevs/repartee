@@ -130,6 +130,9 @@ class PresenceServer:
                     send(f'@msgid=search-outgoing :{nick}!fixture@localhost PRIVMSG Alice :private needle outgoing')
                     send(f':{nick}!fixture@localhost NICK renamed')
                     nick = 'renamed'
+                elif command == 'PRIVMSG' and registered and self.redaction and params == ['FixtureControl', 'metadata-messages']:
+                    send(f':Alice!peer@fixture.local PRIVMSG #search :{nick}: blocked live metadata message')
+                    send(':Bob!peer@fixture.local PRIVMSG #search :unblocked live metadata message')
                 elif command == 'PRIVMSG' and registered and self.redaction and params == ['FixtureControl', 'search-messages']:
                     send('@msgid=search-first :Alice!peer@fixture.local PRIVMSG #search :needle first 100%')
                     send('@msgid=search-second :Bob!peer@fixture.local PRIVMSG #search :needle second')

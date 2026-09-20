@@ -269,6 +269,9 @@ mod tests {
             nick_count: 0,
             modes: None,
             e2e_enabled: false,
+            pinned: false,
+            muted: false,
+            blocked: false,
         }
     }
 

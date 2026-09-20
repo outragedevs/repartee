@@ -150,6 +150,7 @@ impl App {
     }
 
     pub(crate) fn dispatch_live_irc_message(&mut self, conn_id: &str, msg: &::irc::proto::Message) {
+        if self.handle_bouncer_metadata(conn_id, msg) { return; }
         if self.handle_server_search(conn_id, msg) { self.drain_pending_web_events(); return; }
         let previous = self.state.irc_reply_buffer.take();
         self.state.irc_reply_buffer = self.labeled_response_buffer(conn_id, msg);

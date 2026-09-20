@@ -77,6 +77,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, scroll_offset: usize) ->
             display_name.push_str(" 🔒");
         }
 
+        if buf.metadata.pinned { display_name.push_str(" [pinned]"); }
+        if buf.metadata.muted { display_name.push_str(" [muted]"); }
+        if buf.metadata.blocked { display_name.push_str(" [blocked]"); }
         let num_str = ref_num.to_string();
         let full_spans = parse_format_string(&resolved, &[&num_str, &display_name]);
         let total_visible = visible_len(&full_spans);

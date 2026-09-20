@@ -25,10 +25,16 @@ where
         b_mentions
             .cmp(&a_mentions)
             .then_with(|| la.cmp(lb))
-            .then_with(|| a.buffer_type.sort_group().cmp(&b.buffer_type.sort_group()))
+            .then_with(|| metadata_rank(a).cmp(&metadata_rank(b)))
             .then_with(|| na.cmp(nb))
     });
     keyed.into_iter().map(|(_, _, b)| b).collect()
+}
+
+const fn metadata_rank(buffer: &Buffer) -> (u8, u8, u8) {
+    let group = buffer.buffer_type.sort_group();
+    let conversation = matches!(buffer.buffer_type, crate::state::buffer::BufferType::Channel | crate::state::buffer::BufferType::Query);
+    (if conversation { 2 } else { group }, if conversation && buffer.metadata.pinned { 0 } else if conversation && buffer.metadata.muted { 2 } else { 1 }, group)
 }
 
 /// Sort nicks by prefix rank (using `prefix_order`), then alphabetically (case-insensitive).
@@ -89,6 +95,7 @@ mod tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         }
     }
 

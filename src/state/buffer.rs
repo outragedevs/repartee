@@ -251,6 +251,7 @@ pub struct Buffer {
     /// collapsed back to `scrollback_limit` — when the user returns to the live
     /// bottom. See `app::backlog`.
     pub pin_backlog: bool,
+    pub metadata: crate::irc::metadata::Flags,
 }
 
 impl Buffer {
@@ -283,6 +284,7 @@ impl Buffer {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         }
     }
 
@@ -335,6 +337,7 @@ mod tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         };
 
         buf.touch_speaker("alice");
@@ -372,6 +375,7 @@ mod tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         };
 
         buf.touch_speaker("Alice");
@@ -405,6 +409,7 @@ mod tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         };
 
         for i in 0..60 {

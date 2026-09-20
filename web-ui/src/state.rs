@@ -546,6 +546,16 @@ impl AppState {
                     self.active_buffer.set(Some(new_id));
                 }
             }
+            WebEvent::BufferMetadataChanged { buffer_id, pinned, muted, blocked } => {
+                self.buffers.update(|buffers| {
+                    if let Some(buffer) = buffers.iter_mut().find(|buffer| buffer.id == buffer_id) {
+                        buffer.pinned = pinned;
+                        buffer.muted = muted;
+                        buffer.blocked = blocked;
+                    }
+                });
+                self.sort_buffers();
+            }
             WebEvent::BufferE2eChanged { buffer_id, enabled } => {
                 self.buffers.update(|bufs| {
                     if let Some(buffer) = bufs.iter_mut().find(|buffer| buffer.id == buffer_id) {
@@ -954,7 +964,12 @@ impl AppState {
                         label_a.cmp(&label_b)
                     })
                     .then_with(|| {
-                        buf_type_order(&a.buffer_type).cmp(&buf_type_order(&b.buffer_type))
+                        let rank = |buffer: &crate::protocol::BufferMeta| {
+                            let group = buf_type_order(&buffer.buffer_type);
+                            let conversation = matches!(buffer.buffer_type.as_str(), "channel" | "query");
+                            (if conversation { 2 } else { group }, if conversation && buffer.pinned { 0 } else if conversation && buffer.muted { 2 } else { 1 }, group)
+                        };
+                        rank(a).cmp(&rank(b))
                     })
                     .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
             });
@@ -1319,6 +1334,26 @@ mod tests {
     /// off-wasm — build the storage-free half instead.
     fn headless_state() -> AppState {
         AppState::with_persisted("nightfall".to_string(), None, None, HashSet::new())
+    }
+
+    #[test]
+    fn remote_metadata_changes_sort_and_preserve_independent_flags() {
+        let state = headless_state();
+        for (name, kind) in [("Network", "server"), ("#Room", "channel"), ("#Other", "channel"), ("Alice", "query")] {
+            let buffer: BufferMeta = serde_json::from_value(serde_json::json!({
+                "id": format!("net/{name}"), "connection_id": "net", "name": name, "buffer_type": kind,
+                "topic": null, "unread_count": 0, "activity": 0, "nick_count": 0
+            })).unwrap();
+            assert!(!buffer.pinned && !buffer.muted && !buffer.blocked);
+            state.handle_event(WebEvent::BufferCreated { buffer, activate: false });
+        }
+        state.handle_event(WebEvent::BufferMetadataChanged { buffer_id: "net/Alice".into(), pinned: true, muted: false, blocked: true });
+        state.handle_event(WebEvent::BufferMetadataChanged { buffer_id: "net/#Other".into(), pinned: false, muted: true, blocked: false });
+        let buffers = state.buffers.get_untracked();
+        assert_eq!(buffers.iter().map(|buffer| buffer.name.as_str()).collect::<Vec<_>>(), ["Network", "Alice", "#Room", "#Other"]);
+        assert!(buffers[1].pinned && buffers[1].blocked && !buffers[1].muted);
+        state.handle_event(WebEvent::BufferMetadataChanged { buffer_id: "net/Alice".into(), pinned: false, muted: false, blocked: false });
+        assert_eq!(state.buffers.get_untracked().iter().map(|buffer| buffer.name.as_str()).collect::<Vec<_>>(), ["Network", "#Room", "Alice", "#Other"]);
     }
 
     #[test]

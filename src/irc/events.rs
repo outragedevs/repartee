@@ -652,7 +652,7 @@ pub fn handle_cap_new(
         .filter(|cap| {
             (DESIRED_CAPS.iter().any(|d| d.eq_ignore_ascii_case(cap))
                 || (state.connections.get(conn_id).is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some() && !conn.origin_config.bouncer_control)
-                    && matches!(cap.as_str(), "draft/read-marker" | "soju.im/read" | "draft/message-redaction" | "draft/account-registration" | "soju.im/search")))
+                    && matches!(cap.as_str(), "draft/read-marker" | "soju.im/read" | "draft/message-redaction" | "draft/account-registration" | "soju.im/search" | "draft/metadata-2")))
                 && enabled.is_none_or(|set| !set.contains(cap.as_str()))
         })
         .cloned()
@@ -1128,6 +1128,11 @@ pub fn ingest_chathistory_batch(
         // silently drop the row) and route our own PM to a buffer named after
         // ourselves instead of the peer. Match add_message's comparison.
         let is_own = nick.eq_ignore_ascii_case(&our_nick);
+        let metadata_target = if is_channel(target) || is_own { target.as_str() } else { nick.as_str() };
+        if state.metadata_policy(conn_id, metadata_target, Some(&nick)).blocked {
+            skipped += 1;
+            continue;
+        }
 
         // Decrypt RPE2E ciphertext (same path as live PRIVMSGs) before storing,
         // or skip a line we can't decrypt — see `decrypt_chathistory_text`.
@@ -1347,6 +1352,9 @@ fn handle_tagmsg(
     // A channel TAGMSG belongs to the channel buffer; a TAGMSG aimed at us
     // belongs to the sender's query buffer — same rule as PRIVMSG.
     let buffer_name = if target_is_channel { target } else { &nick };
+    if state.metadata_policy(conn_id, buffer_name, Some(&nick)).blocked {
+        return;
+    }
     let buffer_id = make_buffer_id(conn_id, buffer_name);
 
     // 6. Typing never creates a buffer: otherwise any stranger could pop a query
@@ -1446,6 +1454,14 @@ fn handle_privmsg(
         &nick
     };
     let buffer_id = make_buffer_id(conn_id, buffer_name);
+    if state.metadata_policy(conn_id, buffer_name, Some(&nick)).blocked {
+        if state.typing.clear(&buffer_id, &nick) { push_typing_web_event(state, &buffer_id); }
+        if is_own && let Some(decoration) = state.take_own_echo_decoration(&buffer_id, text) {
+            state.abandon_own_reflection(&buffer_id, decoration.echo_id);
+        }
+        return;
+    }
+
 
     // E2E decrypt: if this looks like an RPE2E01 wire-format line, swap
     // `text` for the plaintext before any further processing. Strict handle
@@ -1621,6 +1637,7 @@ fn handle_privmsg(
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         });
     }
 
@@ -2012,6 +2029,7 @@ fn handle_notice(
         nick.as_deref().unwrap_or("Status")
     };
 
+    let metadata_blocked = !is_server_notice && state.metadata_policy(conn_id, buffer_name, nick.as_deref()).blocked;
     let buffer_id = make_buffer_id(conn_id, buffer_name);
     // Fallback to server buffer if target buffer doesn't exist
     let buffer_id = if state.buffers.contains_key(&buffer_id) {
@@ -2036,6 +2054,8 @@ fn handle_notice(
     {
         push_typing_web_event(state, &buffer_id);
     }
+
+    if metadata_blocked { return; }
 
     // --- Ignore check (skip for server notices) ---
     if !is_server_notice {
@@ -2228,6 +2248,7 @@ fn handle_join(
                 history_exhausted: false,
                 log_initial_loaded: false,
                 pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
             }, activate);
         }
         if activate { state.set_active_buffer(&buffer_id); }
@@ -3096,6 +3117,7 @@ fn rename_query_buffers(
     {
         state.rekey_buffer_state(&old_id, &new_id);
     }
+    let mut renamed = false;
     for buf_id in affected {
         let is_query = state
             .buffers
@@ -3106,6 +3128,7 @@ fn rename_query_buffers(
         }
         let new_buf_id = make_buffer_id(conn_id, new_nick);
         if let Some(mut buf) = state.buffers.shift_remove(buf_id) {
+            renamed = true;
             buf.name = new_nick.to_string();
             buf.id.clone_from(&new_buf_id);
             // The nick being renamed ONTO may still hold a previous
@@ -3132,6 +3155,10 @@ fn rename_query_buffers(
             // `/nick`.
             state.rekey_buffer_state(buf_id, &new_buf_id);
         }
+    }
+    if renamed {
+        state.refresh_metadata_buffers(conn_id);
+        state.purge_metadata_blocked_rows();
     }
 }
 
@@ -3863,6 +3890,11 @@ fn handle_invite(
     tags: Option<HashMap<String, String>>,
 ) {
     let inviter = extract_nick(prefix).unwrap_or_default();
+    let policy = state.metadata_policy(conn_id, channel, Some(&inviter));
+    if policy.blocked {
+        return;
+    }
+    let activity = if policy.muted { ActivityLevel::Activity } else { ActivityLevel::Mention };
 
     let mapping = state
         .connections
@@ -3887,7 +3919,7 @@ fn handle_invite(
             .unwrap_or_else(|| make_buffer_id(conn_id, label));
 
         let id = state.next_message_id();
-        let message = Message {
+        let mut message = Message {
             redaction_ref: None,
             redaction_msgid: None,
             log_key: None,
@@ -3896,9 +3928,9 @@ fn handle_invite(
             message_type: MessageType::Event,
             nick: None,
             nick_mode: None,
-            text: format!("{inviter} invites you to {channel}").replace('%', "%%"),
-            highlight: true,
-            event_key: None,
+            text: format!("{inviter} invites you to {channel}"),
+            highlight: !policy.muted,
+            event_key: Some("invite".into()),
             event_params: None,
             log_msg_id: None,
             log_ref_id: None,
@@ -3906,23 +3938,22 @@ fn handle_invite(
             wire_origin: None,
             translation_suffix_at: None,
         };
+        state.mark_metadata_origin(conn_id, channel, &inviter, &mut message);
         if state
             .connections
             .get(conn_id)
             .is_some_and(crate::state::connection::Connection::server_owns_history)
         {
-            state.add_transient_message_with_activity(&buffer_id, message, ActivityLevel::Mention);
+            state.add_transient_message_with_activity(&buffer_id, message, activity);
         } else {
-            state.add_message_with_activity(&buffer_id, message, ActivityLevel::Mention);
+            state.add_message_with_activity(&buffer_id, message, activity);
         }
     } else {
         // invite-notify: someone else was invited — show in the channel buffer
         let buffer_id = make_buffer_id(conn_id, channel);
         if state.buffers.contains_key(&buffer_id) {
             let id = state.next_message_id();
-            state.add_message(
-                &buffer_id,
-                Message {
+            let mut message = Message {
                     redaction_ref: None,
                     redaction_msgid: None,
                     log_key: None,
@@ -3931,17 +3962,18 @@ fn handle_invite(
                     message_type: MessageType::Event,
                     nick: None,
                     nick_mode: None,
-                    text: format!("{inviter} invited {nick} to {channel}").replace('%', "%%"),
+                    text: format!("{inviter} invited {nick} to {channel}"),
                     highlight: false,
-                    event_key: None,
+                    event_key: Some("invite".into()),
                     event_params: None,
                     log_msg_id: None,
                     log_ref_id: None,
                     tags,
                     wire_origin: None,
                     translation_suffix_at: None,
-                },
-            );
+                };
+            state.mark_metadata_origin(conn_id, channel, &inviter, &mut message);
+            state.add_message(&buffer_id, message);
         }
     }
 }
@@ -6187,6 +6219,7 @@ mod tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         });
         // Channel buffer
         let chan_id = make_buffer_id("test", "#test");
@@ -6213,6 +6246,7 @@ mod tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         });
         // Add ourselves to the channel
         state.add_nick(
@@ -6255,6 +6289,7 @@ mod tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         }
     }
 
@@ -7685,6 +7720,7 @@ mod tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         });
 
         // Add alice to both channels
@@ -7829,6 +7865,7 @@ mod tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         });
 
         // Add alice to both channels
@@ -7932,6 +7969,7 @@ mod tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         });
 
         let msg = make_irc_msg(
@@ -7986,6 +8024,7 @@ mod tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         });
         state.pending_web_events.clear();
 
@@ -8070,6 +8109,7 @@ mod tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         });
 
         // Deliver the KEYREQ as a NOTICE from alice's NEW host.
@@ -8635,6 +8675,7 @@ mod tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         });
 
         // Add alice to both channels
@@ -9237,6 +9278,7 @@ mod tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         });
 
         // Server echoes our NOTICE to "bob"
@@ -9357,10 +9399,12 @@ mod tests {
             ),
         );
         let message = state.buffers["test/#test"].messages.back().unwrap();
-        let text: String = crate::theme::parse_format_string(&message.text, &[])
-            .into_iter()
-            .map(|span| span.text)
-            .collect();
+        let line = crate::ui::message_line::render_message(message, false, &crate::theme::loader::default_theme(), &crate::config::default_config(), None, None);
+        let native: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+        assert!(native.contains("op invites you to #100%N"));
+        let wire = crate::web::snapshot::message_to_wire(message, None);
+        let text: String = crate::theme::parse_format_string(&wire.text, &[])
+            .into_iter().map(|span| span.text).collect();
         assert_eq!(text, "op invites you to #100%N");
         assert!(state.pending_web_events.iter().any(|event| matches!(event,
             crate::web::protocol::WebEvent::MentionAlert { buffer_id, .. } if buffer_id == "test/#test"

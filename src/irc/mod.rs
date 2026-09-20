@@ -8,6 +8,7 @@ pub mod setname;
 pub mod monitor;
 pub mod names;
 pub mod labels;
+pub mod metadata;
 pub mod redaction;
 pub mod extban;
 pub mod flood;

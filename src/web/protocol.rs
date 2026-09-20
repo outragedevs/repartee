@@ -112,6 +112,12 @@ pub enum WebEvent {
         #[serde(default = "default_true")]
         activate: bool,
     },
+    BufferMetadataChanged {
+        buffer_id: String,
+        pinned: bool,
+        muted: bool,
+        blocked: bool,
+    },
     BufferE2eChanged {
         buffer_id: String,
         enabled: bool,
@@ -353,6 +359,7 @@ pub struct SaveServerCmd {
 
 /// Buffer metadata sent in `SyncInit` and `BufferCreated`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[expect(clippy::struct_excessive_bools, reason = "metadata flags are independent server-controlled preferences")]
 pub struct BufferMeta {
     pub id: String,
     pub connection_id: String,
@@ -366,6 +373,12 @@ pub struct BufferMeta {
     pub modes: Option<String>,
     #[serde(default)]
     pub e2e_enabled: bool,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub blocked: bool,
 }
 
 /// Connection metadata sent in `SyncInit`.

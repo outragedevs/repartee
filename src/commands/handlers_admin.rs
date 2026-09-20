@@ -1433,12 +1433,16 @@ fn log_search(app: &mut App, query: &str) {
                 (None, None)
             };
 
-            match storage::query::search_messages(
+            match storage::query::search_messages_filtered(
                 &db,
                 query,
                 network.as_deref(),
                 buffer.as_deref(),
                 20,
+                |message| !app.state.connections.iter().any(|(id, conn)| {
+                    conn.network_key() == message.network
+                        && app.state.metadata_policy(id, &message.buffer, message.nick.as_deref()).blocked
+                }),
             ) {
                 Ok(results) if results.is_empty() => {
                     vec![format!(

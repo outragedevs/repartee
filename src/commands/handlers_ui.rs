@@ -1126,6 +1126,7 @@ fn shell_open(app: &mut App, command: Option<&str>) {
                 history_exhausted: false,
                 log_initial_loaded: false,
                 pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
             });
             app.state.set_active_buffer(&buf_id);
             app.shell_input_active = true;
@@ -1483,6 +1484,7 @@ mod close_tests {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
         }
     }
 

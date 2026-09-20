@@ -356,3 +356,19 @@ retains capability withdrawals after network binding. Clippy and 2603 native/144
 web tests passed; pinned Soju plus real WebKit passed with and without labels,
 and pinned Lurker rejects the unsupported feature. Full Sol medium review round 10 is clean; see `docs/validation/bouncer-server-search.md`. Metadata,
 certificates, WebPush and all remaining acceptance rows stay in scope.
+
+
+The metadata increment on `feat/bouncer-buffer-metadata` adds automatic Soju
+`draft/metadata-2` negotiation, `/bmeta`, pinned/muted/blocked synchronization,
+native/web sorting and indicators, and block/mute filtering across live delivery,
+history, server search, local log search, invitations, typing and mentions.
+Requests are serialized and uncertain mutations are reconciled without replaying
+the write. Remote pushes continue after BATCH withdrawal. Account/network and
+CASEMAPPING isolation are covered. Bouncer message history remains memory-only;
+explicit legacy-log search filters visible results without modifying the archive.
+Clippy passes without project warnings; 2630 native and 145 web tests pass.
+Pinned Soju and real WebKit validate multi-client persistence and native/web
+behavior; pinned Lurker rejects the unsupported feature. Full Sol medium review
+round 8 is clean. See `docs/validation/bouncer-metadata.md` for evidence and limits.
+Client certificates, WebPush and all remaining full-matrix acceptance rows stay
+in scope; this is not completion of the overall goal.

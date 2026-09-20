@@ -175,7 +175,8 @@ impl super::App {
             let timestamp = chrono::DateTime::parse_from_rfc3339(tags.get("time")?).ok()?.with_timezone(&chrono::Utc);
             Some((nick, body.clone(), kind, tags, timestamp, format!("{ident}@{host}"), target.clone()))
         }).collect::<Option<Vec<_>>>();
-        let Some(rows) = rows else { self.search_note(id, "Search response contained invalid results; results discarded"); return; };
+        let Some(mut rows) = rows else { self.search_note(id, "Search response contained invalid results; results discarded"); return; };
+        rows.retain(|(nick, ..)| !self.state.metadata_policy(id, &pending.target, Some(nick)).blocked);
         let raw_count = rows.len();
         let rows: Vec<_> = rows.into_iter().filter_map(|(nick, raw, kind, tags, timestamp, handle, target)| {
             let is_own = nick.eq_ignore_ascii_case(&own) || own_handle.as_ref().is_some_and(|own| own.eq_ignore_ascii_case(&handle));

@@ -282,6 +282,8 @@ impl App {
                 | crate::web::protocol::WebEvent::ConnectionStatus { .. }
                 | crate::web::protocol::WebEvent::SettingsChanged { .. }
                 | crate::web::protocol::WebEvent::BufferE2eChanged { .. }
+                | crate::web::protocol::WebEvent::BufferMetadataChanged { .. }
+                | crate::web::protocol::WebEvent::MentionsRedacted { .. }
                 // Structural so the shared snapshot — the source of a
                 // *connecting* session's SyncInit — picks up the new item list
                 // immediately, not up to a tick later.

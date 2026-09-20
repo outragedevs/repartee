@@ -28,6 +28,9 @@ pub fn build_sync_init(
     let buffers: Vec<BufferMeta> = sorted
         .iter()
         .map(|b| BufferMeta {
+            pinned: b.metadata.pinned,
+            muted: b.metadata.muted,
+            blocked: b.metadata.blocked,
             id: b.id.clone(),
             connection_id: b.connection_id.clone(),
             name: b.name.clone(),
@@ -288,6 +291,7 @@ mod tests {
                 history_exhausted: false,
                 log_initial_loaded: false,
                 pin_backlog: false,
+            metadata: crate::irc::metadata::Flags::default(),
             },
         );
         state
