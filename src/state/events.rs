@@ -90,11 +90,9 @@ impl AppState {
         self.connections.insert(conn.id.clone(), conn);
     }
 
-    #[expect(
-        dead_code,
-        reason = "reserved for future reconnect/disconnect commands"
-    )]
     pub fn remove_connection(&mut self, id: &str) {
+        self.reset_connection_read_markers(id);
+        self.read_activity.retain(|buffer_id, _| buffer_id.split_once('/').is_none_or(|(conn_id, _)| conn_id != id));
         self.connections.remove(id);
     }
 

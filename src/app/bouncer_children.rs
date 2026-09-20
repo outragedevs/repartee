@@ -96,7 +96,8 @@ impl super::App {
         for buffer in buffers {
             self.state.remove_buffer(&buffer);
         }
-        self.state.connections.remove(id);
+        self.state.remove_connection(id);
+        self.read_markers.remove(id);
         self.state.background_join_connections.remove(id);
         self.state
             .pending_web_events
