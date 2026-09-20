@@ -33,7 +33,7 @@ impl App {
         let default_buf_id = make_buffer_id(Self::DEFAULT_CONN_ID, "Status");
         if self.state.buffers.contains_key(&default_buf_id) {
             self.state.remove_buffer(&default_buf_id);
-            self.state.connections.remove(Self::DEFAULT_CONN_ID);
+            self.state.remove_connection(Self::DEFAULT_CONN_ID);
         }
 
         self.state.add_connection(Connection {

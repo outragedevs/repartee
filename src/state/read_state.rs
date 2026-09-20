@@ -664,4 +664,70 @@ mod tests {
         state.surface_history_page("account/peer", rows, false);
         assert_eq!(state.buffers["account/peer"].unread_count, 1);
     }
+    #[tokio::test]
+    async fn removing_connection_releases_retained_markers_and_identity() {
+        let mut state = state();
+        let nick = state.connections["account"].nick.clone();
+        state.record_read_account("account", &nick, Some("own-account"));
+        state.apply_server_read_marker("account/peer", 2000);
+        state.remove_buffer("account/peer");
+        assert!(state.read_activity.contains_key("account/peer"));
+        assert!(state.read_identities.contains_key("account"));
+        state.apply_server_read_marker("other/peer", 1000);
+        state.remove_connection("account");
+        assert!(
+            !state
+                .read_activity
+                .keys()
+                .any(|id| id.starts_with("account/"))
+        );
+        assert!(!state.read_identities.contains_key("account"));
+        assert_eq!(state.read_activity["other/peer"].through, Some(1000));
+        assert!(!state.connections.contains_key("account"));
+    }
+    #[tokio::test]
+    async fn deleted_bouncer_networks_release_read_state_each_time() {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let config = toml::from_str("label='Bouncer'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]\nbouncer_control=true").unwrap();
+        app.setup_connection("account", &config);
+        app.state.connections.get_mut("account").unwrap().status =
+            crate::state::connection::ConnectionStatus::Connected;
+        app.bouncer_networks.insert(
+            "account".into(),
+            crate::irc::bouncer::NetworkRegistry::default(),
+        );
+        for netid in 1..=8 {
+            assert!(
+                app.handle_bouncer_network_message(
+                    "account",
+                    &format!("BOUNCER NETWORK {netid} name=Temporary")
+                        .parse()
+                        .unwrap()
+                )
+            );
+            let child = app.bouncer_children.keys().next().unwrap().clone();
+            let nick = app.state.connections[&child].nick.clone();
+            app.state
+                .record_read_account(&child, &nick, Some("own-account"));
+            let buffer_id = format!("{child}/peer");
+            app.state
+                .add_buffer_with_focus(Buffer::empty(&child, BufferType::Query, "Peer"), false);
+            app.state.apply_server_read_marker(&buffer_id, 2000);
+            app.state.remove_buffer(&buffer_id);
+            assert!(app.state.read_activity.contains_key(&buffer_id));
+            assert!(app.handle_bouncer_network_message(
+                "account",
+                &format!("BOUNCER NETWORK {netid} *").parse().unwrap()
+            ));
+            assert!(
+                !app.state
+                    .read_activity
+                    .keys()
+                    .any(|id| id.starts_with(&format!("{child}/")))
+            );
+            assert!(!app.state.read_identities.contains_key(&child));
+            assert!(!app.read_markers.contains_key(&child));
+            assert!(app.bouncer_children.is_empty());
+        }
+    }
 }

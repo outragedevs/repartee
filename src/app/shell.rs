@@ -155,7 +155,7 @@ impl App {
         }
         let header_id = make_buffer_id(Self::SHELL_CONN_ID, "Shell");
         self.state.remove_buffer(&header_id);
-        self.state.connections.remove(Self::SHELL_CONN_ID);
+        self.state.remove_connection(Self::SHELL_CONN_ID);
         self.shell_input_active = false;
     }
 

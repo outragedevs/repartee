@@ -207,3 +207,9 @@ of positively observed own accounts for history classification. Historical rows
 from those accounts remain self-authored; unrelated account tags remain unread.
 Reconnect still discards this session-specific evidence. A hydration regression
 covers two own accounts followed by logout and one unrelated account.
+
+Permanent connection removal clears retained read thresholds and identity
+records, including thresholds belonging to already closed buffers. Dynamic
+bouncer child removal also drops its pending marker scheduler immediately.
+Regressions cover unrelated-connection isolation and eight successive real
+registry create/delete events without retained child read-state allocations.
