@@ -10,6 +10,22 @@ pub enum Credentials {
 }
 
 impl Credentials {
+    pub fn for_bouncer(config: &crate::config::ServerConfig, provider: Option<crate::irc::bouncer::Provider>) -> Result<Self, Error> {
+        if provider == Some(crate::irc::bouncer::Provider::Lurker)
+            && [&config.sasl_user, &config.sasl_pass, &config.sasl_mechanism,
+                &config.sasl_key_path, &config.client_cert_path].iter().all(|value| value.is_none())
+            && let Some((login, secret)) = config.password.as_deref().and_then(|pass| pass.split_once(':'))
+        {
+            let mut normalized = config.clone();
+            if !login.is_empty() {
+                normalized.username = Some(login.split(['/', '@']).next().unwrap_or_default().to_string());
+            }
+            normalized.password = Some(secret.to_string());
+            return Self::from_config(&normalized);
+        }
+        Self::from_config(config)
+    }
+
     pub fn from_config(config: &crate::config::ServerConfig) -> Result<Self, Error> {
         let mechanism = config.sasl_mechanism.as_deref().map(str::to_ascii_uppercase);
         if mechanism.as_deref() == Some("OAUTHBEARER") {
@@ -259,6 +275,23 @@ mod tests {
 
     fn config() -> crate::config::ServerConfig {
         toml::from_str("label='test'\naddress='localhost'\nport=1\ntls=false\nchannels=[]\nusername='account@client/network'").unwrap()
+    }
+
+    #[test]
+    fn pass_credentials_follow_the_confirmed_provider() {
+        use crate::irc::bouncer::Provider;
+        let mut config = config();
+        config.password = Some("alice/network@client:secret:with:colons".into());
+        assert!(matches!(Credentials::for_bouncer(&config, Some(Provider::Lurker)),
+            Ok(Credentials::Basic { username, password }) if username == "alice" && password == "secret:with:colons"));
+        for provider in [Some(Provider::Soju), None] {
+            assert!(matches!(Credentials::for_bouncer(&config, provider),
+                Ok(Credentials::Basic { username, password }) if username == "account@client/network" && password == "alice/network@client:secret:with:colons"));
+        }
+        config.sasl_user = Some("sasl-account".into());
+        config.sasl_pass = Some("sasl-secret".into());
+        assert!(matches!(Credentials::for_bouncer(&config, Some(Provider::Lurker)),
+            Ok(Credentials::Basic { username, password }) if username == "sasl-account" && password == "sasl-secret"));
     }
 
     #[test]

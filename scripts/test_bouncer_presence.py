@@ -81,7 +81,7 @@ def scenario(implementation, source, auto_away, setname=False, monitor=False, mo
                            f"http-ingress https://127.0.0.1:{http_port}\nfile-upload fs {temporary}/uploads\n" if filehost else "")
                     )
                     run([str(source / "sojudb"), "-config", str(config), "create-user", "fixture"],
-                        input="fixture-password\n", capture_output=True)
+                        input="fixture:password\n" if filehost and os.environ.get("REPARTEE_BOUNCER_TEST_LEGACY") == "1" else "fixture-password\n", capture_output=True)
                     if oauth:
                         class OAuthHandler(http.server.BaseHTTPRequestHandler):
                             def log_message(self, *args):

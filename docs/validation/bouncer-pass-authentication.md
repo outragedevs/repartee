@@ -58,3 +58,30 @@ TLS uses the existing verified transport settings; these loopback acceptance
 runs do not prove TLS rejection. The separate [TLS acceptance](bouncer-tls-validation.md) verifies untrusted/wrong-host
 rejection. G2 remains open for legacy username/network selector behavior with
 correct history ownership and the account-scope continuity noted above. This change does not claim those separate paths are complete.
+
+
+## Provider-specific PASS credentials
+
+Lurker's CAP responses always use `lurker.bouncer`, including bound sessions
+whose welcome numerics are replayed from the upstream. Soju sends its own 004
+with version `soju`. Repartee records the CAP server during negotiation and
+recognizes Soju only when its 004 comes from that same server; Lurker's CAP
+identity takes precedence over a replayed upstream 004. Identification is used
+only after bouncer registration and binding have been confirmed.
+
+For Soju, PASS is a secret, including any colons. Runtime network scopes therefore
+exclude it. For Lurker, the existing combined `account[/network][@client]:secret`
+format continues to isolate accounts. FILEHOST now splits that format at the
+first colon for Lurker, retaining all subsequent colons in the secret. SASL
+credentials take precedence; unknown providers keep their existing behavior.
+Original configuration and reconnect credentials are retained.
+
+When correcting a previously password-derived Soju scope, the E2E keyring uses
+the confirmed runtime scope as the configured identity. Encryption enabled for
+the previous scope prevents plaintext sends until the user confirms the new
+scope with `/e2e on` or `/e2e off`.
+
+The existing FILEHOST provider fixture supports `REPARTEE_BOUNCER_TEST_LEGACY=1`:
+it uses a colon-bearing secret on both providers, combined PASS with an unrelated
+USER on Lurker and USER/network plus plain PASS on Soju. It uploads through both
+native and web backend paths and downloads the resulting bytes for comparison.

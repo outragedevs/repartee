@@ -35,6 +35,33 @@ pub(super) fn legacy_child_username(config: &crate::config::ServerConfig, userna
     Ok(Some(format!("{account}/{network}@{client}")))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provider {
+    Soju,
+    Lurker,
+}
+
+impl Provider {
+    pub(super) fn detect(cap_server: Option<&str>, messages: &[Message]) -> Option<Self> {
+        if cap_server == Some("lurker.bouncer") {
+            return Some(Self::Lurker);
+        }
+        messages.iter().any(|message| {
+            matches!(&message.prefix, Some(irc::proto::Prefix::ServerName(server)) if Some(server.as_str()) == cap_server)
+                && matches!(&message.command, Command::Response(Response::RPL_MYINFO, args)
+                    if args.get(2).is_some_and(|version| version == "soju"))
+        }).then_some(Self::Soju)
+    }
+
+    pub fn scope_config(self, config: &crate::config::ServerConfig) -> crate::config::ServerConfig {
+        let mut scoped = config.clone();
+        if self == Self::Soju {
+            scoped.password = None;
+        }
+        scoped
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Identity {
     Control,

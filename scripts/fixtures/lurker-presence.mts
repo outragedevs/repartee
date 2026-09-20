@@ -11,7 +11,7 @@ if (httpPort) {
 }
 const load = (name: string) => import(pathToFileURL(path.join(source, name)).href);
 const harnessModule = await load('server/test-utils/bouncerHarness.ts');
-const account = harnessModule.seedAccount({ password: 'fixture-password', nick: 'fixture' });
+const account = harnessModule.seedAccount({ password: httpPort && process.env.REPARTEE_BOUNCER_TEST_LEGACY === '1' ? 'fixture:password' : 'fixture-password', nick: 'fixture' });
 const { default: manager } = await load('server/services/ircManager.ts');
 const networks = await load('server/db/networks.ts');
 const settings = await load('server/db/settings.ts');
