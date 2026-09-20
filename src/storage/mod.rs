@@ -43,6 +43,13 @@ impl Storage {
         Self { db, log_tx, writer, encrypt: false, crypto_key: None }
     }
 
+    #[cfg(test)]
+    pub fn fixture_at(path: &std::path::Path) -> Self {
+        let db = Arc::new(Mutex::new(db::open_database_at(path.to_str().unwrap(), false).unwrap()));
+        let (writer, log_tx) = writer::LogWriterHandle::spawn(Arc::clone(&db), None);
+        Self { db, log_tx, writer, encrypt: false, crypto_key: None }
+    }
+
     /// Initialize storage from the logging config section.
     ///
     /// Opens (or creates) the `SQLite` database under `~/.repartee/logs/`,

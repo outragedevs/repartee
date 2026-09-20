@@ -103,3 +103,44 @@ Required follow-up:
 
 These are still required by the existing integration gates in
 `BOUNCER_SUPPORT.md`. No acceptance row is closed by this audit.
+
+## Disk-backed client reconstruction regression
+
+`src/app/history_storage_fixture.rs::pinned_bouncer_persistent_history` uses the
+normal schema and asynchronous SQLite writer with an explicit temporary database
+path. The test-only storage constructor avoids changing HOME or opening the
+operator's data directory. Run it against each pinned provider:
+
+```sh
+python3 scripts/test_bouncer_binding.py soju /path/to/soju --test-filter pinned_bouncer_persistent_history
+python3 scripts/test_bouncer_binding.py lurker /path/to/lurker --test-filter pinned_bouncer_persistent_history
+```
+
+The fixture seeds a legacy row under the bound account/network scope before
+connecting. Actual provider TARGETS/LATEST responses hydrate 200 messages, and a
+web `FetchMessages` command obtains the remaining 100 through BEFORE. Assertions
+inspect both the application buffer and the session-targeted web page. The old
+local row must never appear in either.
+
+Before shutdown, a live incoming message and own echo are injected through the
+normal IRC event handler on that same bouncer connection. The web send command
+exercises local outgoing display with echo-message temporarily removed from the
+fixture's local capability state. Each row must actually appear in memory before
+checking that it remains absent on disk. These live rows are controlled inputs,
+not evidence of actual upstream delivery; the binding fixture has no live
+upstream. A similarly injected direct-IRC positive control must persist its
+message and connection event.
+
+The writer is drained, the App is dropped, and the database is reopened read-only.
+Its complete message list must contain only the seeded legacy row and two direct
+control rows. A fresh App then opens that same database, reconnects to the real
+bouncer, repeats hydration and web pagination, and drains its writer. A second
+read-only inspection must find exactly the same three rows.
+
+Both pinned-provider runs passed on 2026-09-20. The full default suite passed
+2684 native and 146 web tests (24 provider-dependent native tests ignored), with
+no project Clippy warnings. This closes the narrower disk-writer/reconstructed-App
+regression. It does not claim an operating-system daemon restart,
+actual browser rendering, diagnostic-file inspection, network-delivered live
+messages, server-search persistence, error-path persistence, or Soju without
+history storage. Those remaining full-lifecycle acceptance cases stay open.
