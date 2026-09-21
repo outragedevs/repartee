@@ -226,3 +226,34 @@ async fn repeated_dcc_chat_never_accepts_our_own_offer() {
         assert_eq!(sender.captured().len(), 2);
     }
 }
+
+
+#[tokio::test]
+async fn dcc_public_advertised_addresses_do_not_need_to_exist_locally() {
+    use crate::irc::{IrcHandle, IrcSender};
+    for (public, loopback) in [("203.0.113.7", "127.0.0.1"), ("2001:db8::7", "::1")] {
+        for accept_passive in [false, true] {
+            let mut app = crate::app::input::submit_typing_tests::test_app();
+            let config = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]\nnick='me'").unwrap();
+            app.setup_connection("fixture", &config);
+            app.state.set_active_buffer("fixture/fixture");
+            app.dcc.own_ip = Some(public.parse().unwrap());
+            let sender = IrcSender::capturing(0);
+            app.irc_handles.insert("fixture".into(), IrcHandle::new("fixture".into(), sender.clone(), None, None));
+            if accept_passive {
+                receive(&mut app, "fixture", ":peer!user@host PRIVMSG me :\x01DCC CHAT chat 2130706433 0 42\x01");
+            }
+            app.handle_submit("/dcc chat peer");
+            let sent = sender.captured();
+            let ::irc::proto::Command::PRIVMSG(target, text) = &sent.last().unwrap().command else { panic!("expected DCC offer") };
+            assert_eq!(target, "peer");
+            let offer = crate::dcc::protocol::parse_dcc_ctcp(text.trim_matches('\x01')).unwrap();
+            assert_eq!(offer.addr, public.parse::<std::net::IpAddr>().unwrap());
+            assert_ne!(offer.port, 0);
+            assert_eq!(offer.passive_token, accept_passive.then_some(42));
+            let address = std::net::SocketAddr::new(loopback.parse().unwrap(), offer.port);
+            let stream = tokio::time::timeout(std::time::Duration::from_secs(2), tokio::net::TcpStream::connect(address)).await.unwrap().unwrap();
+            drop(stream);
+        }
+    }
+}
