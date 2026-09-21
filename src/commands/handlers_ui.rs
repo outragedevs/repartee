@@ -910,7 +910,13 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
                 );
                 return;
             }
-            let fmt = args[2].clone();
+            let fmt = match super::settings::decode_setting_value(&args[2..].join(" ")) {
+                Ok(value) => value,
+                Err(error) => {
+                    add_local_event(app, &format!("{C_ERR}{error}{C_RST}"));
+                    return;
+                }
+            };
             app.config
                 .statusbar
                 .item_formats
@@ -929,9 +935,16 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
                 );
                 return;
             }
-            app.config.statusbar.separator.clone_from(&args[1]);
+            let separator = match super::settings::decode_setting_value(&args[1..].join(" ")) {
+                Ok(value) => value,
+                Err(error) => {
+                    add_local_event(app, &format!("{C_ERR}{error}{C_RST}"));
+                    return;
+                }
+            };
+            app.config.statusbar.separator.clone_from(&separator);
             save_statusbar(app);
-            add_local_event(app, &format!("{C_OK}Separator set to: {}{C_RST}", args[1]));
+            add_local_event(app, &format!("{C_OK}Separator set to: {separator}{C_RST}"));
         }
         "available" => {
             add_local_event(
