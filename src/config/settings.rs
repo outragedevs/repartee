@@ -462,8 +462,18 @@ pub fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result
             "timeout" => {
                 config.dcc.timeout = raw.parse().map_err(|_| "Expected a number".to_string())?;
             }
-            "own_ip" => config.dcc.own_ip = raw.to_string(),
-            "port_range" => config.dcc.port_range = raw.to_string(),
+            "own_ip" => {
+                let value = raw.trim();
+                if !value.is_empty() && value.parse::<std::net::IpAddr>().is_err() {
+                    return Err("Expected an IPv4/IPv6 address or an empty value for automatic detection".into());
+                }
+                config.dcc.own_ip = value.to_string();
+            }
+            "port_range" => {
+                crate::dcc::chat::checked_port_range(raw)
+                    .ok_or_else(|| "Expected 0 for automatic ports, a port (1-65535), or an ascending port range".to_string())?;
+                config.dcc.port_range = raw.trim().to_string();
+            }
             "autoaccept_lowports" => {
                 config.dcc.autoaccept_lowports = parse_bool(raw)?;
             }
@@ -1107,6 +1117,35 @@ mod draft_tests {
         let saved = save_changes(&config, &changes, &path, &env).unwrap();
         assert_eq!(saved.general.theme, "broken");
         assert_eq!(crate::config::load_config(&path).unwrap().general.theme, "broken");
+    }
+
+    #[test]
+    fn invalid_dcc_settings_reject_the_save_before_mutating_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let env = dir.path().join(".env");
+        let config = AppConfig::default();
+        crate::config::save_config(&path, &config).unwrap();
+        std::fs::write(&env, "WEB_PASSWORD=existing-fixture\n").unwrap();
+        let original = std::fs::read(&path).unwrap();
+        for (setting, invalid) in [("dcc.own_ip", "nonsense"), ("dcc.own_ip", "192.0.2.999"),
+            ("dcc.port_range", "invalid"), ("dcc.port_range", "70000"), ("dcc.port_range", "5000-4000"),
+            ("dcc.port_range", "0-5000"), ("dcc.port_range", "5000 5001 5002")] {
+            let changes = [
+                crate::settings_model::SettingChange { path: "web.password".into(), original: String::new(), value: "replacement-fixture".into() },
+                crate::settings_model::SettingChange { path: setting.into(), original: get_config_value(&config, setting).unwrap().value, value: invalid.into() },
+            ];
+            assert!(save_changes(&config, &changes, &path, &env).is_err(), "{setting}: {invalid}");
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            assert_eq!(std::fs::read_to_string(&env).unwrap(), "WEB_PASSWORD=existing-fixture\n");
+        }
+        for value in ["", "192.0.2.10", "2001:db8::1", " 192.0.2.10 "] {
+            let draft = prepare_changes(&config, &[("dcc.own_ip", value)]).unwrap();
+            assert_eq!(draft.dcc.own_ip, value.trim());
+        }
+        for value in ["", "0", "5000", "5000-5001", "5000 5001", "5000 - 5001"] {
+            assert!(prepare_changes(&config, &[("dcc.port_range", value)]).is_ok());
+        }
     }
 
     #[test]
