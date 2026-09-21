@@ -357,6 +357,27 @@ const POPUP_W: u16 = 74;
 /// Modal height.
 const POPUP_H: u16 = 24;
 
+pub(super) struct FormPalette {
+    pub bg: Color,
+    pub fg: Color,
+    pub muted: Color,
+    pub border: Color,
+    pub accent: Color,
+    pub field_bg: Color,
+}
+
+pub(super) fn form_palette(theme: &crate::theme::ThemeFile) -> FormPalette {
+    let colors = &theme.colors;
+    FormPalette {
+        bg: hex_to_color(&colors.bg_alt).unwrap_or(Color::Black),
+        fg: hex_to_color(&colors.fg).unwrap_or(Color::White),
+        muted: hex_to_color(&colors.fg_muted).unwrap_or(Color::Gray),
+        border: hex_to_color(&colors.border).unwrap_or(Color::DarkGray),
+        accent: hex_to_color(&colors.accent).unwrap_or(Color::Cyan),
+        field_bg: hex_to_color(&colors.bg).unwrap_or(Color::Black),
+    }
+}
+
 /// Render the wizard overlay (no-op when none open). Records hit rects onto the
 /// `WizardState` for mouse hit-testing.
 #[allow(
@@ -369,15 +390,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     }
     // Resolve theme colors up front (Color is Copy) so the borrow of app.theme
     // ends before we take a mutable borrow of app.wizard.
-    let colors = &app.theme.colors;
-    let bg = hex_to_color(&colors.bg_alt).unwrap_or(Color::Black);
-    let border = hex_to_color(&colors.border).unwrap_or(Color::DarkGray);
-    let accent = hex_to_color(&colors.accent).unwrap_or(Color::Cyan);
-    let fg = hex_to_color(&colors.fg).unwrap_or(Color::White);
-    let muted = hex_to_color(&colors.fg_muted).unwrap_or(Color::Gray);
-    // Editable text inputs get the theme's main bg (the popup itself uses
-    // bg_alt), so the clickable entry area reads as a distinct box.
-    let field_bg = hex_to_color(&colors.bg).unwrap_or(Color::Black);
+    let FormPalette { bg, fg, muted, border, accent, field_bg } = form_palette(&app.theme);
 
     let Some(w) = app.wizard.as_mut() else {
         return;

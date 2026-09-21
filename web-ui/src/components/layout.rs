@@ -214,10 +214,11 @@ fn ResponsiveLayout() -> impl IntoView {
     view! {
         <div class="responsive-layout" on:touchstart=on_touch_start on:touchend=on_touch_end>
             <div class="desktop-topic">
-                <TopicBar />
                 <super::settings::SettingsButton />
+                <TopicBar />
             </div>
             <div class="mobile-topbar">
+                <super::settings::SettingsButton />
                 <button type="button" class="hamburger" aria-label="Open buffers"
                     aria-expanded=move || left_open.get()
                     on:click=move |_| set_left_open.set(true)>"\u{2630}"</button>
@@ -242,7 +243,6 @@ fn ResponsiveLayout() -> impl IntoView {
                     })}
                 </div>
                 <div class="mobile-topbar-right">
-                    <super::settings::SettingsButton />
                     {move || {
                         let count = state.mention_count.get();
                         (count > 0).then(|| view! {

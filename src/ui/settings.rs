@@ -1,3 +1,5 @@
+mod collection;
+
 use crate::settings_model::{SECTIONS, SettingChange, SettingField, SettingKind};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
@@ -14,6 +16,7 @@ pub enum Focus {
     Cancel,
     Defaults,
     Network,
+    Help,
 }
 
 #[derive(Clone, Copy)]
@@ -26,9 +29,14 @@ pub enum Action {
 
 pub struct SettingsPanel {
     pub fields: Vec<SettingField>,
+    editor: Option<collection::Editor>,
+    help_open: bool,
+    help_field: Option<usize>,
     originals: Vec<String>,
     touched: HashSet<usize>,
     section: usize,
+    network: Option<String>,
+    network_hits: Vec<(Rect, Option<String>)>,
     query: String,
     focus: Focus,
     cursor: usize,
@@ -44,9 +52,14 @@ impl SettingsPanel {
         let originals = fields.iter().map(|f| f.value.clone()).collect();
         Self {
             fields,
+            editor: None,
+            help_open: false,
+            help_field: None,
             originals,
             touched: HashSet::new(),
             section: 0,
+            network: None,
+            network_hits: Vec::new(),
             query: String::new(),
             focus: Focus::Search,
             cursor: 0,
@@ -55,6 +68,20 @@ impl SettingsPanel {
             hits: Vec::new(),
             sections: Vec::new(),
         }
+    }
+
+    fn networks(&self) -> Vec<(Option<String>, String)> {
+        let mut networks = vec![(None, "General".into())];
+        for field in &self.fields {
+            if let Some(id) = field.network()
+                && !networks
+                    .iter()
+                    .any(|(existing, _)| existing.as_deref() == Some(id))
+            {
+                networks.push((Some(id.to_string()), field.group().to_string()));
+            }
+        }
+        networks
     }
 
     pub fn changes(&self) -> Vec<SettingChange> {
@@ -81,6 +108,7 @@ impl SettingsPanel {
             .filter(|(_, f)| {
                 if query.is_empty() {
                     f.section == self.section
+                        && (self.section != 0 || f.network() == self.network.as_deref())
                 } else {
                     format!("{} {} {}", f.label, f.path, f.description)
                         .to_lowercase()
@@ -93,6 +121,9 @@ impl SettingsPanel {
 
     fn set_focus(&mut self, focus: Focus) {
         self.focus = focus;
+        if let Focus::Field(index) = focus {
+            self.help_field = Some(index);
+        }
         self.cursor = match focus {
             Focus::Search => self.query.chars().count(),
             Focus::Field(i) => self.fields[i].value.chars().count(),
@@ -103,19 +134,30 @@ impl SettingsPanel {
     fn move_focus(&mut self, forward: bool) {
         let mut ring = vec![Focus::Search];
         ring.extend(self.visible().into_iter().map(Focus::Field));
-        ring.extend([Focus::Save, Focus::Cancel, Focus::Defaults, Focus::Network]);
+        ring.extend([
+            Focus::Save,
+            Focus::Cancel,
+            Focus::Defaults,
+            Focus::Network,
+            Focus::Help,
+        ]);
         let at = ring.iter().position(|f| *f == self.focus).unwrap_or(0);
         self.set_focus(ring[(at + if forward { 1 } else { ring.len() - 1 }) % ring.len()]);
     }
 
     pub fn insert(&mut self, text: &str) {
+        if let Some(editor) = &mut self.editor {
+            editor.insert(text);
+            return;
+        }
         let value = match self.focus {
             Focus::Search => &mut self.query,
             Focus::Field(i)
-                if !matches!(
-                    self.fields[i].kind,
-                    SettingKind::Toggle | SettingKind::Select(_)
-                ) =>
+                if !self.fields[i].is_collection()
+                    && !matches!(
+                        self.fields[i].kind,
+                        SettingKind::Toggle | SettingKind::Select(_)
+                    ) =>
             {
                 self.touched.insert(i);
                 &mut self.fields[i].value
@@ -136,10 +178,11 @@ impl SettingsPanel {
         let value = match self.focus {
             Focus::Search => &mut self.query,
             Focus::Field(i)
-                if !matches!(
-                    self.fields[i].kind,
-                    SettingKind::Toggle | SettingKind::Select(_)
-                ) =>
+                if !self.fields[i].is_collection()
+                    && !matches!(
+                        self.fields[i].kind,
+                        SettingKind::Toggle | SettingKind::Select(_)
+                    ) =>
             {
                 self.touched.insert(i);
                 &mut self.fields[i].value
@@ -159,6 +202,10 @@ impl SettingsPanel {
 
     fn activate(&mut self) -> Action {
         match self.focus {
+            Focus::Help => {
+                self.help_open = true;
+                Action::None
+            }
             Focus::Save => Action::Save,
             Focus::Cancel => Action::Cancel,
             Focus::Network => Action::Network,
@@ -184,6 +231,20 @@ impl SettingsPanel {
                 Action::None
             }
             Focus::Field(i) => {
+                if self.fields[i].is_collection() {
+                    let field = &self.fields[i];
+                    match crate::settings_model::collection::Collection::open(
+                        &field.path,
+                        &field.value,
+                    ) {
+                        Ok(value) => {
+                            self.editor =
+                                Some(collection::Editor::new(i, field.label.clone(), value));
+                        }
+                        Err(error) => self.error = Some(error),
+                    }
+                    return Action::None;
+                }
                 let f = &mut self.fields[i];
                 match &f.kind {
                     SettingKind::Toggle => {
@@ -206,8 +267,37 @@ impl SettingsPanel {
         }
     }
 
+    fn editor_outcome(&mut self, outcome: collection::Outcome) {
+        match outcome {
+            collection::Outcome::Stay => {}
+            collection::Outcome::Cancel => self.editor = None,
+            collection::Outcome::Apply(value) => {
+                if let Some(editor) = self.editor.take() {
+                    self.fields[editor.field].value = value;
+                    self.touched.insert(editor.field);
+                }
+            }
+        }
+    }
+
     pub fn key(&mut self, key: KeyEvent) -> Action {
         if key.kind == crossterm::event::KeyEventKind::Release {
+            return Action::None;
+        }
+
+        if let Some(editor) = &mut self.editor {
+            let outcome = editor.key(key);
+            self.editor_outcome(outcome);
+            return Action::None;
+        }
+        if self.help_open {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::F(1)) {
+                self.help_open = false;
+            }
+            return Action::None;
+        }
+        if key.code == KeyCode::F(1) {
+            self.help_open = true;
             return Action::None;
         }
         match (key.modifiers, key.code) {
@@ -224,6 +314,25 @@ impl SettingsPanel {
                         SECTIONS.len() - 1
                     })
                     % SECTIONS.len();
+                self.query.clear();
+                self.offset = 0;
+                self.set_focus(Focus::Search);
+            }
+            (m, KeyCode::Left | KeyCode::Right)
+                if m.contains(KeyModifiers::CONTROL) && self.section == 0 =>
+            {
+                let networks = self.networks();
+                let current = networks
+                    .iter()
+                    .position(|(id, _)| *id == self.network)
+                    .unwrap_or(0);
+                let step = if key.code == KeyCode::Right {
+                    1
+                } else {
+                    networks.len() - 1
+                };
+                self.network
+                    .clone_from(&networks[(current + step) % networks.len()].0);
                 self.query.clear();
                 self.offset = 0;
                 self.set_focus(Focus::Search);
@@ -257,6 +366,17 @@ impl SettingsPanel {
     }
 
     pub fn mouse(&mut self, mouse: MouseEvent) -> Action {
+        if let Some(editor) = &mut self.editor {
+            let outcome = editor.mouse(mouse);
+            self.editor_outcome(outcome);
+            return Action::None;
+        }
+        if self.help_open {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                self.help_open = false;
+            }
+            return Action::None;
+        }
         match mouse.kind {
             MouseEventKind::ScrollDown => self.move_focus(true),
             MouseEventKind::ScrollUp => self.move_focus(false),
@@ -265,6 +385,12 @@ impl SettingsPanel {
                 if let Some((_, section)) = self.sections.iter().find(|(r, _)| r.contains(point)) {
                     self.section = *section;
                     self.query.clear();
+                    self.offset = 0;
+                    self.set_focus(Focus::Search);
+                } else if let Some((_, network)) =
+                    self.network_hits.iter().find(|(r, _)| r.contains(point))
+                {
+                    self.network = network.clone();
                     self.offset = 0;
                     self.set_focus(Focus::Search);
                 } else if let Some((_, focus)) = self.hits.iter().find(|(r, _)| r.contains(point)) {
@@ -280,151 +406,401 @@ impl SettingsPanel {
     }
 }
 
-#[expect(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)]
 pub fn render(frame: &mut Frame, area: Rect, app: &mut crate::app::App) {
+    let palette = super::wizard::form_palette(&app.theme);
     let Some(panel) = &mut app.settings_panel else {
         return;
     };
-    let bg = crate::theme::hex_to_color(&app.theme.colors.bg).unwrap_or(Color::Black);
-    let fg = crate::theme::hex_to_color(&app.theme.colors.fg).unwrap_or(Color::White);
+    let super::wizard::FormPalette {
+        bg,
+        fg,
+        muted,
+        border,
+        accent,
+        field_bg,
+    } = palette;
     let base = Style::default().fg(fg).bg(bg);
-    let selected = base.add_modifier(Modifier::REVERSED);
-    frame.render_widget(Clear, area);
+    let selected = Style::default()
+        .fg(bg)
+        .bg(accent)
+        .add_modifier(Modifier::BOLD);
+    let popup = crate::ui::centered_rect(
+        area,
+        area.width.saturating_sub(4).clamp(22, 108),
+        area.height.saturating_sub(2).clamp(14, 34),
+    );
+    frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Settings ")
+        .title(Span::styled(
+            " Settings ",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ))
+        .border_style(Style::default().fg(border))
         .style(base);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
     panel.hits.clear();
     panel.sections.clear();
-    if inner.width < 20 || inner.height < 12 {
+    panel.network_hits.clear();
+    if inner.width < 62 || inner.height < 18 {
         frame.render_widget(
-            Paragraph::new("Resize to at least 22 × 14. Esc cancels.")
+            Paragraph::new("Settings needs at least 68 × 22. Resize the terminal; Esc cancels.")
                 .wrap(Wrap { trim: true })
                 .style(base),
             inner,
         );
         return;
     }
-    let buttons = footer_controls(inner);
-    let content_height = buttons[0].2.y.saturating_sub(inner.y + 1);
-    let nav_width = 23.min(inner.width / 3);
-    let body = Rect::new(
-        inner.x + nav_width + 1,
-        inner.y,
-        inner.width.saturating_sub(nav_width + 1),
-        content_height,
-    );
-    for (i, name) in SECTIONS.iter().enumerate() {
-        let y = inner.y + u16::try_from(i).unwrap_or(0);
-        if y >= body.bottom() {
-            break;
-        }
-        let rect = Rect::new(inner.x, y, nav_width, 1);
-        frame.render_widget(
-            Paragraph::new(*name).style(if i == panel.section { selected } else { base }),
-            rect,
-        );
-        panel.sections.push((rect, i));
-    }
-    let search = Rect::new(body.x, body.y, body.width, 1);
+    let padded = inner.inner(Margin::new(1, 0));
+    let search = Rect::new(padded.x, padded.y, padded.width, 1);
     frame.render_widget(
-        Paragraph::new(format!("Search: {}", panel.query)).style(if panel.focus == Focus::Search {
-            selected
+        Paragraph::new(format!(
+            " Search  {}{}",
+            panel.query,
+            if panel.focus == Focus::Search {
+                "▏"
+            } else {
+                ""
+            }
+        ))
+        .style(if panel.focus == Focus::Search {
+            Style::default().fg(fg).bg(field_bg)
         } else {
-            base
+            Style::default().fg(muted).bg(field_bg)
         }),
         search,
     );
     panel.hits.push((search, Focus::Search));
+    let footer = footer_controls(Rect::new(
+        padded.x,
+        padded.y,
+        padded.width,
+        padded.height.saturating_sub(1),
+    ));
+    let footer_y = footer[0].2.y;
+    let help_y = footer_y.saturating_sub(4);
+    let nav = Rect::new(
+        padded.x,
+        padded.y + 2,
+        23,
+        help_y.saturating_sub(padded.y + 2),
+    );
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::RIGHT)
+            .border_style(Style::default().fg(border)),
+        Rect::new(nav.x, nav.y, nav.width + 1, nav.height),
+    );
+    for (index, name) in SECTIONS.iter().enumerate() {
+        let rect = Rect::new(
+            nav.x,
+            nav.y + u16::try_from(index).unwrap_or(0),
+            nav.width,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(format!(" {name}")).style(if index == panel.section {
+                selected
+            } else {
+                Style::default().fg(muted).bg(bg)
+            }),
+            rect,
+        );
+        panel.sections.push((rect, index));
+    }
+    let body = Rect::new(
+        nav.right() + 2,
+        nav.y,
+        padded.right().saturating_sub(nav.right() + 2),
+        nav.height,
+    );
+    let heading = if panel.query.is_empty() {
+        SECTIONS[panel.section].to_string()
+    } else {
+        "Search results".into()
+    };
+    frame.render_widget(
+        Paragraph::new(heading).style(Style::default().fg(accent).add_modifier(Modifier::BOLD)),
+        Rect::new(body.x, body.y, body.width, 1),
+    );
     let visible = panel.visible();
-    let rows = usize::from(body.height.saturating_sub(5) / 2).max(1);
-    if let Focus::Field(i) = panel.focus
-        && let Some(at) = visible.iter().position(|v| *v == i)
+    let mut display_rows = Vec::new();
+    let mut previous_group = "";
+    for &index in &visible {
+        let group = panel.fields[index].group();
+        if group != previous_group {
+            display_rows.push((index, true));
+            previous_group = group;
+        }
+        display_rows.push((index, false));
+    }
+    let rows = usize::from(body.height.saturating_sub(2)).max(1);
+    if let Focus::Field(index) = panel.focus
+        && let Some(at) = display_rows
+            .iter()
+            .position(|candidate| *candidate == (index, false))
     {
         if at < panel.offset {
-            panel.offset = at;
+            panel.offset = at.saturating_sub(1);
         }
         if at >= panel.offset + rows {
             panel.offset = at + 1 - rows;
         }
     }
-    for (row, &i) in visible.iter().skip(panel.offset).take(rows).enumerate() {
-        let field = &panel.fields[i];
-        let y = body.y + 2 + u16::try_from(row * 2).unwrap_or(0);
-        let focused = panel.focus == Focus::Field(i);
-        let mut value = match &field.kind {
-            SettingKind::Toggle => {
-                if field.value == "true" {
-                    "[x]".into()
-                } else {
-                    "[ ]".into()
+    panel.offset = panel.offset.min(display_rows.len().saturating_sub(rows));
+    let label_width = (body.width * 3 / 5).min(32);
+    for (row, &(index, heading)) in display_rows
+        .iter()
+        .skip(panel.offset)
+        .take(rows)
+        .enumerate()
+    {
+        if heading {
+            frame.render_widget(
+                Paragraph::new(panel.fields[index].group())
+                    .style(Style::default().fg(accent).add_modifier(Modifier::BOLD)),
+                Rect::new(
+                    body.x,
+                    body.y + 2 + u16::try_from(row).unwrap_or(0),
+                    body.width,
+                    1,
+                ),
+            );
+            continue;
+        }
+        let field = &panel.fields[index];
+        let focused = panel.focus == Focus::Field(index);
+        let changed = field.value != panel.originals[index]
+            || panel.touched.contains(&index) && field.kind == SettingKind::Secret;
+        let y = body.y + 2 + u16::try_from(row).unwrap_or(0);
+        let rect = Rect::new(
+            body.x + label_width + 1,
+            y,
+            body.width.saturating_sub(label_width + 1),
+            1,
+        );
+        let mut value = if field.is_collection() {
+            let count =
+                crate::settings_model::collection::Collection::open(&field.path, &field.value)
+                    .map_or(0, |c| c.rows.len());
+            format!("Edit list ({count})")
+        } else {
+            match &field.kind {
+                SettingKind::Toggle => {
+                    if field.value == "true" {
+                        "[x] On".into()
+                    } else {
+                        "[ ] Off".into()
+                    }
                 }
-            }
-            SettingKind::Select(_) if field.value.is_empty() => "(inherit default)".into(),
-            SettingKind::Secret if field.value.is_empty() => {
-                if field.configured {
-                    "(configured; unchanged)".into()
-                } else {
-                    "(not configured)".into()
+                SettingKind::Select(_) => format!(
+                    "‹ {} ›",
+                    if field.value.is_empty() {
+                        "Inherit"
+                    } else {
+                        &field.value
+                    }
+                ),
+                SettingKind::Secret if field.value.is_empty() => {
+                    if field.configured {
+                        "(unchanged)".into()
+                    } else {
+                        "(not set)".into()
+                    }
                 }
+                SettingKind::Secret => "•".repeat(field.value.chars().count()),
+                _ => field.value.clone(),
             }
-            SettingKind::Secret => "•".repeat(field.value.chars().count()),
-            _ => field.value.clone(),
         };
         if focused
-            && !matches!(
-                field.kind,
-                SettingKind::Toggle | SettingKind::Select(_) | SettingKind::Secret
-            )
+            && !field.is_collection()
+            && !matches!(field.kind, SettingKind::Toggle | SettingKind::Select(_))
         {
             let at = value
                 .char_indices()
                 .nth(panel.cursor)
                 .map_or(value.len(), |(i, _)| i);
-            value.insert(at, '|');
-            let start = panel
-                .cursor
-                .saturating_sub(usize::from(body.width.saturating_sub(3)));
-            value = value.chars().skip(start).collect();
+            value.insert(at, '▏');
+            value = value
+                .chars()
+                .skip(
+                    panel
+                        .cursor
+                        .saturating_sub(usize::from(rect.width.saturating_sub(2))),
+                )
+                .collect();
         }
         frame.render_widget(
-            Paragraph::new(field.label.clone()).style(base),
-            Rect::new(body.x, y, body.width, 1),
+            Paragraph::new(format!(
+                "{}{}",
+                if changed { "*" } else { " " },
+                field.short_label()
+            ))
+            .style(
+                Style::default()
+                    .fg(if focused || changed { accent } else { fg })
+                    .bg(bg),
+            ),
+            Rect::new(body.x, y, label_width, 1),
         );
-        let rect = Rect::new(body.x, y + 1, body.width, 1);
         frame.render_widget(
-            Paragraph::new(value).style(if focused { selected } else { base }),
+            Paragraph::new(value).style(if focused {
+                selected
+            } else {
+                Style::default().fg(fg).bg(field_bg)
+            }),
             rect,
         );
         panel
             .hits
-            .push((Rect::new(body.x, y, body.width, 2), Focus::Field(i)));
+            .push((Rect::new(body.x, y, body.width, 1), Focus::Field(index)));
     }
+    if panel.section == 0 && panel.query.is_empty() {
+        let networks = panel.networks();
+        let selected_at = networks
+            .iter()
+            .position(|(id, _)| *id == panel.network)
+            .unwrap_or(0);
+        let mut start = 0;
+        while networks[start..=selected_at]
+            .iter()
+            .map(|(_, name)| name.chars().count() + 3)
+            .sum::<usize>()
+            > usize::from(body.width.saturating_sub(6))
+            && start < selected_at
+        {
+            start += 1;
+        }
+        for (label, x, target) in [
+            (
+                " ‹ ",
+                body.x,
+                (selected_at + networks.len() - 1) % networks.len(),
+            ),
+            (" › ", body.right() - 3, (selected_at + 1) % networks.len()),
+        ] {
+            let rect = Rect::new(x, body.y + 1, 3, 1);
+            frame.render_widget(
+                Paragraph::new(label).style(Style::default().fg(fg).bg(field_bg)),
+                rect,
+            );
+            panel.network_hits.push((rect, networks[target].0.clone()));
+        }
+        let mut x = body.x + 3;
+        for (id, name) in networks.into_iter().skip(start) {
+            let width = u16::try_from(name.chars().count() + 2)
+                .unwrap_or(body.width)
+                .min(body.width.saturating_sub(6));
+            if x + width > body.right() - 3 {
+                break;
+            }
+            let rect = Rect::new(x, body.y + 1, width, 1);
+            frame.render_widget(
+                Paragraph::new(format!(" {name} ")).style(if id == panel.network {
+                    selected
+                } else {
+                    Style::default().fg(fg).bg(field_bg)
+                }),
+                rect,
+            );
+            panel.network_hits.push((rect, id));
+            x += width + 1;
+        }
+    } else {
+        frame.render_widget(
+            Paragraph::new(format!("{} fields", visible.len()))
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(muted)),
+            Rect::new(body.x, body.y + 1, body.width, 1),
+        );
+    }
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(border)),
+        Rect::new(padded.x, help_y, padded.width, 1),
+    );
     let help = if let Some(error) = &panel.error {
         error.clone()
-    } else if let Focus::Field(i) = panel.focus {
-        format!("{} {}", panel.fields[i].description, panel.fields[i].effect)
-    } else if panel.section == 5 {
-        "Chat shortcuts: Alt+digit switches buffers; Alt+A selects activity; Tab completes; PageUp/PageDown scroll. Edit command aliases above.".into()
+    } else if let Focus::Field(index) = panel.focus {
+        let f = &panel.fields[index];
+        format!("{} · {} {}", f.label, f.description, f.effect)
     } else {
-        "Ctrl+F search · Alt+Left/Right section · Tab move · Ctrl+S save · Esc cancel".into()
+        "Changes are applied only when you save. * marks an edited setting.".into()
     };
     frame.render_widget(
-        Paragraph::new(help).wrap(Wrap { trim: true }).style(base),
-        Rect::new(body.x, body.bottom().saturating_sub(3), body.width, 3),
+        Paragraph::new(help.clone())
+            .wrap(Wrap { trim: true })
+            .style(
+                Style::default()
+                    .fg(if panel.error.is_some() {
+                        Color::Red
+                    } else {
+                        muted
+                    })
+                    .bg(bg),
+            ),
+        Rect::new(padded.x, help_y + 1, padded.width, 2),
     );
-    for (label, focus, rect) in buttons {
+    for (label, focus, rect) in footer {
         frame.render_widget(
             Paragraph::new(label).style(if panel.focus == focus {
                 selected
             } else {
-                base.add_modifier(Modifier::BOLD)
+                Style::default().fg(fg).bg(field_bg)
             }),
             rect,
         );
         panel.hits.push((rect, focus));
+    }
+    frame.render_widget(
+        Paragraph::new(if panel.section == 0 {
+            "Ctrl+←→ network · Tab move · Ctrl+S save · Esc cancel"
+        } else {
+            "Tab move · Alt+←→ category · Ctrl+F search · Ctrl+S save · Esc cancel"
+        })
+        .style(Style::default().fg(muted).bg(bg)),
+        Rect::new(padded.x, padded.bottom() - 1, padded.width, 1),
+    );
+    if panel.help_open {
+        let popup = crate::ui::centered_rect(
+            area,
+            area.width.saturating_sub(6).min(84),
+            12.min(area.height),
+        );
+        frame.render_widget(Clear, popup);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Setting help ")
+            .style(base)
+            .border_style(Style::default().fg(accent));
+        let content = block.inner(popup).inner(Margin::new(1, 0));
+        frame.render_widget(block, popup);
+        let text = panel.help_field.map_or(help, |index| {
+            let field = &panel.fields[index];
+            format!(
+                "{}\n{}\n\n{}\n{}",
+                field.label, field.path, field.description, field.effect
+            )
+        });
+        frame.render_widget(
+            Paragraph::new(text).wrap(Wrap { trim: true }),
+            Rect::new(
+                content.x,
+                content.y,
+                content.width,
+                content.height.saturating_sub(2),
+            ),
+        );
+        frame.render_widget(
+            Paragraph::new(" Close · Enter / Esc ").style(selected),
+            Rect::new(content.x, content.bottom() - 1, 21.min(content.width), 1),
+        );
+    }
+    if let Some(editor) = &mut panel.editor {
+        editor.render(frame, area, &palette);
     }
 }
 
@@ -434,6 +810,7 @@ fn footer_controls(inner: Rect) -> Vec<(&'static str, Focus, Rect)> {
         (" Cancel ", Focus::Cancel),
         (" Defaults ", Focus::Defaults),
         (" Add network ", Focus::Network),
+        (" Help ", Focus::Help),
     ];
     let mut controls = Vec::new();
     let mut x = inner.x;
@@ -462,7 +839,7 @@ mod tests {
     fn narrow_terminal_footer_keeps_all_buttons_visible_and_clickable() {
         let inner = Rect::new(1, 1, 20, 12);
         let controls = footer_controls(inner);
-        assert_eq!(controls.len(), 4);
+        assert_eq!(controls.len(), 5);
         for (_, _, rect) in &controls {
             assert!(inner.contains(Position::new(rect.x, rect.y)));
             assert!(inner.contains(Position::new(rect.right() - 1, rect.bottom() - 1)));

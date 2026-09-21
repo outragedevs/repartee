@@ -17,7 +17,11 @@ pub fn fields(config: &AppConfig) -> Vec<SettingField> {
                 SettingKind::Select(options.iter().map(|s| (*s).to_string()).collect())
             } else if typed.is_some_and(serde_json::Value::is_boolean) {
                 SettingKind::Toggle
-            } else if typed.is_some_and(serde_json::Value::is_number) {
+            } else if typed.is_some_and(serde_json::Value::is_number)
+                || path.starts_with("servers.")
+                    && (path.ends_with(".reconnect_delay")
+                        || path.ends_with(".reconnect_max_retries"))
+            {
                 SettingKind::Number
             } else if JSON_PATHS.contains(&path.as_str()) {
                 SettingKind::Json
@@ -363,21 +367,21 @@ fn choices(path: &str) -> Option<&'static [&'static str]> {
 
 fn description(path: &str) -> &'static str {
     match path {
-        "aliases" => "Command aliases as a JSON object mapping alias names to commands.",
-        "ignores" => "Ignore rules as a JSON array with mask, levels and optional channels.",
+        "aliases" => "Named shortcuts and the commands they expand to.",
+        "ignores" => "Ignore rules match a user mask, message types and optional channels.",
         "statusbar.items" => {
-            "Ordered JSON array: active_windows, nick_info, channel_info, typing, lag, time."
+            "Ordered statusbar items: active_windows, nick_info, channel_info, typing, lag, time."
         }
         "statusbar.item_formats" => {
-            "JSON object overriding the format of individual statusbar items."
+            "Custom formats for individual statusbar items."
         }
-        "scripts.autoload" => "JSON array of Lua script filenames to load at startup.",
-        "logging.exclude_types" => "JSON array of message types excluded from local logging.",
+        "scripts.autoload" => "Lua script filenames to load at startup, in order.",
+        "logging.exclude_types" => "Message types excluded from local history.",
         "translate.ai.models" => {
-            "JSON model definitions. Reference secrets with api_key_env; API keys are never displayed."
+            "Translation models and provider limits. Reference API keys by environment variable; secret values are never displayed."
         }
         "translate.buffers" => {
-            "JSON object keyed by buffer ID: incoming, outgoing, lang and my_lang."
+            "Per-buffer translation: incoming and outgoing messages, channel language and your language."
         }
         "general.nick" => "Nickname inherited by networks without their own nickname override.",
         "general.username" => "IRC username inherited by networks without their own override.",
@@ -425,7 +429,7 @@ fn description(path: &str) -> &'static str {
             "Network-specific connection setting. Empty optional overrides inherit the global value."
         }
         _ if path.starts_with("translate.ai.") => {
-            "AI translation backend configuration. Lists and model definitions use JSON."
+            "AI translation models, routing and provider configuration."
         }
         _ if path.starts_with("translate.") => {
             "Configure automatic translation of incoming and outgoing messages."
