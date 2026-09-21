@@ -214,13 +214,21 @@ fn initiate_dcc_chat(app: &mut App, nick: &str, passive: bool) {
     if passive {
         // Passive/reverse DCC: send CTCP with fake IP + port 0 + token.
         // The remote peer will set up a listener and reply with their address.
-        let token: u32 = rand::random::<u32>() % 64;
+        let start = rand::random::<u32>() % 63;
+        let token = (0..63).map(|offset| (start + offset) % 63 + 1).find(|candidate| {
+            app.dcc.records.values().all(|record| record.passive_token != Some(*candidate))
+        });
+        let Some(token) = token else {
+            add_local_event(app, "No passive DCC tokens available; close a pending offer first");
+            return;
+        };
         let id = app.dcc.generate_id(nick);
         let record = crate::dcc::types::DccRecord {
             id: id.clone(),
             dcc_type: crate::dcc::types::DccType::Chat,
             nick: nick.to_string(),
             conn_id,
+            outgoing: true,
             addr: crate::dcc::protocol::PASSIVE_FAKE_IP,
             port: 0,
             state: crate::dcc::types::DccState::WaitingUser,
@@ -294,6 +302,7 @@ fn initiate_dcc_chat(app: &mut App, nick: &str, passive: bool) {
             dcc_type: crate::dcc::types::DccType::Chat,
             nick: nick.to_string(),
             conn_id,
+            outgoing: true,
             addr: advertise_ip,
             port: local_port,
             state: crate::dcc::types::DccState::Listening,

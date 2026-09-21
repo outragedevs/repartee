@@ -32,6 +32,7 @@ pub struct DccRecord {
     pub nick: String,
     /// IRC connection ID this DCC was initiated from.
     pub conn_id: String,
+    pub outgoing: bool,
     /// Remote IP address (fake 1.1.1.1 for outgoing passive).
     pub addr: IpAddr,
     /// Remote port (0 = passive DCC).
