@@ -3,7 +3,7 @@ pub mod collection;
 
 use serde::{Deserialize, Serialize};
 
-pub const SECTIONS: [&str; 8] = [
+pub const SECTIONS: [&str; 10] = [
     "Networks & Connections",
     "Appearance",
     "Messages",
@@ -11,6 +11,8 @@ pub const SECTIONS: [&str; 8] = [
     "History & Privacy",
     "Keyboard",
     "Extensions",
+    "E2E Encryption",
+    "Translation",
     "Advanced",
 ];
 

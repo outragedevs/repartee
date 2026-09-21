@@ -1623,9 +1623,9 @@ HTTPS is required when the IRC connection uses TLS. Upload redirects are refused
 /wizard server [id]
 </code></pre>
 <h2>Settings</h2>
-<p>Open Settings with <code>/wizard</code> or the gear in the top-right corner of the terminal
+<p>Open Settings with <code>/wizard</code> or the gear in the top-left corner of the terminal
 or web interface. The panel contains Networks &amp; Connections, Appearance,
-Messages, Notifications, History &amp; Privacy, Keyboard, Extensions, and Advanced.
+Messages, Notifications, History &amp; Privacy, Keyboard, Extensions, E2E Encryption, Translation, and Advanced.
 Search finds settings across all sections. Each field includes a description
 and indicates whether a reconnect or restart is needed.</p>
 <p>Changes remain in a draft until <strong>Save</strong>. <strong>Cancel</strong> discards the draft and
@@ -1635,10 +1635,21 @@ If an edited setting changed elsewhere, reopen the panel before saving it.</p>
 <p>Browser text size, line spacing, image-preview visibility, and following the
 terminal&#39;s active buffer remain local browser preferences. Other settings are
 shared with the terminal. Complex collections (aliases, ignore rules, statusbar
-items, translation models) use JSON fields with descriptions of their shape.</p>
+items, translation models and per-buffer rules) use list and table editors.</p>
 <p>Passwords are never prefilled. A configured indicator means an existing secret
 is present; leaving the field untouched preserves it. Replacements are written
 to <code>.env</code>, never to <code>config.toml</code>.</p>
+<h3>Encryption and translation</h3>
+<p><strong>E2E Encryption</strong> contains the master switch, default key-sharing mode and
+replay-protection window. Enabling support does not encrypt every conversation:
+use <code>/e2e on</code> in the relevant channel or query to set up encryption.</p>
+<p><strong>Translation</strong> contains the master switch, backend, your language, original-text
+display and queue limits. Choose <code>ai</code>, configure models using API-key environment
+variable names, and add channels or queries using <code>connection_id/#channel</code> or
+<code>connection_id/nickname</code>. Set incoming/outgoing translation for each entry;
+outgoing translation requires the channel language. Model routing lists and the
+optional final stage are editable without writing JSON. The <code>stub</code> backend is
+only for testing and reverses word order; it does not translate.</p>
 <h3>Terminal controls</h3>
 <ul>
 <li>Click categories, fields, toggles, lists, or action buttons.</li>

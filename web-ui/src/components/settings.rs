@@ -138,7 +138,7 @@ fn SettingsDialog() -> impl IntoView {
         if current == 2 {
             local_previews.set(true);
         }
-        if current == 7 {
+        if current == 9 {
             local_follow.set(true);
         }
         if current == 1 {
@@ -209,7 +209,7 @@ fn SettingsDialog() -> impl IntoView {
                             </fieldset>
                         </Show>
                         <Show when=move || section.get() == 2 && search.get().is_empty()><label class="settings-local"><input type="checkbox" prop:checked=move || local_previews.get() on:change=move |ev| local_previews.set(event_target_checked(&ev)) />" Show image previews in this browser"</label></Show>
-                        <Show when=move || section.get() == 7 && search.get().is_empty()><label class="settings-local"><input type="checkbox" prop:checked=move || local_follow.get() on:change=move |ev| local_follow.set(event_target_checked(&ev)) />" Follow terminal buffer changes in this browser"</label></Show>
+                        <Show when=move || section.get() == 9 && search.get().is_empty()><label class="settings-local"><input type="checkbox" prop:checked=move || local_follow.get() on:change=move |ev| local_follow.set(event_target_checked(&ev)) />" Follow terminal buffer changes in this browser"</label></Show>
                         <Show when=move || section.get() == 3 && search.get().is_empty()><p>"Browser notifications require permission and support from your connection."</p><crate::push::PushButton /></Show>
                         <Show when=move || section.get() == 5 && search.get().is_empty()><p>"Tab completes input. Up/Down recalls input history. Shift+Enter adds a new line. Command aliases can be edited below."</p></Show>
                         <Show when=move || {
@@ -270,7 +270,7 @@ fn SettingsField(
     } else {
         match field.spec.kind {
         SettingKind::Toggle => view! { <input id=input_id type="checkbox" prop:checked=move || value.get() == "true" on:change=move |ev| { value.set(event_target_checked(&ev).to_string()); touched.set(true); } /> }.into_any(),
-        SettingKind::Select(options) => view! { <select id=input_id prop:value=move || value.get() on:change=move |ev| { value.set(event_target_value(&ev)); touched.set(true); }>{options.into_iter().map(|option| { let label = if option.is_empty() { "Inherit default".to_string() } else { option.clone() }; view! { <option value=option>{label}</option> } }).collect_view()}</select> }.into_any(),
+        SettingKind::Select(options) => view! { <select id=input_id prop:value=move || value.get() on:change=move |ev| { value.set(event_target_value(&ev)); touched.set(true); }>{options.into_iter().map(|option| { let label = if option.is_empty() { "Inherit default".to_string() } else { option.clone() }; let selected = option.clone(); view! { <option value=option prop:selected=move || value.get() == selected>{label}</option> } }).collect_view()}</select> }.into_any(),
         SettingKind::Json => view! { <textarea id=input_id rows="3" spellcheck="false" prop:value=move || value.get() on:input=move |ev| { value.set(event_target_value(&ev)); touched.set(true); } /> }.into_any(),
         kind => {
             let input_type = match kind { SettingKind::Secret => "password", SettingKind::Number => "number", _ => "text" };

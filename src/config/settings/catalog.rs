@@ -14,7 +14,11 @@ pub fn fields(config: &AppConfig) -> Vec<SettingField> {
             let kind = if resolved.is_credential {
                 SettingKind::Secret
             } else if let Some(options) = choices(&path) {
-                SettingKind::Select(options.iter().map(|s| (*s).to_string()).collect())
+                let mut options: Vec<_> = options.iter().map(|s| (*s).to_string()).collect();
+                if !options.contains(&resolved.value) {
+                    options.push(resolved.value.clone());
+                }
+                SettingKind::Select(options)
             } else if typed.is_some_and(serde_json::Value::is_boolean) {
                 SettingKind::Toggle
             } else if typed.is_some_and(serde_json::Value::is_number)
@@ -58,6 +62,8 @@ pub fn fields(config: &AppConfig) -> Vec<SettingField> {
                 0
             } else if field.path.starts_with("servers.") {
                 1
+            } else if field.path.starts_with("translate.ai.") {
+                3
             } else {
                 2
             },
@@ -76,6 +82,19 @@ fn label(config: &AppConfig, path: &str) -> String {
         "general.timestamp_format" => return "Terminal timestamp format".into(),
         "aliases" => return "Command aliases".into(),
         "ignores" => return "Ignore rules".into(),
+        "e2e.enabled" => return "Encryption: Enabled".into(),
+        "e2e.default_mode" => return "Encryption: Default mode".into(),
+        "e2e.ts_tolerance_secs" => return "Encryption: Replay window (seconds)".into(),
+        "translate.my_lang" => return "Translation: Your language".into(),
+        "translate.show_original_in" => return "Translation: Show incoming originals".into(),
+        "translate.show_original_out" => return "Translation: Show outgoing originals".into(),
+        "translate.timeout_ms" => return "Translation: Timeout (ms)".into(),
+        "translate.max_in_flight" => return "Translation: Concurrent requests".into(),
+        "translate.max_queue" => return "Translation: Queue limit per buffer".into(),
+        "translate.buffers" => return "Translation: Channels and queries".into(),
+        "translate.ai.easy" => return "AI translation: Primary model order".into(),
+        "translate.ai.strong" => return "AI translation: Fallback model order".into(),
+        "translate.ai.terminal" => return "AI translation: Final model order".into(),
         _ => {}
     }
     let (group, field) = path.rsplit_once('.').unwrap_or(("", path));
@@ -279,17 +298,18 @@ fn section(path: &str) -> usize {
         {
             1
         }
-        _ if path.starts_with("logging.") || path.starts_with("e2e.") => 4,
+        _ if path.starts_with("logging.") => 4,
+        _ if path.starts_with("e2e.") => 7,
+        _ if path.starts_with("translate.") => 8,
         _ if path.starts_with("scripts.") || path.starts_with("emotes.") => 6,
         _ if path.starts_with("typing.")
-            || path.starts_with("translate.")
             || path.starts_with("shrink.")
             || path.starts_with("spellcheck.")
             || path.starts_with("image_preview.") =>
         {
             2
         }
-        _ => 7,
+        _ => 9,
     }
 }
 
@@ -360,28 +380,72 @@ fn choices(path: &str) -> Option<&'static [&'static str]> {
         "emotes.render" => Some(&["graphical", "text", "off"]),
         "emotes.lang" => Some(&["en", "pl"]),
         "image_preview.protocol" => Some(&["auto", "kitty", "iterm2", "sixel", "halfblocks"]),
+        "translate.backend" => Some(crate::translate::backend::BACKEND_NAMES),
         "e2e.default_mode" => Some(&["normal", "quiet", "auto-accept"]),
         _ => None,
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn description(path: &str) -> &'static str {
     match path {
+        "e2e.enabled" => {
+            "Enable end-to-end encryption support. Use /e2e on in a channel or query to set up encryption; this switch alone does not encrypt messages."
+        }
+        "e2e.default_mode" => {
+            "Default for /e2e on: normal requires /e2e accept, quiet suppresses prompts for unknown peers, auto-accept trusts peers automatically."
+        }
+        "e2e.ts_tolerance_secs" => {
+            "Accept encrypted message timestamps within this many seconds to protect against replay. Default: 300."
+        }
+        "translate.enabled" => {
+            "Enable translation processing. Choose a backend and configure channels or queries below; enabling this alone does not translate messages."
+        }
+        "translate.backend" => {
+            "ai uses your configured provider models; none leaves messages unchanged. stub is for testing only and reverses word order."
+        }
+        "translate.my_lang" => {
+            "The language you read and write, for example en, pl or de. Channels and queries can override it."
+        }
+        "translate.show_original_in" => "Show the original text alongside incoming translations.",
+        "translate.show_original_out" => {
+            "Show your original text alongside the local echo of outgoing translations."
+        }
+        "translate.timeout_ms" => {
+            "Release a queued message untranslated after this many milliseconds (minimum 500)."
+        }
+        "translate.max_in_flight" => {
+            "Maximum concurrent translation requests. Match this to your provider capacity."
+        }
+        "translate.max_queue" => {
+            "Maximum queued translations per buffer. On overflow, the oldest messages are released untranslated."
+        }
+        "translate.ai.easy" => "Model names in preferred order for the first translation attempt.",
+        "translate.ai.strong" => {
+            "Model names in fallback order when the first attempt is unsuccessful."
+        }
+        "translate.ai.terminal" => {
+            "Final model order. Automatic selects configured Groq models with available credentials; an empty custom list disables this stage."
+        }
+        "translate.ai.preferred_attempt_ms" => {
+            "Time budget in milliseconds for the preferred model before trying a fallback (minimum 500)."
+        }
+        "translate.ai.prompt_path" => {
+            "Path to a custom translation prompt file; leave empty to use the built-in prompt."
+        }
         "aliases" => "Named shortcuts and the commands they expand to.",
         "ignores" => "Ignore rules match a user mask, message types and optional channels.",
         "statusbar.items" => {
             "Ordered statusbar items: active_windows, nick_info, channel_info, typing, lag, time."
         }
-        "statusbar.item_formats" => {
-            "Custom formats for individual statusbar items."
-        }
+        "statusbar.item_formats" => "Custom formats for individual statusbar items.",
         "scripts.autoload" => "Lua script filenames to load at startup, in order.",
         "logging.exclude_types" => "Message types excluded from local history.",
         "translate.ai.models" => {
             "Translation models and provider limits. Reference API keys by environment variable; secret values are never displayed."
         }
         "translate.buffers" => {
-            "Per-buffer translation: incoming and outgoing messages, channel language and your language."
+            "Use connection_id/#channel or connection_id/nickname as the buffer name. Set incoming/outgoing translation and both languages; outgoing requires the channel language."
         }
         "general.nick" => "Nickname inherited by networks without their own nickname override.",
         "general.username" => "IRC username inherited by networks without their own override.",
@@ -468,6 +532,67 @@ fn description(path: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dedicated_sections_keep_encryption_and_translation_editable() {
+        let mut config = AppConfig::default();
+        config.translate.backend = " AI ".into();
+        let catalog = fields(&config);
+        for (prefix, title) in [("e2e.", "E2E Encryption"), ("translate.", "Translation")] {
+            let section = crate::settings_model::SECTIONS
+                .iter()
+                .position(|s| *s == title)
+                .unwrap();
+            let members: Vec<_> = catalog.iter().filter(|f| f.section == section).collect();
+            assert!(!members.is_empty());
+            assert!(members.iter().all(|f| f.path.starts_with(prefix)));
+            assert!(
+                catalog
+                    .iter()
+                    .filter(|f| f.path.starts_with(prefix))
+                    .all(|f| f.section == section)
+            );
+        }
+        let backend = catalog
+            .iter()
+            .find(|f| f.path == "translate.backend")
+            .unwrap();
+        assert!(
+            matches!(&backend.kind, SettingKind::Select(options) if options.iter().any(|s| s == "ai") && options.contains(&backend.value))
+        );
+        let changed = super::super::prepare_changes(
+            &config,
+            &[
+                ("e2e.enabled", "false"),
+                ("e2e.default_mode", "quiet"),
+                ("e2e.ts_tolerance_secs", "120"),
+                ("translate.backend", "ai"),
+                ("translate.my_lang", "pl"),
+                (
+                    "translate.buffers",
+                    r#"{"fixture/#chat":{"incoming":true,"outgoing":true,"lang":"en"}}"#,
+                ),
+            ],
+        )
+        .unwrap();
+        let reloaded: AppConfig = toml::from_str(&toml::to_string(&changed).unwrap()).unwrap();
+        assert!(!reloaded.e2e.enabled);
+        assert_eq!(reloaded.e2e.default_mode, "quiet");
+        assert_eq!(reloaded.e2e.ts_tolerance_secs, 120);
+        assert_eq!(reloaded.translate.backend, "ai");
+        assert_eq!(reloaded.translate.my_lang, "pl");
+        assert!(reloaded.translate.buffers["fixture/#chat"].outgoing);
+        assert_eq!(
+            reloaded.translate.buffers["fixture/#chat"].lang.as_deref(),
+            Some("en")
+        );
+        assert!(
+            super::super::prepare_changes(&config, &[("translate.backend", "unknown")]).is_err()
+        );
+        assert!(
+            super::super::prepare_changes(&config, &[("e2e.default_mode", "unknown")]).is_err()
+        );
+    }
 
     #[test]
     fn catalog_redacts_credentials_and_preserves_inherited_connection_values() {

@@ -12,9 +12,9 @@ description: Open settings or the guided server form
 
 ## Settings
 
-Open Settings with `/wizard` or the gear in the top-right corner of the terminal
+Open Settings with `/wizard` or the gear in the top-left corner of the terminal
 or web interface. The panel contains Networks & Connections, Appearance,
-Messages, Notifications, History & Privacy, Keyboard, Extensions, and Advanced.
+Messages, Notifications, History & Privacy, Keyboard, Extensions, E2E Encryption, Translation, and Advanced.
 Search finds settings across all sections. Each field includes a description
 and indicates whether a reconnect or restart is needed.
 
@@ -26,11 +26,25 @@ If an edited setting changed elsewhere, reopen the panel before saving it.
 Browser text size, line spacing, image-preview visibility, and following the
 terminal's active buffer remain local browser preferences. Other settings are
 shared with the terminal. Complex collections (aliases, ignore rules, statusbar
-items, translation models) use JSON fields with descriptions of their shape.
+items, translation models and per-buffer rules) use list and table editors.
 
 Passwords are never prefilled. A configured indicator means an existing secret
 is present; leaving the field untouched preserves it. Replacements are written
 to `.env`, never to `config.toml`.
+
+### Encryption and translation
+
+**E2E Encryption** contains the master switch, default key-sharing mode and
+replay-protection window. Enabling support does not encrypt every conversation:
+use `/e2e on` in the relevant channel or query to set up encryption.
+
+**Translation** contains the master switch, backend, your language, original-text
+display and queue limits. Choose `ai`, configure models using API-key environment
+variable names, and add channels or queries using `connection_id/#channel` or
+`connection_id/nickname`. Set incoming/outgoing translation for each entry;
+outgoing translation requires the channel language. Model routing lists and the
+optional final stage are editable without writing JSON. The `stub` backend is
+only for testing and reverses word order; it does not translate.
 
 ### Terminal controls
 
