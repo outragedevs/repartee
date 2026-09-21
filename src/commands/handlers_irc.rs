@@ -22,6 +22,41 @@ fn parse_connect_address(raw: &str) -> (String, u16) {
     (raw.to_string(), 6667)
 }
 
+fn adhoc_connection_id(app: &App, address: &str, port: u16, tls: bool) -> String {
+    let host: String = address
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let base = format!("{host}_{port}_{}", if tls { "tls" } else { "plain" });
+    let prefix = format!("{base}_");
+    if let Some((id, _)) = app.state.connections.iter().find(|(id, connection)| {
+        !app.config.servers.contains_key(*id)
+            && (*id == &base
+                || id
+                    .strip_prefix(&prefix)
+                    .is_some_and(|suffix| suffix.parse::<u64>().is_ok()))
+            && connection
+                .origin_config
+                .address
+                .eq_ignore_ascii_case(address)
+            && connection.origin_config.port == port
+            && connection.origin_config.tls == tls
+    }) {
+        return id.clone();
+    }
+    let mut id = base.clone();
+    let mut suffix = 2;
+    while app.config.servers.contains_key(&id)
+        || app.state.connections.contains_key(&id)
+        || app.irc_handles.contains_key(&id)
+    {
+        id = format!("{base}_{suffix}");
+        suffix += 1;
+    }
+    id
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_connect(app: &mut App, args: &[String]) {
     if args.is_empty() {
@@ -101,11 +136,7 @@ pub(crate) fn cmd_connect(app: &mut App, args: &[String]) {
         tls = true;
     }
 
-    // Generate a connection ID from the address
-    let conn_id: String = address
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
+    let conn_id = adhoc_connection_id(app, &address, port, tls);
 
     // Check if already connected
     if app.irc_handles.contains_key(&conn_id) {
@@ -113,8 +144,13 @@ pub(crate) fn cmd_connect(app: &mut App, args: &[String]) {
         return;
     }
 
+    let label = if address.contains(':') {
+        format!("[{address}]:{port}")
+    } else {
+        format!("{address}:{port}")
+    };
     let adhoc_config = crate::config::ServerConfig {
-        label: address.clone(),
+        label,
         address,
         port,
         tls,
@@ -1940,5 +1976,71 @@ mod connect_address_tests {
         ] {
             assert_eq!(super::parse_connect_address(raw), (address.to_string(), port), "{raw}");
         }
+    }
+}
+
+#[cfg(test)]
+mod adhoc_endpoint_tests {
+    #[tokio::test]
+    async fn same_host_different_ports_keep_separate_connections_and_reserved_ids() {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let first = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let second = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ports = [
+            first.local_addr().unwrap().port(),
+            second.local_addr().unwrap().port(),
+        ];
+        let reserved = super::adhoc_connection_id(&app, "127.0.0.1", ports[0], false);
+        let saved =
+            toml::from_str("label='reserved'\naddress='192.0.2.1'\nport=1\ntls=false\nchannels=[]")
+                .unwrap();
+        app.config.servers.insert(reserved.clone(), saved);
+        for port in ports {
+            super::cmd_connect(&mut app, &[format!("127.0.0.1:{port}")]);
+        }
+        assert_eq!(app.state.connections.len(), 2);
+        let mut ids = Vec::new();
+        for port in ports {
+            let id = super::adhoc_connection_id(&app, "127.0.0.1", port, false);
+            assert_ne!(id, reserved);
+            let connection = &app.state.connections[&id];
+            assert_eq!(connection.origin_config.address, "127.0.0.1");
+            assert_eq!(connection.origin_config.port, port);
+            assert_eq!(connection.label, format!("127.0.0.1:{port}"));
+            assert_ne!(
+                super::adhoc_connection_id(&app, "127.0.0.1", port, true),
+                id
+            );
+            ids.push(id);
+        }
+        assert_ne!(ids[0], ids[1]);
+        assert_eq!(app.config.servers[&reserved].address, "192.0.2.1");
+        let mut collision: crate::config::ServerConfig = toml::from_str(
+            "label='collision'\naddress='one-two.example'\nport=6667\ntls=false\nchannels=[]",
+        )
+        .unwrap();
+        let base = super::adhoc_connection_id(&app, &collision.address, 6667, false);
+        app.setup_connection(&base, &collision);
+        collision.address = "one.two.example".into();
+        let suffixed = super::adhoc_connection_id(&app, &collision.address, 6667, false);
+        assert_ne!(base, suffixed);
+        app.setup_connection(&suffixed, &collision);
+        app.irc_handles.insert(
+            suffixed.clone(),
+            crate::irc::IrcHandle::new(
+                suffixed.clone(),
+                crate::irc::IrcSender::capturing(0),
+                None,
+                None,
+            ),
+        );
+        app.state.connections.remove(&base);
+        assert_eq!(
+            super::adhoc_connection_id(&app, &collision.address, 6667, false),
+            suffixed
+        );
+        let count = app.state.connections.len();
+        super::cmd_connect(&mut app, &["one.two.example:6667".into()]);
+        assert_eq!(app.state.connections.len(), count);
     }
 }
