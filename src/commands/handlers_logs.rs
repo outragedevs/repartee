@@ -15,7 +15,7 @@
 )]
 
 use crate::app::App;
-use crate::commands::helpers::add_local_event;
+use crate::commands::helpers::add_literal_local_event as add_local_event;
 
 pub(crate) fn cmd_log_quit(app: &mut App, _args: &[String]) {
     app.should_quit = true;

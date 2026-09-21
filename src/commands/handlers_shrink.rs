@@ -53,7 +53,7 @@ pub fn cmd_shrink(app: &mut App, args: &[String]) {
     let cache = Arc::clone(&app.shrink_cache);
     let tx = app.shrink_deliver_tx.clone();
 
-    add_local_event(app, &format!("Shortening {url}…"));
+    super::helpers::add_literal_local_event(app, &format!("Shortening {url}…"));
 
     tokio::spawn(async move {
         // Cache hit returns instantly without an API round-trip;

@@ -1455,26 +1455,27 @@ fn log_search(app: &mut App, query: &str) {
                 }),
             ) {
                 Ok(results) if results.is_empty() => {
+                    let query = super::helpers::escape_format(query);
                     vec![format!(
                         "{C_DIM}No results for \"{C_CMD}{query}{C_DIM}\"{C_RST}"
                     )]
                 }
                 Ok(results) => {
-                    let mut out = vec![divider(&format!("Search: {query}"))];
+                    let mut out = vec![divider(&format!("Search: {}", super::helpers::escape_format(query)))];
                     for msg in &results {
                         let ts = chrono::DateTime::from_timestamp(msg.timestamp, 0)
                             .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
                             .unwrap_or_default();
-                        let nick = msg.nick.as_deref().unwrap_or("*");
+                        let nick = super::helpers::escape_format(msg.nick.as_deref().unwrap_or("*"));
                         out.push(format!(
                             "  {C_DIM}{ts}{C_RST} {C_CMD}<{nick}>{C_RST} {C_TEXT}{}{C_RST}",
-                            msg.text
+                            super::helpers::escape_format(&msg.text)
                         ));
                     }
                     out.push(format!("  {C_DIM}{} result(s){C_RST}", results.len()));
                     out
                 }
-                Err(e) => vec![format!("{C_ERR}Search failed: {e}{C_RST}")],
+                Err(e) => vec![format!("{C_ERR}Search failed: {}{C_RST}", super::helpers::escape_format(&e.to_string()))],
             }
         } else {
             vec![format!("{C_ERR}Failed to lock database{C_RST}")]
@@ -2325,5 +2326,32 @@ mod ignore_runtime_tests {
         assert!(!should_ignore(&app.state.ignores, "alice", None, None, &IgnoreLevel::Notices, Some("#other")));
         unignore_with_path(&mut app, &["missing".into()], &path);
         assert_eq!(app.state.ignores.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod literal_search_tests {
+    #[tokio::test]
+    async fn sql_search_results_preserve_literal_percent_text() {
+        use crate::state::buffer::{Buffer, BufferType};
+        for mode in [0, 1, 2] {
+            let mut app = crate::app::input::submit_typing_tests::test_app();
+            let storage = crate::storage::Storage::in_memory();
+            let original = "needle 100% %N %Zabcdef https://example.org/a%20b $0";
+            storage.db.lock().unwrap().execute("INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text) VALUES ('fixture', 'net', '#test', 1, 'message', 'nick%N', ?1)", [original]).unwrap();
+            let conn = if mode == 0 { "net" } else { "_log_net" };
+            let kind = if mode == 0 { BufferType::Channel } else { BufferType::Log };
+            app.state.add_buffer(Buffer::for_test(conn, kind, "#test"));
+            app.state.set_active_buffer(&format!("{conn}/#test"));
+            app.log_db = Some(crate::storage::LogDb { db: std::sync::Arc::clone(&storage.db), crypto_key: None, has_fts: mode == 1 });
+            app.storage = Some(storage);
+            if mode == 0 {
+                super::log_search(&mut app, "needle");
+            } else {
+                crate::commands::handlers_logs::cmd_log_search(&mut app, &["needle".into()]);
+            }
+            let rendered: Vec<String> = app.state.active_buffer().unwrap().messages.iter().map(|row| crate::theme::parse_format_string(&row.text, &[]).iter().map(|span| span.text.as_str()).collect()).collect();
+            assert!(rendered.iter().any(|line| line.contains(original) && line.contains("<nick%N>")), "{rendered:?}");
+        }
     }
 }
