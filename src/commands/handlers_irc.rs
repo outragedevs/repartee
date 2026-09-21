@@ -1007,7 +1007,17 @@ pub(crate) fn cmd_cycle(app: &mut App, args: &[String]) {
 
 /// Create a query buffer for `target` if one doesn't already exist.
 /// When `skip_channels` is true, channel targets are not created (used by /msg).
-fn ensure_query_buffer(app: &mut App, conn_id: &str, target: &str, skip_channels: bool) -> String {
+fn ensure_query_buffer(app: &mut App, conn_id: &str, target: &str, skip_channels: bool) -> (String, String) {
+    let mapping = app.state.connections.get(conn_id)
+        .map_or("rfc1459", |connection| connection.isupport_parsed.casemapping());
+    let folded = crate::irc::isupport::casefold(target, mapping);
+    if let Some(buffer) = app.state.buffers.values().find(|buffer| {
+        buffer.connection_id == conn_id
+            && buffer.buffer_type == crate::state::buffer::BufferType::Query
+            && crate::irc::isupport::casefold(&buffer.name, mapping) == folded
+    }) {
+        return (buffer.id.clone(), buffer.name.clone());
+    }
     let buffer_id = crate::state::buffer::make_buffer_id(conn_id, target);
     let should_create = !app.state.buffers.contains_key(&buffer_id)
         && (!skip_channels || !crate::irc::formatting::is_channel(target));
@@ -1038,7 +1048,7 @@ fn ensure_query_buffer(app: &mut App, conn_id: &str, target: &str, skip_channels
             metadata: crate::irc::metadata::Flags::default(),
         });
     }
-    buffer_id
+    (buffer_id, target.to_string())
 }
 
 // === Messaging ===
@@ -1108,7 +1118,7 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
     };
 
     // Create query buffer if needed (skip channels for /msg)
-    let buffer_id = ensure_query_buffer(app, &conn_id, target, true);
+    let (buffer_id, target) = ensure_query_buffer(app, &conn_id, target, true);
 
     // Route through the outbound E2E gate — `/msg <peer> <text>` to an
     // E2E-enabled conversation must encrypt (or refuse, fail-closed)
@@ -1116,7 +1126,7 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
     // handles the IRC byte-split, REKEY drain, and local echo.
     app.send_gated_message(
         &conn_id,
-        target,
+        &target,
         text,
         Some(crate::app::e2e_gate::GatedEcho {
             buffer_id: &buffer_id,
@@ -1142,7 +1152,7 @@ pub(crate) fn cmd_query(app: &mut App, args: &[String]) {
     };
 
     // Create query buffer if it doesn't exist (allow channels for /query)
-    let buffer_id = ensure_query_buffer(app, &conn_id, target, false);
+    let (buffer_id, target) = ensure_query_buffer(app, &conn_id, target, false);
 
     // Switch to the query buffer
     app.state.set_active_buffer(&buffer_id);
@@ -1156,7 +1166,7 @@ pub(crate) fn cmd_query(app: &mut App, args: &[String]) {
         let text = &args[1];
         app.send_gated_message(
             &conn_id,
-            target,
+            &target,
             text,
             Some(crate::app::e2e_gate::GatedEcho {
                 buffer_id: &buffer_id,
@@ -2069,5 +2079,44 @@ mod links_wire_tests {
             assert_eq!(captured.last().unwrap().to_string().trim_end(), expected);
         }
         assert_eq!(sender.captured().len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod query_casemapping_tests {
+    #[tokio::test]
+    async fn query_reuses_equivalent_nicks_only_within_the_network() {
+        use crate::irc::{IrcHandle, IrcSender};
+        for (mapping, first, second, equivalent) in [
+            ("rfc1459", "nick[", "nick{", true),
+            ("rfc1459", "nick^", "nick~", true),
+            ("strict-rfc1459", "nick^", "nick~", false),
+            ("ascii", "nick[", "nick{", false),
+        ] {
+            let mut app = crate::app::input::submit_typing_tests::test_app();
+            let config = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]").unwrap();
+            for network in ["one", "two"] {
+                app.setup_connection(network, &config);
+                app.state.connections.get_mut(network).unwrap().isupport_parsed.parse_tokens(&[&format!("CASEMAPPING={mapping}")]);
+                app.irc_handles.insert(network.into(), IrcHandle::new(network.into(), IrcSender::capturing(0), None, None));
+                app.state.set_active_buffer(&format!("{network}/fixture"));
+                app.handle_submit(&format!("/query {first}"));
+                let initial = app.state.active_buffer_id.clone().unwrap();
+                app.handle_submit(&format!("/query {second}"));
+                assert_eq!(app.state.active_buffer_id.as_ref() == Some(&initial), equivalent);
+                let active = app.state.active_buffer_id.clone().unwrap();
+                assert_eq!(app.state.buffers[&active].connection_id, network);
+                app.handle_submit(&format!("/msg {second} hello"));
+                assert_eq!(app.state.buffers[&active].messages.back().unwrap().text, "hello");
+                app.handle_submit(&format!("/query {second} again"));
+                let sent = app.irc_handles[network].sender().captured();
+                for message in sent.iter().rev().take(2) {
+                    let ::irc::proto::Command::PRIVMSG(target, _) = &message.command else { panic!("expected private message") };
+                    assert_eq!(target, if equivalent { first } else { second });
+                }
+                let count = app.state.buffers.values().filter(|buffer| buffer.connection_id == network && buffer.buffer_type == crate::state::buffer::BufferType::Query).count();
+                assert_eq!(count, if equivalent { 1 } else { 2 });
+            }
+        }
     }
 }
