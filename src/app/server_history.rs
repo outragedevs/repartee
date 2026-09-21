@@ -832,6 +832,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clear_discards_inflight_history_display() {
+        let mut app = app();
+        app.state.scrollback_limit = 1;
+        let mut message = crate::state::events::tests::make_test_message(&mut app.state, "current");
+        message.timestamp = chrono::DateTime::from_timestamp_millis(1_800_000_000_000).unwrap();
+        app.state.add_message("account/#test", message);
+        assert!(app.fetch_older_via_chathistory("account/#test"));
+        assert!(app.state.buffers["account/#test"].pin_backlog);
+        app.state.set_active_buffer("account/#test");
+        crate::commands::handlers_ui::cmd_clear(&mut app, &[]);
+        app.state.pending_web_events.clear();
+        let batch = crate::irc::batch::BatchInfo {
+            message_order: Vec::new(),
+            redaction_refs: Vec::new(),
+            batch_type: "CHATHISTORY".into(),
+            params: vec!["#test".into()],
+            started_at: Instant::now(),
+            opener_tags: None,
+            dropped_messages: 0,
+            messages: vec![
+                "@time=2024-01-01T00:00:00.000Z;msgid=m1 :peer!u@h PRIVMSG #test :older"
+                    .parse()
+                    .unwrap(),
+            ],
+        };
+        crate::irc::batch::process_completed_batch(&mut app.state, "account", &batch, true);
+        let buffer = &app.state.buffers["account/#test"];
+        assert!(buffer.messages.is_empty());
+        assert!(!app.state.pending_web_events.iter().any(|event| matches!(event, crate::web::protocol::WebEvent::InsertMessage { .. })));
+        let history = &mut app.state.connections.get_mut("account").unwrap().chathistory;
+        assert!(history.display_suppressed("#test"));
+        assert!(history.mark_in_flight("#test", crate::irc::chathistory::Direction::Latest, 50));
+        assert!(!history.display_suppressed("#test"));
+    }
+
+    #[tokio::test]
     async fn late_history_does_not_repin_a_collapsed_buffer() {
         let mut app = app();
         app.state.scrollback_limit = 1;

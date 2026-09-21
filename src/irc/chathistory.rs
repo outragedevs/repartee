@@ -126,6 +126,7 @@ pub struct HistoryState {
     /// ever opening a batch (see [`HistoryState::clear_stale`]).
     in_flight: HashMap<(String, Direction), (usize, Instant)>,
     ambiguous_reply: bool,
+    cleared_display_targets: HashSet<String>,
     /// Targets (lowercased) whose `BEFORE` history the server has exhausted.
     before_exhausted: HashSet<String>,
     /// Per-target oldest point we have pulled via chathistory: the oldest
@@ -249,10 +250,21 @@ impl HistoryState {
     /// Returns `false` if an identical request was already tracked (caller
     /// should not send a duplicate).
     pub fn mark_in_flight(&mut self, target: &str, dir: Direction, limit: usize) -> bool {
+        self.cleared_display_targets.remove(&target.to_ascii_lowercase());
         self.completion.remove(&target.to_ascii_lowercase());
         self.in_flight
             .insert((target.to_ascii_lowercase(), dir), (limit, Instant::now()))
             .is_none()
+    }
+
+    pub fn suppress_pending_display(&mut self, target: &str) {
+        if self.in_flight_direction(target).is_some() {
+            self.cleared_display_targets.insert(target.to_ascii_lowercase());
+        }
+    }
+
+    pub fn display_suppressed(&self, target: &str) -> bool {
+        self.cleared_display_targets.contains(&target.to_ascii_lowercase())
     }
 
     /// Release in-flight markers older than `timeout` and return the affected
