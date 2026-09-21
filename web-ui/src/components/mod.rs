@@ -14,3 +14,5 @@ pub mod topic_bar;
 pub mod wizard;
 
 pub mod upload;
+
+pub mod settings;

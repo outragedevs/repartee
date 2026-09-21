@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WebEvent {
+    SettingsSnapshot { fields: Vec<crate::settings_model::SettingField>, session_id: String },
+    SettingsSaved { error: Option<String>, session_id: String },
     SyncInit {
         buffers: Vec<BufferMeta>,
         connections: Vec<ConnectionMeta>,
@@ -203,6 +205,8 @@ pub enum WebEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WebCommand {
+    GetSettings,
+    SaveSettings { changes: Vec<crate::settings_model::SettingChange> },
     SendMessage {
         buffer_id: String,
         text: String,

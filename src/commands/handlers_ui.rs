@@ -1191,14 +1191,13 @@ pub(crate) fn cmd_emote(app: &mut App, args: &[String]) {
     }
 }
 
-/// `/wizard <kind> [args]` — open a guided popup form. Currently only
-/// `server [id]` (add, or edit an existing server pre-filled).
 pub(crate) fn cmd_wizard(app: &mut App, args: &[String]) {
     match args.first().map(String::as_str) {
+        None => app.open_settings(),
         Some("server") => app.open_server_wizard(args.get(1).map(String::as_str)),
         _ => add_local_event(
             app,
-            &format!("{C_TEXT}Usage: /wizard server [id]  — open the add/edit-server form{C_RST}"),
+            &format!("{C_TEXT}Usage: /wizard or /wizard server [id]{C_RST}"),
         ),
     }
 }

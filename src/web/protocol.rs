@@ -11,6 +11,8 @@ const fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WebEvent {
+    SettingsSnapshot { fields: Vec<crate::settings_model::SettingField>, session_id: String },
+    SettingsSaved { error: Option<String>, session_id: String },
     WebPush {
         connection_id: String,
         request_id: String,
@@ -255,6 +257,8 @@ pub enum WebEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WebCommand {
+    GetSettings,
+    SaveSettings { changes: Vec<crate::settings_model::SettingChange> },
     WebPush(Box<crate::irc::webpush::WebRequest>),
     #[serde(skip)]
     UploadFile { submission: std::sync::Arc<std::sync::Mutex<Option<super::upload::Submission>>> },

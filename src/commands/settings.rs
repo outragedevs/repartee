@@ -7,926 +7,12 @@ use crate::config::AppConfig;
 
 use super::types::{C_CMD, C_DIM, C_ERR, C_HEADER, C_OK, C_RST, divider};
 
-/// Result of resolving a dot-notation config path.
-struct Resolved {
-    value: String,
-    is_credential: bool,
-}
-
-/// Get a config value by dot-notation path.
-#[expect(
-    clippy::too_many_lines,
-    reason = "flat match dispatcher — one arm per config field"
-)]
-fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
-    let parts: Vec<&str> = path.split('.').collect();
-    if parts.len() < 2 {
-        return None;
-    }
-
-    match parts[0] {
-        "general" => {
-            let val = match parts[1] {
-                "nick" => config.general.nick.clone(),
-                "username" => config.general.username.clone(),
-                "realname" => config.general.realname.clone(),
-                "theme" => config.general.theme.clone(),
-                "timestamp_format" => config.general.timestamp_format.clone(),
-                "flood_protection" => config.general.flood_protection.to_string(),
-                "flood_exemptions" => config.general.flood_exemptions.join(", "),
-                "ctcp_version" => config.general.ctcp_version.clone(),
-                "default_bind_ip" => config.general.default_bind_ip.clone().unwrap_or_default(),
-                _ => return None,
-            };
-            Some(Resolved {
-                value: val,
-                is_credential: false,
-            })
-        }
-        "display" => {
-            let val = match parts[1] {
-                "nick_column_width" => config.display.nick_column_width.to_string(),
-                "nick_max_length" => config.display.nick_max_length.to_string(),
-                "nick_alignment" => format!("{:?}", config.display.nick_alignment).to_lowercase(),
-                "nick_truncation" => config.display.nick_truncation.to_string(),
-                "show_timestamps" => config.display.show_timestamps.to_string(),
-                "scrollback_lines" => config.display.scrollback_lines.to_string(),
-                "backlog_lines" => config.display.backlog_lines.to_string(),
-                "nick_colors" => config.display.nick_colors.to_string(),
-                "nick_colors_in_nicklist" => config.display.nick_colors_in_nicklist.to_string(),
-                "nick_color_saturation" => config.display.nick_color_saturation.to_string(),
-                "nick_color_lightness" => config.display.nick_color_lightness.to_string(),
-                "mentions_buffer" => config.display.mentions_buffer.to_string(),
-                _ => return None,
-            };
-            Some(Resolved {
-                value: val,
-                is_credential: false,
-            })
-        }
-        "sidepanel" if parts.len() >= 3 => {
-            let panel = match parts[1] {
-                "left" => &config.sidepanel.left,
-                "right" => &config.sidepanel.right,
-                _ => return None,
-            };
-            let val = match parts[2] {
-                "width" => panel.width.to_string(),
-                "visible" => panel.visible.to_string(),
-                _ => return None,
-            };
-            Some(Resolved {
-                value: val,
-                is_credential: false,
-            })
-        }
-        "statusbar" => {
-            let val = match parts[1] {
-                "enabled" => config.statusbar.enabled.to_string(),
-                "separator" => config.statusbar.separator.clone(),
-                "prompt" => config.statusbar.prompt.clone(),
-                "background" => config.statusbar.background.clone(),
-                "text_color" => config.statusbar.text_color.clone(),
-                "accent_color" => config.statusbar.accent_color.clone(),
-                "muted_color" => config.statusbar.muted_color.clone(),
-                "dim_color" => config.statusbar.dim_color.clone(),
-                "prompt_color" => config.statusbar.prompt_color.clone(),
-                "input_color" => config.statusbar.input_color.clone(),
-                "cursor_color" => config.statusbar.cursor_color.clone(),
-                _ => return None,
-            };
-            Some(Resolved {
-                value: val,
-                is_credential: false,
-            })
-        }
-        "image_preview" => {
-            let val = match parts[1] {
-                "enabled" => config.image_preview.enabled.to_string(),
-                "inline" => config.image_preview.inline.to_string(),
-                "max_width" => config.image_preview.max_width.to_string(),
-                "max_height" => config.image_preview.max_height.to_string(),
-                "cache_max_mb" => config.image_preview.cache_max_mb.to_string(),
-                "cache_max_days" => config.image_preview.cache_max_days.to_string(),
-                "fetch_timeout" => config.image_preview.fetch_timeout.to_string(),
-                "max_file_size" => config.image_preview.max_file_size.to_string(),
-                "protocol" => config.image_preview.protocol.clone(),
-                "kitty_format" => config.image_preview.kitty_format.clone(),
-                _ => return None,
-            };
-            Some(Resolved {
-                value: val,
-                is_credential: false,
-            })
-        }
-        "dcc" => {
-            let val = match parts[1] {
-                "timeout" => config.dcc.timeout.to_string(),
-                "own_ip" => config.dcc.own_ip.clone(),
-                "port_range" => config.dcc.port_range.clone(),
-                "autoaccept_lowports" => config.dcc.autoaccept_lowports.to_string(),
-                "autochat_masks" => config.dcc.autochat_masks.join(", "),
-                "max_connections" => config.dcc.max_connections.to_string(),
-                _ => return None,
-            };
-            Some(Resolved {
-                value: val,
-                is_credential: false,
-            })
-        }
-        "shrink" => {
-            // `api_key` is intentionally never exposed via /set — it
-            // lives in .env and `apply_shrink_credentials` loads it on
-            // startup. Reading it via /set would surface secrets in
-            // command output and tab-completion.
-            let val = match parts[1] {
-                "enabled" => config.shrink.enabled.to_string(),
-                "api_url" => config.shrink.api_url.clone(),
-                "outgoing_enabled" => config.shrink.outgoing_enabled.to_string(),
-                "incoming_enabled" => config.shrink.incoming_enabled.to_string(),
-                "min_url_length" => config.shrink.min_url_length.to_string(),
-                "outgoing_timeout_ms" => config.shrink.outgoing_timeout_ms.to_string(),
-                "incoming_timeout_ms" => config.shrink.incoming_timeout_ms.to_string(),
-                "cache_max_entries" => config.shrink.cache_max_entries.to_string(),
-                _ => return None,
-            };
-            Some(Resolved {
-                value: val,
-                is_credential: false,
-            })
-        }
-        "translate" => {
-            // `buffers` is not exposed here: it is a per-buffer map, managed
-            // by `/translate addin|delin|addout|delout`, and a dotted-path
-            // setter has no sane spelling for it.
-            let val = match parts.as_slice() {
-                ["translate", "enabled"] => config.translate.enabled.to_string(),
-                ["translate", "backend"] => config.translate.backend.clone(),
-                ["translate", "my_lang"] => config.translate.my_lang.clone(),
-                ["translate", "show_original_in"] => config.translate.show_original_in.to_string(),
-                ["translate", "show_original_out"] => {
-                    config.translate.show_original_out.to_string()
-                }
-                ["translate", "timeout_ms"] => config.translate.timeout_ms.to_string(),
-                ["translate", "max_in_flight"] => config.translate.max_in_flight.to_string(),
-                ["translate", "max_queue"] => config.translate.max_queue.to_string(),
-                ["translate", "ai", "preferred_attempt_ms"] => {
-                    config.translate.ai.preferred_attempt_ms.to_string()
-                }
-                _ => return None,
-            };
-            Some(Resolved {
-                value: val,
-                is_credential: false,
-            })
-        }
-        "spellcheck" => {
-            let val = match parts[1] {
-                "enabled" => config.spellcheck.enabled.to_string(),
-                "computing" => config.spellcheck.computing.to_string(),
-                "mode" => config.spellcheck.mode.clone(),
-                "languages" => config.spellcheck.languages.join(", "),
-                "dictionary_dir" => config.spellcheck.dictionary_dir.clone(),
-                _ => return None,
-            };
-            Some(Resolved {
-                value: val,
-                is_credential: false,
-            })
-        }
-        "logging" => {
-            let val = match parts[1] {
-                "event_retention_hours" => config.logging.event_retention_hours.to_string(),
-                "retention_days" => config.logging.retention_days.to_string(),
-                _ => return None,
-            };
-            Some(Resolved {
-                value: val,
-                is_credential: false,
-            })
-        }
-        "web" => {
-            let is_cred = parts[1] == "password";
-            let val = match parts[1] {
-                "enabled" => config.web.enabled.to_string(),
-                "bind_address" => config.web.bind_address.clone(),
-                "port" => config.web.port.to_string(),
-                "tls_cert" => config.web.tls_cert.clone(),
-                "tls_key" => config.web.tls_key.clone(),
-                "timestamp_format" => config.web.timestamp_format.clone(),
-                "line_height" => config.web.line_height.to_string(),
-                "nick_column_width" => config.web.nick_column_width.to_string(),
-                "nick_max_length" => config.web.nick_max_length.to_string(),
-                "theme" => config.web.theme.clone(),
-                "session_days" => config.web.session_days.to_string(),
-                "username" => config.web.username.clone(),
-                "image_previews" => config.web.image_previews.to_string(),
-                "image_previews_max_per_msg" => config.web.image_previews_max_per_msg.to_string(),
-                "thumbnail_cache_mb" => config.web.thumbnail_cache_mb.to_string(),
-                "cloudflare_tunnel_name" => config.web.cloudflare_tunnel_name.clone(),
-                "password" => config.web.password.clone(),
-                _ => return None,
-            };
-            Some(Resolved {
-                value: val,
-                is_credential: is_cred,
-            })
-        }
-        "servers" if parts.len() >= 3 => {
-            let server = config.servers.get(parts[1])?;
-            let is_cred = matches!(parts[2], "password" | "sasl_pass" | "sasl_user");
-            let val = match parts[2] {
-                "label" => server.label.clone(),
-                "address" => server.address.clone(),
-                "port" => server.port.to_string(),
-                "tls" => server.tls.to_string(),
-                "tls_verify" => server.tls_verify.to_string(),
-                "autoconnect" => server.autoconnect.to_string(),
-                "channels" => server.channels.join(", "),
-                "nick" => server.nick.clone().unwrap_or_default(),
-                "username" => server.username.clone().unwrap_or_default(),
-                "realname" => server.realname.clone().unwrap_or_default(),
-                "password" => server.password.clone().unwrap_or_default(),
-                "sasl_user" => server.sasl_user.clone().unwrap_or_default(),
-                "sasl_pass" => server.sasl_pass.clone().unwrap_or_default(),
-                "bind_ip" => server.bind_ip.clone().unwrap_or_default(),
-                "encoding" => server.encoding.clone().unwrap_or_default(),
-                "auto_reconnect" => server
-                    .auto_reconnect
-                    .map_or_else(String::new, |v| v.to_string()),
-                "reconnect_delay" => server
-                    .reconnect_delay
-                    .map_or_else(String::new, |v| v.to_string()),
-                "reconnect_max_retries" => server
-                    .reconnect_max_retries
-                    .map_or_else(String::new, |v| v.to_string()),
-                "autosendcmd" => server.autosendcmd.clone().unwrap_or_default(),
-                "sasl_mechanism" => server.sasl_mechanism.clone().unwrap_or_default(),
-                "client_cert_path" => server.client_cert_path.clone().unwrap_or_default(),
-                "sasl_key_path" => server.sasl_key_path.clone().unwrap_or_default(),
-                "bouncer_network_id" => server.bouncer_network_id.clone().unwrap_or_default(),
-                "bouncer_control" => server.bouncer_control.to_string(),
-                _ => return None,
-            };
-            Some(Resolved {
-                value: val,
-                is_credential: is_cred,
-            })
-        }
-        "emotes" => {
-            let val = match parts[1] {
-                "enabled" => config.emotes.enabled.to_string(),
-                "render" => format!("{:?}", config.emotes.render).to_lowercase(),
-                "lang" => format!("{:?}", config.emotes.lang).to_lowercase(),
-                _ => return None,
-            };
-            Some(Resolved {
-                value: val,
-                is_credential: false,
-            })
-        }
-        "typing" => {
-            let val = match parts[1] {
-                "show" => config.typing.show.to_string(),
-                "send_channels" => config.typing.send_channels.to_string(),
-                "send_queries" => config.typing.send_queries.to_string(),
-                _ => return None,
-            };
-            Some(Resolved {
-                value: val,
-                is_credential: false,
-            })
-        }
-        _ => None,
-    }
-}
-
-/// Set a config value by dot-notation path. Returns true on success.
-#[expect(clippy::too_many_lines)]
-fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(), String> {
-    let parts: Vec<&str> = path.split('.').collect();
-    if parts.len() < 2 {
-        return Err("Invalid path".to_string());
-    }
-
-    if raw.trim().is_empty()
-        && (matches!(path, "general.nick" | "general.username")
-            || (parts[0] == "servers" && parts.len() >= 3 && matches!(parts[2], "label" | "address")))
-    {
-        return Err("This setting cannot be empty".to_string());
-    }
-
-    match parts[0] {
-        "general" => match parts[1] {
-            "nick" => config.general.nick = raw.to_string(),
-            "username" => config.general.username = raw.to_string(),
-            "realname" => config.general.realname = raw.to_string(),
-            "theme" => config.general.theme = raw.to_string(),
-            "timestamp_format" => config.general.timestamp_format = raw.to_string(),
-            "flood_protection" => {
-                config.general.flood_protection = parse_bool(raw)?;
-            }
-            "flood_exemptions" => {
-                config.general.flood_exemptions = split_list(raw);
-            }
-            "ctcp_version" => config.general.ctcp_version = raw.to_string(),
-            "default_bind_ip" => {
-                // Empty string clears the field (matches the
-                // /set ... "" convention used elsewhere for Option<T>).
-                config.general.default_bind_ip = if raw.is_empty() {
-                    None
-                } else {
-                    Some(raw.to_string())
-                };
-            }
-            _ => return Err(format!("Unknown field: {path}")),
-        },
-        "display" => match parts[1] {
-            "nick_column_width" => {
-                config.display.nick_column_width = parse_u16(raw)?;
-            }
-            "nick_max_length" => {
-                config.display.nick_max_length = parse_u16(raw)?;
-            }
-            "nick_alignment" => {
-                config.display.nick_alignment = match raw {
-                    "left" => crate::config::NickAlignment::Left,
-                    "right" => crate::config::NickAlignment::Right,
-                    "center" => crate::config::NickAlignment::Center,
-                    _ => return Err("Expected left, right, or center".to_string()),
-                };
-            }
-            "nick_truncation" => {
-                config.display.nick_truncation = parse_bool(raw)?;
-            }
-            "show_timestamps" => {
-                config.display.show_timestamps = parse_bool(raw)?;
-            }
-            "scrollback_lines" => {
-                config.display.scrollback_lines =
-                    raw.parse().map_err(|_| "Expected a number".to_string())?;
-            }
-            "backlog_lines" => {
-                config.display.backlog_lines =
-                    raw.parse().map_err(|_| "Expected a number".to_string())?;
-            }
-            "nick_colors" => {
-                config.display.nick_colors = parse_bool(raw)?;
-            }
-            "nick_colors_in_nicklist" => {
-                config.display.nick_colors_in_nicklist = parse_bool(raw)?;
-            }
-            "nick_color_saturation" => {
-                let v: f32 = raw.parse().map_err(|_| format!("invalid float: {raw}"))?;
-                if !(0.0..=1.0).contains(&v) {
-                    return Err("saturation must be 0.0–1.0".into());
-                }
-                config.display.nick_color_saturation = v;
-            }
-            "nick_color_lightness" => {
-                let v: f32 = raw.parse().map_err(|_| format!("invalid float: {raw}"))?;
-                if !(0.0..=1.0).contains(&v) {
-                    return Err("lightness must be 0.0–1.0".into());
-                }
-                config.display.nick_color_lightness = v;
-            }
-            "mentions_buffer" => {
-                config.display.mentions_buffer = parse_bool(raw)?;
-            }
-            _ => return Err(format!("Unknown field: {path}")),
-        },
-        "sidepanel" if parts.len() >= 3 => {
-            let panel = match parts[1] {
-                "left" => &mut config.sidepanel.left,
-                "right" => &mut config.sidepanel.right,
-                _ => return Err(format!("Unknown panel: {}", parts[1])),
-            };
-            match parts[2] {
-                "width" => panel.width = parse_u16(raw)?,
-                "visible" => panel.visible = parse_bool(raw)?,
-                _ => return Err(format!("Unknown field: {path}")),
-            }
-        }
-        "statusbar" => match parts[1] {
-            "enabled" => config.statusbar.enabled = parse_bool(raw)?,
-            "separator" => config.statusbar.separator = raw.to_string(),
-            "prompt" => config.statusbar.prompt = raw.to_string(),
-            "background" => config.statusbar.background = raw.to_string(),
-            "text_color" => config.statusbar.text_color = raw.to_string(),
-            "accent_color" => config.statusbar.accent_color = raw.to_string(),
-            "muted_color" => config.statusbar.muted_color = raw.to_string(),
-            "dim_color" => config.statusbar.dim_color = raw.to_string(),
-            "prompt_color" => config.statusbar.prompt_color = raw.to_string(),
-            "input_color" => config.statusbar.input_color = raw.to_string(),
-            "cursor_color" => config.statusbar.cursor_color = raw.to_string(),
-            _ => return Err(format!("Unknown field: {path}")),
-        },
-        "image_preview" => match parts[1] {
-            "enabled" => config.image_preview.enabled = parse_bool(raw)?,
-            "inline" => config.image_preview.inline = parse_bool(raw)?,
-            "max_width" => {
-                config.image_preview.max_width =
-                    raw.parse().map_err(|_| "Expected a number".to_string())?;
-            }
-            "max_height" => {
-                config.image_preview.max_height =
-                    raw.parse().map_err(|_| "Expected a number".to_string())?;
-            }
-            "cache_max_mb" => {
-                config.image_preview.cache_max_mb =
-                    raw.parse().map_err(|_| "Expected a number".to_string())?;
-            }
-            "cache_max_days" => {
-                config.image_preview.cache_max_days =
-                    raw.parse().map_err(|_| "Expected a number".to_string())?;
-            }
-            "fetch_timeout" => {
-                config.image_preview.fetch_timeout =
-                    raw.parse().map_err(|_| "Expected a number".to_string())?;
-            }
-            "max_file_size" => {
-                config.image_preview.max_file_size =
-                    raw.parse().map_err(|_| "Expected a number".to_string())?;
-            }
-            "protocol" => config.image_preview.protocol = raw.to_string(),
-            "kitty_format" => config.image_preview.kitty_format = raw.to_string(),
-            _ => return Err(format!("Unknown field: {path}")),
-        },
-        "dcc" => match parts[1] {
-            "timeout" => {
-                config.dcc.timeout = raw.parse().map_err(|_| "Expected a number".to_string())?;
-            }
-            "own_ip" => config.dcc.own_ip = raw.to_string(),
-            "port_range" => config.dcc.port_range = raw.to_string(),
-            "autoaccept_lowports" => {
-                config.dcc.autoaccept_lowports = parse_bool(raw)?;
-            }
-            "autochat_masks" => {
-                config.dcc.autochat_masks = split_list(raw);
-            }
-            "max_connections" => {
-                config.dcc.max_connections =
-                    raw.parse().map_err(|_| "Expected a number".to_string())?;
-            }
-            _ => return Err(format!("Unknown field: {path}")),
-        },
-        "translate" => match parts.as_slice() {
-            ["translate", "enabled"] => config.translate.enabled = parse_bool(raw)?,
-            ["translate", "backend"] => {
-                // Rejected rather than stored-and-ignored: an unknown name
-                // installs nothing, and a config that asks for translation
-                // and silently does none is the failure this whole setting
-                // exists to make visible.
-                let want = raw.trim().to_ascii_lowercase();
-                if !crate::translate::backend::BACKEND_NAMES.contains(&want.as_str()) {
-                    return Err(format!(
-                        "translate.backend must be one of: {}",
-                        crate::translate::backend::BACKEND_NAMES.join(", ")
-                    ));
-                }
-                config.translate.backend = want;
-            }
-            ["translate", "my_lang"] => {
-                if raw.trim().is_empty() {
-                    return Err("translate.my_lang must not be empty".to_string());
-                }
-                config.translate.my_lang = raw.trim().to_lowercase();
-            }
-            ["translate", "show_original_in"] => {
-                config.translate.show_original_in = parse_bool(raw)?;
-            }
-            ["translate", "show_original_out"] => {
-                config.translate.show_original_out = parse_bool(raw)?;
-            }
-            ["translate", "timeout_ms"] => {
-                let v: u64 = raw.parse().map_err(|_| "Expected a number".to_string())?;
-                // Floor 500: below that a healthy provider would be cut off
-                // mid-flight and every line would render untranslated, which
-                // looks like a broken feature rather than a tight budget.
-                if v < 500 {
-                    return Err("translate.timeout_ms must be at least 500".to_string());
-                }
-                config.translate.timeout_ms = v;
-            }
-            ["translate", "max_in_flight"] => {
-                let v: u32 = raw.parse().map_err(|_| "Expected a number".to_string())?;
-                if v < 1 {
-                    return Err("translate.max_in_flight must be at least 1".to_string());
-                }
-                config.translate.max_in_flight = v;
-            }
-            ["translate", "max_queue"] => {
-                let v: u32 = raw.parse().map_err(|_| "Expected a number".to_string())?;
-                if v < 1 {
-                    return Err("translate.max_queue must be at least 1".to_string());
-                }
-                config.translate.max_queue = v;
-            }
-            ["translate", "ai", "preferred_attempt_ms"] => {
-                let v: u64 = raw.parse().map_err(|_| "Expected a number".to_string())?;
-                if v < 500 {
-                    return Err(
-                        "translate.ai.preferred_attempt_ms must be at least 500".to_string()
-                    );
-                }
-                config.translate.ai.preferred_attempt_ms = v;
-            }
-            _ => return Err(format!("Unknown field: {path}")),
-        },
-        "shrink" => match parts[1] {
-            "enabled" => config.shrink.enabled = parse_bool(raw)?,
-            "api_url" => config.shrink.api_url = raw.to_string(),
-            "outgoing_enabled" => config.shrink.outgoing_enabled = parse_bool(raw)?,
-            "incoming_enabled" => config.shrink.incoming_enabled = parse_bool(raw)?,
-            "min_url_length" => {
-                let v: u32 = raw.parse().map_err(|_| "Expected a number".to_string())?;
-                // Floor 25: shorter thresholds risk shortening URLs
-                // that aren't actually long enough to be worth it, and
-                // each shrink is an HTTP round-trip to the API.
-                if v < 25 {
-                    return Err("shrink.min_url_length must be at least 25".to_string());
-                }
-                config.shrink.min_url_length = v;
-            }
-            "outgoing_timeout_ms" => {
-                // Floor at 100 ms. Anything lower makes
-                // tokio::time::timeout fire before reqwest can
-                // even open a TCP connection, so every shrink
-                // returns Timeout and the user silently never
-                // sees a shortened URL.
-                let v: u64 = raw.parse().map_err(|_| "Expected a number".to_string())?;
-                if v < 100 {
-                    return Err("shrink.outgoing_timeout_ms must be at least 100".to_string());
-                }
-                config.shrink.outgoing_timeout_ms = v;
-            }
-            "incoming_timeout_ms" => {
-                let v: u64 = raw.parse().map_err(|_| "Expected a number".to_string())?;
-                if v < 100 {
-                    return Err("shrink.incoming_timeout_ms must be at least 100".to_string());
-                }
-                config.shrink.incoming_timeout_ms = v;
-            }
-            "cache_max_entries" => {
-                // Floor at 1. ShrinkCache::new internally clamps
-                // 0 → 1 anyway; making /set reject 0 explicitly
-                // avoids the surprise of `/set` reporting `= 0`
-                // while the live cache silently uses 1.
-                let v: u32 = raw.parse().map_err(|_| "Expected a number".to_string())?;
-                if v == 0 {
-                    return Err("shrink.cache_max_entries must be at least 1".to_string());
-                }
-                config.shrink.cache_max_entries = v;
-            }
-            _ => return Err(format!("Unknown field: {path}")),
-        },
-        "spellcheck" => match parts[1] {
-            "enabled" => config.spellcheck.enabled = parse_bool(raw)?,
-            "computing" => config.spellcheck.computing = parse_bool(raw)?,
-            "mode" => {
-                let mode = raw.to_lowercase();
-                if mode != "replace" && mode != "highlight" {
-                    return Err("Expected 'replace' or 'highlight'".to_string());
-                }
-                config.spellcheck.mode = mode;
-            }
-            "languages" => {
-                config.spellcheck.languages =
-                    split_list(raw);
-            }
-            "dictionary_dir" => config.spellcheck.dictionary_dir = raw.to_string(),
-            _ => return Err(format!("Unknown field: {path}")),
-        },
-        "logging" => match parts[1] {
-            "event_retention_hours" => {
-                config.logging.event_retention_hours =
-                    raw.parse().map_err(|_| "Expected a number".to_string())?;
-            }
-            "retention_days" => {
-                config.logging.retention_days =
-                    raw.parse().map_err(|_| "Expected a number".to_string())?;
-            }
-            _ => return Err(format!("Unknown field: {path}")),
-        },
-        "web" => match parts[1] {
-            "enabled" => config.web.enabled = parse_bool(raw)?,
-            "bind_address" => config.web.bind_address = raw.to_string(),
-            "port" => config.web.port = parse_u16(raw)?,
-            "tls_cert" => config.web.tls_cert = raw.to_string(),
-            "tls_key" => config.web.tls_key = raw.to_string(),
-            "timestamp_format" => config.web.timestamp_format = raw.to_string(),
-            "line_height" => {
-                config.web.line_height = raw
-                    .parse()
-                    .map_err(|_| "Expected a decimal number".to_string())?;
-            }
-            "nick_column_width" => {
-                config.web.nick_column_width =
-                    raw.parse().map_err(|_| "Expected a number".to_string())?;
-            }
-            "nick_max_length" => {
-                config.web.nick_max_length =
-                    raw.parse().map_err(|_| "Expected a number".to_string())?;
-            }
-            "theme" => config.web.theme = raw.to_string(),
-            "session_days" => {
-                config.web.session_days = raw
-                    .parse()
-                    .map_err(|_| "Expected a positive integer (days)".to_string())?;
-            }
-            "username" => config.web.username = raw.to_string(),
-            "image_previews" => config.web.image_previews = parse_bool(raw)?,
-            "image_previews_max_per_msg" => {
-                config.web.image_previews_max_per_msg =
-                    raw.parse().map_err(|_| "Expected a number".to_string())?;
-            }
-            "thumbnail_cache_mb" => {
-                config.web.thumbnail_cache_mb =
-                    raw.parse().map_err(|_| "Expected a number".to_string())?;
-            }
-            "cloudflare_tunnel_name" => config.web.cloudflare_tunnel_name = raw.to_string(),
-            "password" => config.web.password = raw.to_string(),
-            _ => return Err(format!("Unknown field: {path}")),
-        },
-        "servers" if parts.len() >= 3 => {
-            let server = config
-                .servers
-                .get_mut(parts[1])
-                .ok_or_else(|| format!("Unknown server: {}", parts[1]))?;
-            match parts[2] {
-                "label" => server.label = raw.to_string(),
-                "address" => server.address = raw.to_string(),
-                "port" => server.port = parse_u16(raw)?,
-                "tls" => server.tls = parse_bool(raw)?,
-                "tls_verify" => server.tls_verify = parse_bool(raw)?,
-                "autoconnect" => server.autoconnect = parse_bool(raw)?,
-                "channels" => {
-                    server.channels = split_list(raw);
-                }
-                "nick" => server.nick = (!raw.is_empty()).then(|| raw.to_string()),
-                "username" => server.username = (!raw.is_empty()).then(|| raw.to_string()),
-                "realname" => server.realname = (!raw.is_empty()).then(|| raw.to_string()),
-                "password" => server.password = (!raw.is_empty()).then(|| raw.to_string()),
-                "sasl_user" => server.sasl_user = (!raw.is_empty()).then(|| raw.to_string()),
-                "sasl_pass" => server.sasl_pass = (!raw.is_empty()).then(|| raw.to_string()),
-                "bind_ip" => server.bind_ip = (!raw.is_empty()).then(|| raw.to_string()),
-                "encoding" => server.encoding = (!raw.is_empty()).then(|| raw.to_string()),
-                "auto_reconnect" => server.auto_reconnect = (!raw.is_empty()).then(|| parse_bool(raw)).transpose()?,
-                "reconnect_delay" => {
-                    server.reconnect_delay = (!raw.is_empty()).then(|| raw.parse()
-                        .map_err(|_| "Expected a positive integer".to_string())).transpose()?;
-                }
-                "reconnect_max_retries" => {
-                    server.reconnect_max_retries = (!raw.is_empty()).then(|| raw.parse()
-                        .map_err(|_| "Expected a positive integer".to_string())).transpose()?;
-                }
-                "autosendcmd" => server.autosendcmd = (!raw.is_empty()).then(|| raw.to_string()),
-                "sasl_mechanism" => server.sasl_mechanism = (!raw.is_empty()).then(|| parse_sasl_mechanism(raw)).transpose()?,
-                "client_cert_path" => server.client_cert_path = (!raw.is_empty()).then(|| raw.to_string()),
-                "sasl_key_path" => server.sasl_key_path = (!raw.is_empty()).then(|| raw.to_string()),
-                "bouncer_control" => server.bouncer_control = parse_bool(raw)?,
-                "bouncer_network_id" => {
-                    server.bouncer_network_id = if raw.is_empty() {
-                        None
-                    } else {
-                        Some(crate::irc::bouncer::normalize_network_id(raw)?)
-                    };
-                }
-                _ => return Err(format!("Unknown field: {path}")),
-            }
-        }
-        "emotes" => match parts[1] {
-            "enabled" => config.emotes.enabled = parse_bool(raw)?,
-            "render" => {
-                config.emotes.render = match raw.to_ascii_lowercase().as_str() {
-                    "graphical" => crate::config::RenderMode::Graphical,
-                    "text" => crate::config::RenderMode::Text,
-                    "off" => crate::config::RenderMode::Off,
-                    _ => return Err("Expected graphical, text, or off".to_string()),
-                };
-            }
-            "lang" => {
-                config.emotes.lang = match raw.to_ascii_lowercase().as_str() {
-                    "en" => crate::config::EmoteLang::En,
-                    "pl" => crate::config::EmoteLang::Pl,
-                    _ => return Err("Expected en or pl".to_string()),
-                };
-            }
-            _ => return Err(format!("Unknown field: {path}")),
-        },
-        "typing" => match parts[1] {
-            "show" => config.typing.show = parse_bool(raw)?,
-            "send_channels" => config.typing.send_channels = parse_bool(raw)?,
-            "send_queries" => config.typing.send_queries = parse_bool(raw)?,
-            _ => return Err(format!("Unknown field: {path}")),
-        },
-        _ => return Err(format!("Unknown section: {}", parts[0])),
-    }
-
-    Ok(())
-}
-
-fn parse_bool(raw: &str) -> Result<bool, String> {
-    match raw {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        _ => Err("Expected true or false".to_string()),
-    }
-}
-
-fn parse_u16(raw: &str) -> Result<u16, String> {
-    raw.parse().map_err(|_| "Expected a number".to_string())
-}
-
-/// Validate a `sasl_mechanism` value, normalising it to its canonical spelling.
-///
-/// Unvalidated, a typo here fails silently at connect time: the mechanism does
-/// not resolve, SASL is skipped, and the user is left staring at an
-/// unauthenticated connection with no hint that `SCRAM-SHA256` is not a name.
-pub fn parse_sasl_mechanism(raw: &str) -> Result<String, String> {
-    crate::irc::SaslMechanism::from_name(raw)
-        .map(|m| m.name().to_string())
-        .ok_or_else(|| {
-            let names: Vec<&str> = crate::irc::SASL_MECHANISMS
-                .iter()
-                .map(|m| m.name())
-                .collect();
-            format!("Expected one of: {}", names.join(", "))
-        })
-}
-
-fn split_list(raw: &str) -> Vec<String> {
-    raw.split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
-fn server_password_env_key(path: &str) -> Option<String> {
-    let mut parts = path.split('.');
-    let (Some("servers"), Some(server_id), Some(field), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return None;
-    };
-    let suffix = match field {
-        "password" => "PASSWORD",
-        "sasl_pass" => "SASL_PASS",
-        _ => return None,
-    };
-    Some(format!("{}_{suffix}", server_id.to_uppercase()))
-}
-
-// === Available setting paths for tab completion ===
-
-/// Base setting paths (without server-specific ones).
-const BASE_PATHS: &[&str] = &[
-    "general.nick",
-    "general.username",
-    "general.realname",
-    "general.theme",
-    "general.timestamp_format",
-    "general.flood_protection",
-    "general.flood_exemptions",
-    "general.ctcp_version",
-    "general.default_bind_ip",
-    "display.nick_column_width",
-    "display.nick_max_length",
-    "display.nick_alignment",
-    "display.nick_truncation",
-    "display.show_timestamps",
-    "display.scrollback_lines",
-    "display.backlog_lines",
-    "display.nick_colors",
-    "display.nick_colors_in_nicklist",
-    "display.nick_color_saturation",
-    "display.nick_color_lightness",
-    "display.mentions_buffer",
-    "sidepanel.left.width",
-    "sidepanel.left.visible",
-    "sidepanel.right.width",
-    "sidepanel.right.visible",
-    "statusbar.enabled",
-    "statusbar.separator",
-    "statusbar.prompt",
-    "statusbar.background",
-    "statusbar.text_color",
-    "statusbar.accent_color",
-    "statusbar.muted_color",
-    "statusbar.dim_color",
-    "statusbar.prompt_color",
-    "statusbar.input_color",
-    "statusbar.cursor_color",
-    "image_preview.enabled",
-    "image_preview.inline",
-    "image_preview.max_width",
-    "image_preview.max_height",
-    "image_preview.cache_max_mb",
-    "image_preview.cache_max_days",
-    "image_preview.fetch_timeout",
-    "image_preview.max_file_size",
-    "image_preview.protocol",
-    "image_preview.kitty_format",
-    "dcc.timeout",
-    "dcc.own_ip",
-    "dcc.port_range",
-    "dcc.autoaccept_lowports",
-    "dcc.autochat_masks",
-    "dcc.max_connections",
-    "shrink.enabled",
-    "shrink.api_url",
-    "shrink.outgoing_enabled",
-    "shrink.incoming_enabled",
-    "shrink.min_url_length",
-    "shrink.outgoing_timeout_ms",
-    "shrink.incoming_timeout_ms",
-    "shrink.cache_max_entries",
-    "logging.event_retention_hours",
-    "logging.retention_days",
-    "spellcheck.enabled",
-    "spellcheck.computing",
-    "spellcheck.mode",
-    "spellcheck.languages",
-    "spellcheck.dictionary_dir",
-    "web.enabled",
-    "web.bind_address",
-    "web.port",
-    "web.tls_cert",
-    "web.tls_key",
-    "web.timestamp_format",
-    "web.line_height",
-    "web.nick_column_width",
-    "web.nick_max_length",
-    "web.theme",
-    "web.session_days",
-    "web.username",
-    "web.image_previews",
-    "web.image_previews_max_per_msg",
-    "web.thumbnail_cache_mb",
-    "web.cloudflare_tunnel_name",
-    "web.password",
-    "emotes.enabled",
-    "emotes.render",
-    "emotes.lang",
-    "typing.show",
-    "typing.send_channels",
-    "typing.send_queries",
-    // Per-buffer translation settings are deliberately absent: they live in
-    // a map keyed by buffer id and are managed by `/translate add*|del*`,
-    // which a dotted `/set` path has no sane spelling for.
-    "translate.enabled",
-    "translate.backend",
-    "translate.my_lang",
-    "translate.show_original_in",
-    "translate.show_original_out",
-    "translate.timeout_ms",
-    "translate.max_in_flight",
-    "translate.max_queue",
-    "translate.ai.preferred_attempt_ms",
-];
-
-const SERVER_FIELDS: &[&str] = &[
-    "label",
-    "address",
-    "port",
-    "tls",
-    "tls_verify",
-    "autoconnect",
-    "channels",
-    "nick",
-    "username",
-    "realname",
-    "password",
-    "sasl_user",
-    "sasl_pass",
-    "bind_ip",
-    "encoding",
-    "auto_reconnect",
-    "reconnect_delay",
-    "reconnect_max_retries",
-    "autosendcmd",
-    "sasl_mechanism",
-    "client_cert_path",
-    "sasl_key_path",
-    "bouncer_network_id",
-    "bouncer_control",
-];
-
-/// Get all valid setting paths for tab completion.
-pub fn get_setting_paths(config: &AppConfig) -> Vec<String> {
-    let mut paths: Vec<String> = BASE_PATHS
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect();
-    for server_id in config.servers.keys() {
-        for field in SERVER_FIELDS {
-            paths.push(format!("servers.{server_id}.{field}"));
-        }
-    }
-    paths.sort();
-    paths
-}
+#[cfg(test)]
+use crate::config::settings::server_password_env_key;
+#[cfg(test)]
+use crate::config::settings::{BASE_PATHS, set_config_value};
+use crate::config::settings::{SERVER_FIELDS, get_config_value};
+pub use crate::config::settings::{get_setting_paths, parse_sasl_mechanism};
 
 // === Command handler ===
 
@@ -942,12 +28,19 @@ fn decode_setting_value(raw: &str) -> Result<String, &'static str> {
     let mut chars = trimmed[quote.len_utf8()..].char_indices().peekable();
     while let Some((index, ch)) = chars.next() {
         if ch == quote {
-            if !trimmed[quote.len_utf8() + index + ch.len_utf8()..].trim().is_empty() {
+            if !trimmed[quote.len_utf8() + index + ch.len_utf8()..]
+                .trim()
+                .is_empty()
+            {
                 return Err("Unexpected text after the closing quote");
             }
             return Ok(value);
         }
-        if ch == '\\' && chars.peek().is_some_and(|(_, next)| *next == quote || *next == '\\') {
+        if ch == '\\'
+            && chars
+                .peek()
+                .is_some_and(|(_, next)| *next == quote || *next == '\\')
+        {
             value.push(chars.next().expect("peeked character").1);
         } else {
             value.push(ch);
@@ -956,10 +49,6 @@ fn decode_setting_value(raw: &str) -> Result<String, &'static str> {
     Err("Unterminated quoted value")
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "flat dispatcher with per-section side-effects"
-)]
 pub fn cmd_set(app: &mut App, args: &[String]) {
     let ev = super::helpers::add_local_event;
 
@@ -996,282 +85,254 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
     };
     let raw = &value;
 
-    // Validate path exists first
-    if get_config_value(&app.config, path).is_none() {
+    let Some(current) = get_config_value(&app.config, path) else {
         ev(app, &format!("{C_ERR}Unknown setting: {path}{C_RST}"));
         return;
+    };
+    let change = crate::settings_model::SettingChange {
+        path: path.clone(),
+        original: current.value,
+        value: raw.clone(),
+    };
+    match app.save_settings(&[change]) {
+        Ok(()) => {
+            let shown = if current.is_credential {
+                "[credential saved]".into()
+            } else {
+                raw.replace('%', "%%")
+            };
+            ev(app, &format!("{C_OK}{path}{C_RST} = {C_CMD}{shown}{C_RST}"));
+        }
+        Err(error) => ev(app, &format!("{C_ERR}{error}{C_RST}")),
+    }
+}
+
+#[expect(clippy::too_many_lines)]
+pub fn apply_setting_runtime(app: &mut App, path: &str, raw: &str) {
+    let ev = super::helpers::add_local_event;
+    // Hot restart web server when lifecycle settings change.
+    if matches!(
+        path,
+        "web.enabled"
+            | "web.port"
+            | "web.bind_address"
+            | "web.password"
+            | "web.tls_cert"
+            | "web.tls_key"
+            | "web.session_days"
+            | "web.username"
+            | "web.image_previews"
+            | "web.image_previews_max_per_msg"
+            | "web.thumbnail_cache_mb"
+    ) {
+        app.web_restart_pending = true;
+        if path != "web.enabled" || raw == "true" {
+            ev(app, &format!("{C_DIM}Web server will restart...{C_RST}"));
+        }
     }
 
-    match set_config_value(&mut app.config, path, raw) {
-        Ok(()) => {
-            app.inline_previews.invalidate_layout();
-            if path == "image_preview.protocol" {
-                app.refresh_image_protocol();
-            }
-            app.cached_config_toml = None;
-            ev(
+    // Sync runtime state from config
+    if path == "general.flood_protection" {
+        app.state.flood_protection = app.config.general.flood_protection;
+    }
+    if path == "general.flood_exemptions" {
+        app.state
+            .flood_exemptions
+            .clone_from(&app.config.general.flood_exemptions);
+    }
+    if path == "display.scrollback_lines" {
+        app.state.scrollback_limit = app.config.display.scrollback_lines;
+    }
+    if path == "display.nick_color_saturation" {
+        app.state.nick_color_sat = app.config.display.nick_color_saturation;
+    }
+    if path == "display.nick_color_lightness" {
+        app.state.nick_color_lit = app.config.display.nick_color_lightness;
+    }
+
+    // Every `typing.*` switch goes through the one sync `/reload` also
+    // runs, rather than an arm per key: the sync is idempotent (it
+    // re-derives from the config rather than undoing a specific switch),
+    // and a per-key arm is exactly what let `/reload` drift out of step.
+    if path.starts_with("typing.") {
+        app.sync_typing_from_config();
+    }
+
+    if path == "display.mentions_buffer" {
+        if app.config.display.mentions_buffer {
+            app.create_mentions_buffer();
+        } else {
+            app.state.remove_buffer("_mentions");
+        }
+    }
+
+    // Mirror the translate config into state so the
+    // `add_message_with_activity` decision and the request payloads
+    // match the freshly-set config without a restart. The backend and
+    // worker queues are bound at startup, so flipping
+    // `translate.enabled` from off to on at runtime cannot
+    // materialise a backend — say so rather than silently doing
+    // nothing.
+    if path.starts_with("translate.") {
+        app.sync_translate_from_config();
+        if let Some(backend) = &app.translate_backend {
+            backend.refresh_config(&app.config.translate);
+        }
+        // `backend` has the same restart caveat as `enabled` and for
+        // the same reason — naming a translator cannot conjure the
+        // workers that were bound at startup. Warning on only one of
+        // the two switches is how the quieter one comes to lie.
+        if path == "translate.enabled" || path == "translate.backend" {
+            crate::commands::helpers::warn_if_translate_cannot_run(app);
+        }
+    }
+
+    // Sync shrink-incoming flags into state so the
+    // `add_message_with_activity` decision matches the
+    // freshly-set config without restart. The shrink_client
+    // and worker queue are bound at startup — flipping
+    // `shrink.enabled` from off to on at runtime won't
+    // materialise a client; users get a restart-required
+    // notice from /set already if they hit that case.
+    if path == "shrink.enabled" || path == "shrink.incoming_enabled" {
+        app.state.shrink_incoming_active = app.config.shrink.enabled
+            && app.config.shrink.incoming_enabled
+            && app.shrink_client.is_some();
+        // Warn the user when the toggle is now `true` but no
+        // client exists (typically: SHRINK_API_KEY missing at
+        // boot). Without this, /set replies with success but
+        // shrink stays inert and the user has no diagnostic.
+        if (path == "shrink.enabled" && app.config.shrink.enabled) && app.shrink_client.is_none() {
+            crate::commands::helpers::add_local_event(
                 app,
                 &format!(
-                    "{C_OK}{path}{C_RST} = {C_CMD}{}{C_RST}",
-                    raw.replace('%', "%%")
+                    "{warn}shrink: enabled but no API client — set \
+                 SHRINK_API_KEY in .env and restart{rst}",
+                    warn = crate::commands::types::C_ERR,
+                    rst = crate::commands::types::C_RST,
                 ),
             );
+        }
+    }
+    if path == "shrink.min_url_length" {
+        app.state.shrink_min_url_length = app.config.shrink.min_url_length;
+    }
+    // Settings captured at startup by the shrink workers
+    // (api_url, timeouts) or by the cache constructor
+    // (cache_max_entries) cannot be propagated to running
+    // tasks. Surface a restart-required notice so the user
+    // knows the /set didn't take effect.
+    if matches!(
+        path,
+        "shrink.api_url"
+            | "shrink.outgoing_timeout_ms"
+            | "shrink.incoming_timeout_ms"
+            | "shrink.cache_max_entries"
+    ) {
+        crate::commands::helpers::add_local_event(
+            app,
+            &format!(
+                "{dim}shrink: {path} change requires restart to \
+             take effect{rst}",
+                dim = crate::commands::types::C_DIM,
+                rst = crate::commands::types::C_RST,
+            ),
+        );
+    }
 
-            // Save config (web.password is #[serde(skip)] — saved to .env instead).
-            let cfg_path = crate::constants::config_path();
-            if let Err(e) = crate::config::save_config(&cfg_path, &app.config) {
-                ev(app, &format!("{C_ERR}Failed to save config: {e}{C_RST}"));
+    // Sync DCC runtime state from config
+    if path.starts_with("dcc.") {
+        match path {
+            "dcc.timeout" => {
+                app.dcc.timeout_secs = app.config.dcc.timeout;
             }
-
-            // Persist credentials to .env (not config.toml).
-            if path == "web.password" {
-                let env_path = crate::constants::env_path();
-                if let Err(e) = crate::config::set_env_value(&env_path, "WEB_PASSWORD", raw) {
-                    ev(app, &format!("{C_ERR}Failed to save to .env: {e}{C_RST}"));
+            "dcc.own_ip" => {
+                app.dcc.own_ip = if app.config.dcc.own_ip.is_empty() {
+                    None
                 } else {
-                    ev(app, &format!("{C_DIM}Password saved to .env{C_RST}"));
-                }
+                    app.config.dcc.own_ip.parse().ok()
+                };
             }
-            if let Some(key) = server_password_env_key(path) {
-                let env_path = crate::constants::env_path();
-                if let Err(e) = crate::config::set_env_value(&env_path, &key, raw) {
-                    ev(app, &format!("{C_ERR}Failed to save to .env: {e}{C_RST}"));
-                } else {
-                    ev(app, &format!("{C_DIM}Credential saved to .env{C_RST}"));
-                }
+            "dcc.port_range" => {
+                app.dcc.port_range = crate::dcc::chat::parse_port_range(&app.config.dcc.port_range);
             }
+            "dcc.autoaccept_lowports" => {
+                app.dcc.autoaccept_lowports = app.config.dcc.autoaccept_lowports;
+            }
+            "dcc.autochat_masks" => {
+                app.dcc
+                    .autochat_masks
+                    .clone_from(&app.config.dcc.autochat_masks);
+            }
+            "dcc.max_connections" => {
+                app.dcc.max_connections = app.config.dcc.max_connections;
+            }
+            _ => {}
+        }
+    }
 
-            // Hot restart web server when lifecycle settings change.
-            if matches!(
-                path.as_str(),
-                "web.enabled"
-                    | "web.port"
-                    | "web.bind_address"
-                    | "web.password"
-                    | "web.tls_cert"
-                    | "web.tls_key"
-                    | "web.session_days"
-                    | "web.username"
-                    | "web.image_previews"
-                    | "web.image_previews_max_per_msg"
-                    | "web.thumbnail_cache_mb"
-            ) {
-                app.web_restart_pending = true;
-                if path.as_str() != "web.enabled" || raw == "true" {
-                    ev(app, &format!("{C_DIM}Web server will restart...{C_RST}"));
-                }
-            }
+    // Sync spellcheck runtime state
+    if path.starts_with("spellcheck.") {
+        app.reload_spellchecker();
+    }
 
-            // Sync runtime state from config
-            if path == "general.flood_protection" {
-                app.state.flood_protection = app.config.general.flood_protection;
-            }
-            if path == "general.flood_exemptions" {
-                app.state
-                    .flood_exemptions
-                    .clone_from(&app.config.general.flood_exemptions);
-            }
-            if path == "display.scrollback_lines" {
-                app.state.scrollback_limit = app.config.display.scrollback_lines;
-            }
-            if path == "display.nick_color_saturation" {
-                app.state.nick_color_sat = app.config.display.nick_color_saturation;
-            }
-            if path == "display.nick_color_lightness" {
-                app.state.nick_color_lit = app.config.display.nick_color_lightness;
-            }
+    // Broadcast web settings changes to connected web clients.
+    if path == "web.timestamp_format"
+        || path == "web.line_height"
+        || path == "web.theme"
+        || path == "web.nick_column_width"
+        || path == "web.nick_max_length"
+        || path.starts_with("display.nick_color")
+        || path.starts_with("emotes.")
+    {
+        app.state
+            .pending_web_events
+            .push(crate::web::protocol::WebEvent::SettingsChanged {
+                timestamp_format: app.config.web.timestamp_format.clone(),
+                line_height: app.config.web.line_height,
+                theme: app.config.web.theme.clone(),
+                nick_column_width: app.config.web.nick_column_width,
+                nick_max_length: app.config.web.nick_max_length,
+                nick_colors: app.config.display.nick_colors,
+                nick_colors_in_nicklist: app.config.display.nick_colors_in_nicklist,
+                nick_color_saturation: app.config.display.nick_color_saturation,
+                nick_color_lightness: app.config.display.nick_color_lightness,
+                emotes_enabled: app.config.emotes.web_enabled(),
+            });
+    }
 
-            // Every `typing.*` switch goes through the one sync `/reload` also
-            // runs, rather than an arm per key: the sync is idempotent (it
-            // re-derives from the config rather than undoing a specific switch),
-            // and a per-key arm is exactly what let `/reload` drift out of step.
-            if path.starts_with("typing.") {
-                app.sync_typing_from_config();
-            }
+    // The web status line renders from `statusbar.items` / `.enabled`
+    // too, so a `/set statusbar.…` has to reach open tabs — otherwise
+    // turning the bar off in the terminal leaves it up in the browser.
+    if path.starts_with("statusbar.") {
+        super::handlers_ui::push_statusbar_web_event(app);
+    }
 
-            if path == "display.mentions_buffer" {
-                if app.config.display.mentions_buffer {
-                    app.create_mentions_buffer();
-                } else {
-                    app.state.remove_buffer("_mentions");
-                }
-            }
+    // Resize shells when sidebar layout changes (affects chat area dimensions).
+    if path.starts_with("sidepanel.") {
+        app.resize_all_shells();
+    }
 
-            // Mirror the translate config into state so the
-            // `add_message_with_activity` decision and the request payloads
-            // match the freshly-set config without a restart. The backend and
-            // worker queues are bound at startup, so flipping
-            // `translate.enabled` from off to on at runtime cannot
-            // materialise a backend — say so rather than silently doing
-            // nothing.
-            if path.starts_with("translate.") {
-                app.sync_translate_from_config();
-                if let Some(backend) = &app.translate_backend {
-                    backend.refresh_config(&app.config.translate);
-                }
-                // `backend` has the same restart caveat as `enabled` and for
-                // the same reason — naming a translator cannot conjure the
-                // workers that were bound at startup. Warning on only one of
-                // the two switches is how the quieter one comes to lie.
-                if path == "translate.enabled" || path == "translate.backend" {
-                    crate::commands::helpers::warn_if_translate_cannot_run(app);
-                }
+    // Special handling: reload theme if theme name changed
+    if path == "general.theme" {
+        let theme_path = crate::constants::theme_dir().join(format!("{raw}.theme"));
+        match crate::theme::load_theme(&theme_path) {
+            Ok(theme) => {
+                app.theme = theme;
+                ev(app, &format!("{C_OK}Theme '{raw}' loaded{C_RST}"));
             }
-
-            // Sync shrink-incoming flags into state so the
-            // `add_message_with_activity` decision matches the
-            // freshly-set config without restart. The shrink_client
-            // and worker queue are bound at startup — flipping
-            // `shrink.enabled` from off to on at runtime won't
-            // materialise a client; users get a restart-required
-            // notice from /set already if they hit that case.
-            if path == "shrink.enabled" || path == "shrink.incoming_enabled" {
-                app.state.shrink_incoming_active = app.config.shrink.enabled
-                    && app.config.shrink.incoming_enabled
-                    && app.shrink_client.is_some();
-                // Warn the user when the toggle is now `true` but no
-                // client exists (typically: SHRINK_API_KEY missing at
-                // boot). Without this, /set replies with success but
-                // shrink stays inert and the user has no diagnostic.
-                if (path == "shrink.enabled" && app.config.shrink.enabled)
-                    && app.shrink_client.is_none()
-                {
-                    crate::commands::helpers::add_local_event(
-                        app,
-                        &format!(
-                            "{warn}shrink: enabled but no API client — set \
-                             SHRINK_API_KEY in .env and restart{rst}",
-                            warn = crate::commands::types::C_ERR,
-                            rst = crate::commands::types::C_RST,
-                        ),
-                    );
-                }
-            }
-            if path == "shrink.min_url_length" {
-                app.state.shrink_min_url_length = app.config.shrink.min_url_length;
-            }
-            // Settings captured at startup by the shrink workers
-            // (api_url, timeouts) or by the cache constructor
-            // (cache_max_entries) cannot be propagated to running
-            // tasks. Surface a restart-required notice so the user
-            // knows the /set didn't take effect.
-            if matches!(
-                path.as_str(),
-                "shrink.api_url"
-                    | "shrink.outgoing_timeout_ms"
-                    | "shrink.incoming_timeout_ms"
-                    | "shrink.cache_max_entries"
-            ) {
-                crate::commands::helpers::add_local_event(
-                    app,
-                    &format!(
-                        "{dim}shrink: {path} change requires restart to \
-                         take effect{rst}",
-                        dim = crate::commands::types::C_DIM,
-                        rst = crate::commands::types::C_RST,
-                    ),
-                );
-            }
-
-            // Sync DCC runtime state from config
-            if path.starts_with("dcc.") {
-                match path.as_str() {
-                    "dcc.timeout" => {
-                        app.dcc.timeout_secs = app.config.dcc.timeout;
-                    }
-                    "dcc.own_ip" => {
-                        app.dcc.own_ip = if app.config.dcc.own_ip.is_empty() {
-                            None
-                        } else {
-                            app.config.dcc.own_ip.parse().ok()
-                        };
-                    }
-                    "dcc.port_range" => {
-                        app.dcc.port_range =
-                            crate::dcc::chat::parse_port_range(&app.config.dcc.port_range);
-                    }
-                    "dcc.autoaccept_lowports" => {
-                        app.dcc.autoaccept_lowports = app.config.dcc.autoaccept_lowports;
-                    }
-                    "dcc.autochat_masks" => {
-                        app.dcc
-                            .autochat_masks
-                            .clone_from(&app.config.dcc.autochat_masks);
-                    }
-                    "dcc.max_connections" => {
-                        app.dcc.max_connections = app.config.dcc.max_connections;
-                    }
-                    _ => {}
-                }
-            }
-
-            // Sync spellcheck runtime state
-            if path.starts_with("spellcheck.") {
-                app.reload_spellchecker();
-            }
-
-            // Broadcast web settings changes to connected web clients.
-            if path == "web.timestamp_format"
-                || path == "web.line_height"
-                || path == "web.theme"
-                || path == "web.nick_column_width"
-                || path == "web.nick_max_length"
-                || path.starts_with("display.nick_color")
-                || path.starts_with("emotes.")
-            {
-                app.state.pending_web_events.push(
-                    crate::web::protocol::WebEvent::SettingsChanged {
-                        timestamp_format: app.config.web.timestamp_format.clone(),
-                        line_height: app.config.web.line_height,
-                        theme: app.config.web.theme.clone(),
-                        nick_column_width: app.config.web.nick_column_width,
-                        nick_max_length: app.config.web.nick_max_length,
-                        nick_colors: app.config.display.nick_colors,
-                        nick_colors_in_nicklist: app.config.display.nick_colors_in_nicklist,
-                        nick_color_saturation: app.config.display.nick_color_saturation,
-                        nick_color_lightness: app.config.display.nick_color_lightness,
-                        emotes_enabled: app.config.emotes.web_enabled(),
-                    },
-                );
-            }
-
-            // The web status line renders from `statusbar.items` / `.enabled`
-            // too, so a `/set statusbar.…` has to reach open tabs — otherwise
-            // turning the bar off in the terminal leaves it up in the browser.
-            if path.starts_with("statusbar.") {
-                super::handlers_ui::push_statusbar_web_event(app);
-            }
-
-            // Resize shells when sidebar layout changes (affects chat area dimensions).
-            if path.starts_with("sidepanel.") {
-                app.resize_all_shells();
-            }
-
-            // Special handling: reload theme if theme name changed
-            if path == "general.theme" {
-                let theme_path = crate::constants::theme_dir().join(format!("{raw}.theme"));
-                match crate::theme::load_theme(&theme_path) {
-                    Ok(theme) => {
-                        app.theme = theme;
-                        ev(app, &format!("{C_OK}Theme '{raw}' loaded{C_RST}"));
-                    }
-                    Err(e) => {
-                        ev(app, &format!("{C_ERR}Failed to load theme: {e}{C_RST}"));
-                    }
-                }
-            }
-
-            // Recompute cached wrap-indent when relevant settings change.
-            if path == "general.timestamp_format"
-                || path == "display.nick_column_width"
-                || path == "general.theme"
-            {
-                app.recompute_wrap_indent();
+            Err(e) => {
+                ev(app, &format!("{C_ERR}Failed to load theme: {e}{C_RST}"));
             }
         }
-        Err(e) => {
-            ev(app, &format!("{C_ERR}{e}{C_RST}"));
-        }
+    }
+
+    // Recompute cached wrap-indent when relevant settings change.
+    if path == "general.timestamp_format"
+        || path == "display.nick_column_width"
+        || path == "general.theme"
+    {
+        app.recompute_wrap_indent();
     }
 }
 
@@ -1734,8 +795,12 @@ mod tests {
 
         // We do not implement channel binding, so -PLUS must not be storable.
         assert!(
-            set_config_value(&mut config, "servers.net.sasl_mechanism", "SCRAM-SHA-256-PLUS")
-                .is_err()
+            set_config_value(
+                &mut config,
+                "servers.net.sasl_mechanism",
+                "SCRAM-SHA-256-PLUS"
+            )
+            .is_err()
         );
     }
 
@@ -1811,7 +876,9 @@ mod tests {
         // translation is on and a client that translates nothing.
         let mut config = default_config();
         assert_eq!(
-            get_config_value(&config, "translate.backend").unwrap().value,
+            get_config_value(&config, "translate.backend")
+                .unwrap()
+                .value,
             "none",
             "no translator is the default — the only implementation that \
              exists on this branch is a test stub"
@@ -1931,7 +998,9 @@ mod tests {
             ("unquoted words", "unquoted words"),
             ("don't change me", "don't change me"),
         ] {
-            let parsed = crate::commands::parser::parse_command(&format!("/set statusbar.prompt {input}")).unwrap();
+            let parsed =
+                crate::commands::parser::parse_command(&format!("/set statusbar.prompt {input}"))
+                    .unwrap();
             let decoded = decode_setting_value(&parsed.args[1]).unwrap();
             let mut config = AppConfig::default();
             set_config_value(&mut config, &parsed.args[0], &decoded).unwrap();
@@ -1943,7 +1012,13 @@ mod tests {
 
     #[test]
     fn malformed_setting_quotes_are_rejected() {
-        for input in ["\"unfinished", "'unfinished", "\"value\" extra", "\"trailing\\", "\"one\"\"two\""] {
+        for input in [
+            "\"unfinished",
+            "'unfinished",
+            "\"value\" extra",
+            "\"trailing\\",
+            "\"one\"\"two\"",
+        ] {
             assert!(decode_setting_value(input).is_err(), "{input}");
         }
     }
@@ -1952,12 +1027,30 @@ mod tests {
     fn empty_values_clear_lists_and_server_overrides() {
         let mut config = config_with_server();
         let id = config.servers.keys().next().unwrap().clone();
-        for field in ["channels", "nick", "username", "realname", "bind_ip", "encoding", "autosendcmd", "client_cert_path", "sasl_key_path", "password", "sasl_pass", "sasl_user"] {
+        for field in [
+            "channels",
+            "nick",
+            "username",
+            "realname",
+            "bind_ip",
+            "encoding",
+            "autosendcmd",
+            "client_cert_path",
+            "sasl_key_path",
+            "password",
+            "sasl_pass",
+            "sasl_user",
+        ] {
             let path = format!("servers.{id}.{field}");
             set_config_value(&mut config, &path, "example").unwrap();
             set_config_value(&mut config, &path, "").unwrap();
         }
-        for (field, value) in [("sasl_mechanism", "PLAIN"), ("auto_reconnect", "true"), ("reconnect_delay", "5"), ("reconnect_max_retries", "3")] {
+        for (field, value) in [
+            ("sasl_mechanism", "PLAIN"),
+            ("auto_reconnect", "true"),
+            ("reconnect_delay", "5"),
+            ("reconnect_max_retries", "3"),
+        ] {
             let path = format!("servers.{id}.{field}");
             set_config_value(&mut config, &path, value).unwrap();
             set_config_value(&mut config, &path, "").unwrap();
@@ -1974,13 +1067,20 @@ mod tests {
         assert!(server.username.is_none());
         assert!(server.bind_ip.is_none());
         assert!(server.encoding.is_none());
-        assert_eq!(server.nick.as_deref().unwrap_or(&reloaded.general.nick), reloaded.general.nick);
+        assert_eq!(
+            server.nick.as_deref().unwrap_or(&reloaded.general.nick),
+            reloaded.general.nick
+        );
         for path in ["dcc.autochat_masks", "spellcheck.languages"] {
             set_config_value(&mut config, path, "").unwrap();
         }
         assert!(config.dcc.autochat_masks.is_empty());
         assert!(config.spellcheck.languages.is_empty());
-        for path in ["general.nick".to_string(), format!("servers.{id}.address"), format!("servers.{id}.port")] {
+        for path in [
+            "general.nick".to_string(),
+            format!("servers.{id}.address"),
+            format!("servers.{id}.port"),
+        ] {
             assert!(set_config_value(&mut config, &path, "").is_err());
         }
     }
@@ -2004,5 +1104,4 @@ mod tests {
         set_config_value(&mut config, path, "").unwrap();
         assert!(config.servers["fixture"].bouncer_network_id.is_none());
     }
-
 }

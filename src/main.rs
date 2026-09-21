@@ -11,6 +11,8 @@
 mod app;
 mod commands;
 mod config;
+#[path = "../shared/settings.rs"]
+mod settings_model;
 mod constants;
 mod dcc;
 mod e2e;

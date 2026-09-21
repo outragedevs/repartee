@@ -1,6 +1,7 @@
 pub mod defaults;
 pub mod env;
 pub mod network_scope;
+pub mod settings;
 
 use std::collections::HashMap;
 use std::path::Path;

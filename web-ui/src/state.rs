@@ -176,6 +176,12 @@ pub struct AppState {
     /// Server wizard modal open flag. The web wizard is add-only (the client has
     /// no full server config to pre-fill an edit), so there is no edit-id here.
     pub wizard_open: RwSignal<bool>,
+    pub settings_open: RwSignal<bool>,
+    pub settings_fields: RwSignal<Vec<crate::settings_model::SettingField>>,
+    pub settings_error: RwSignal<Option<String>>,
+    pub settings_saving: RwSignal<bool>,
+    pub settings_saved: RwSignal<u64>,
+    pub browser_preferences_revision: RwSignal<u64>,
     /// GG emote (`:name:` GIF) picker modal open flag.
     pub emote_picker_open: RwSignal<bool>,
     /// UTF-8 Unicode emoji picker modal open flag (desktop only).
@@ -274,6 +280,12 @@ impl AppState {
             dismissed_previews: RwSignal::new(dismissed_previews),
             emotes_enabled: RwSignal::new(true),
             wizard_open: RwSignal::new(false),
+            settings_open: RwSignal::new(false),
+            settings_fields: RwSignal::new(Vec::new()),
+            settings_error: RwSignal::new(None),
+            settings_saving: RwSignal::new(false),
+            settings_saved: RwSignal::new(0),
+            browser_preferences_revision: RwSignal::new(0),
             emote_picker_open: RwSignal::new(false),
             emoji_picker_open: RwSignal::new(false),
             pending_insert: RwSignal::new(None),
@@ -304,7 +316,7 @@ impl AppState {
         let Some(document) = web_sys::window().and_then(|window| window.document()) else { return };
         if document.hidden() || !document.has_focus().unwrap_or(false)
             || !self.scroll_mode.get_untracked().is_following_tail()
-            || self.wizard_open.get_untracked() || self.emote_picker_open.get_untracked()
+            || self.settings_open.get_untracked() || self.wizard_open.get_untracked() || self.emote_picker_open.get_untracked()
             || self.emoji_picker_open.get_untracked() || self.appearance_open.get_untracked() { return; }
         let Some(buffer_id) = self.active_buffer.get_untracked() else { return };
         let tail = self.messages.with_untracked(|messages| messages.get(&buffer_id)
@@ -860,6 +872,14 @@ impl AppState {
                     self.active_buffer.set(Some(buffer_id));
                 }
             }
+            WebEvent::SettingsSnapshot { fields, .. } => {
+                if self.settings_open.get_untracked() { self.settings_fields.set(fields); }
+            }
+            WebEvent::SettingsSaved { error, .. } => {
+                self.settings_saving.set(false);
+                if error.is_none() { self.settings_saved.update(|v| *v += 1); }
+                self.settings_error.set(error);
+            }
             WebEvent::SettingsChanged {
                 timestamp_format,
                 line_height,
@@ -1250,9 +1270,9 @@ fn insert_date_separators(messages: Vec<WireMessage>) -> Vec<WireMessage> {
 /// `ActiveBufferChanged` events emitted by the TUI. Set to `"false"`
 /// to make this tab independent (typical multi-tab workflow). Any
 /// other value (missing, `"true"`) keeps the legacy follow behavior.
-const FOLLOW_TUI_BUFFER_KEY: &str = "web_follow_tui_buffer";
+pub const FOLLOW_TUI_BUFFER_KEY: &str = "web_follow_tui_buffer";
 
-fn follow_tui_active_buffer() -> bool {
+pub fn follow_tui_active_buffer() -> bool {
     let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) else {
         return true;
     };

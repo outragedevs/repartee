@@ -67,6 +67,10 @@ pub fn connect(state: &AppState) {
 
                     let was_connected = state.connected.get_untracked();
                     state.connected.set(false);
+                    if state.settings_saving.get_untracked() {
+                        state.settings_saving.set(false);
+                        state.settings_error.set(Some("Connection lost while saving. Reopen Settings to check whether changes were saved before retrying.".into()));
+                    }
 
                     if was_connected {
                         // Got at least one SyncInit before the drop —
