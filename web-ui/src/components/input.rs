@@ -248,6 +248,14 @@ pub fn InputLine() -> impl IntoView {
     let (popup, set_popup) = signal(None::<PopupData>);
     let (popup_sel, set_popup_sel) = signal(0usize);
     let (popup_engaged, set_popup_engaged) = signal(false);
+    Effect::new(move |_| {
+        if !state.emotes_input_enabled.get() {
+            set_popup.set(None);
+            set_tab_matches.set(Vec::new());
+            set_tab_active.set(false);
+            set_popup_engaged.set(false);
+        }
+    });
 
     let input_ref = NodeRef::<leptos::html::Textarea>::new();
 

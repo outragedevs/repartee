@@ -1022,6 +1022,13 @@ fn log_status(app: &mut App) {
 
 pub(crate) fn cmd_preview(app: &mut App, args: &[String]) {
     if args.is_empty() {
+        if let crate::app::translate::SubmitOrigin::Web(session_id) = &app.submit_origin {
+            app.broadcast_web(crate::web::protocol::WebEvent::Error {
+                message: "Usage: /preview <url>".into(),
+                session_id: Some(session_id.clone()),
+            });
+            return;
+        }
         add_local_event(app, "Usage: /preview <url>");
         return;
     }
