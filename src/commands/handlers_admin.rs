@@ -903,7 +903,7 @@ pub(crate) fn cmd_kill(app: &mut App, args: &[String]) {
 
     if let Some(sender) = app.active_irc_sender() {
         let reason = if args.len() > 1 {
-            args[1].clone()
+            args[1..].join(" ")
         } else {
             "Killed".to_string()
         };
@@ -922,7 +922,7 @@ pub(crate) fn cmd_wallops(app: &mut App, args: &[String]) {
     if let Some(sender) = app.active_irc_sender() {
         let _ = sender.send(irc::proto::Command::Raw(
             "WALLOPS".to_string(),
-            vec![args[0].clone()],
+            vec![args.join(" ")],
         ));
     } else {
         add_local_event(app, "Not connected");
