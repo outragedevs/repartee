@@ -177,6 +177,7 @@ pub struct AppState {
     /// no full server config to pre-fill an edit), so there is no edit-id here.
     pub wizard_open: RwSignal<bool>,
     pub settings_open: RwSignal<bool>,
+    pub settings_initial_network: RwSignal<Option<String>>,
     pub settings_scope: RwSignal<crate::settings_model::SettingsScope>,
     pub settings_fields: RwSignal<Vec<crate::settings_model::SettingField>>,
     pub settings_error: RwSignal<Option<String>>,
@@ -283,6 +284,7 @@ impl AppState {
             emotes_enabled: RwSignal::new(true),
             wizard_open: RwSignal::new(false),
             settings_open: RwSignal::new(false),
+            settings_initial_network: RwSignal::new(None),
             settings_scope: RwSignal::new(crate::settings_model::SettingsScope::General),
             settings_fields: RwSignal::new(Vec::new()),
             settings_error: RwSignal::new(None),
@@ -896,7 +898,13 @@ impl AppState {
                 }
             }
             WebEvent::SettingsSnapshot { scope, fields, .. } => {
-                if self.settings_open.get_untracked() && scope == self.settings_scope.get_untracked() { self.settings_fields.set(fields); }
+                if self.settings_open.get_untracked() && scope == self.settings_scope.get_untracked() {
+                    if let Some(id) = self.settings_initial_network.get_untracked()
+                        && !fields.iter().any(|field| field.network() == Some(id.as_str())) {
+                        self.settings_error.set(Some(format!("Network '{id}' was not found in settings.")));
+                    }
+                    self.settings_fields.set(fields);
+                }
             }
             WebEvent::SettingsSaved { error, .. } => {
                 self.settings_saving.set(false);
@@ -1406,6 +1414,30 @@ mod tests {
         assert!(state.backlog_loaded.get_untracked().contains("net/#test"));
         assert_eq!(state.backlog_has_more.get_untracked().get("net/#test"), Some(&false));
         assert!(state.scroll_mode.get_untracked().is_following_tail());
+    }
+
+    #[test]
+    fn wizard_server_id_opens_selected_network_settings() {
+        let state = headless_state();
+        assert!(crate::components::settings::handle_wizard_command(state, "/wizard server libera"));
+        assert!(state.settings_open.get_untracked());
+        assert!(!state.wizard_open.get_untracked());
+        assert_eq!(state.settings_initial_network.get_untracked().as_deref(), Some("libera"));
+        let field = crate::settings_model::SettingField {
+            path: "servers.libera.address".into(), label: "Address".into(), section: 0,
+            description: String::new(), effect: String::new(), kind: crate::settings_model::SettingKind::Text,
+            value: "irc.example.org".into(), default_value: None, configured: true,
+        };
+        state.handle_event(WebEvent::SettingsSnapshot { scope: crate::settings_model::SettingsScope::General, fields: vec![field], session_id: "test".into() });
+        assert!(state.settings_error.get_untracked().is_none());
+        assert_eq!(state.settings_fields.get_untracked()[0].network(), Some("libera"));
+        state.handle_event(WebEvent::SettingsSnapshot { scope: crate::settings_model::SettingsScope::General, fields: Vec::new(), session_id: "test".into() });
+        assert!(state.settings_error.get_untracked().unwrap().contains("libera"));
+        crate::components::settings::open_settings(state);
+        assert!(state.settings_initial_network.get_untracked().is_none());
+        assert!(state.settings_error.get_untracked().is_none());
+        assert!(crate::components::settings::handle_wizard_command(state, "/wizard server"));
+        assert!(state.wizard_open.get_untracked());
     }
 
     #[test]
