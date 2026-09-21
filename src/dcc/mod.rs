@@ -113,7 +113,7 @@ impl DccManager {
         let nick_lower = crate::irc::isupport::casefold(nick, mapping);
         self.records.values().find(|r| {
             r.conn_id == conn_id && crate::irc::isupport::casefold(&r.nick, mapping) == nick_lower
-                && matches!(r.state, DccState::WaitingUser | DccState::Listening)
+                && !r.outgoing && r.state == DccState::WaitingUser
         })
     }
 
@@ -121,7 +121,7 @@ impl DccManager {
     pub fn find_latest_pending(&self, conn_id: &str) -> Option<&DccRecord> {
         self.records
             .values()
-            .filter(|r| r.conn_id == conn_id && matches!(r.state, DccState::WaitingUser))
+            .filter(|r| r.conn_id == conn_id && !r.outgoing && r.state == DccState::WaitingUser)
             // Most recently created = largest Instant value (latest point in time)
             .max_by_key(|r| r.created)
     }
