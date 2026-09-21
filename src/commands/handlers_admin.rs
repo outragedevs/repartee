@@ -1604,6 +1604,7 @@ pub(crate) fn cmd_spellcheck(app: &mut App, args: &[String]) {
                 app.http_client.clone(),
                 dict_dir,
                 app.dict_tx.clone(),
+                app.state.active_buffer_id.clone(),
             );
         }
         "get" => {
@@ -1625,6 +1626,7 @@ pub(crate) fn cmd_spellcheck(app: &mut App, args: &[String]) {
                 app.http_client.clone(),
                 dict_dir,
                 app.dict_tx.clone(),
+                app.state.active_buffer_id.clone(),
             );
         }
         _ => {

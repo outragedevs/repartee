@@ -220,11 +220,11 @@ pub struct DictListEntry {
 #[derive(Debug)]
 pub enum DictEvent {
     /// Manifest fetched successfully — contains available dicts and which are installed.
-    ListResult { entries: Vec<DictListEntry> },
+    ListResult { buffer_id: Option<String>, entries: Vec<DictListEntry> },
     /// A dictionary was downloaded and saved.
-    Downloaded { lang: String },
+    Downloaded { buffer_id: Option<String>, lang: String },
     /// An error occurred during list or download.
-    Error { message: String },
+    Error { buffer_id: Option<String>, message: String },
 }
 
 /// Spawn an async task to fetch the manifest and report available dictionaries.
@@ -232,6 +232,7 @@ pub fn spawn_fetch_manifest(
     client: reqwest::Client,
     dict_dir: PathBuf,
     tx: mpsc::Sender<DictEvent>,
+    buffer_id: Option<String>,
 ) {
     tokio::spawn(async move {
         let event = match fetch_manifest(&client).await {
@@ -249,9 +250,10 @@ pub fn spawn_fetch_manifest(
                     })
                     .collect();
                 entries.sort_by(|a, b| a.code.cmp(&b.code));
-                DictEvent::ListResult { entries }
+                DictEvent::ListResult { buffer_id, entries }
             }
             Err(e) => DictEvent::Error {
+                buffer_id,
                 message: format!("Failed to fetch dictionary list: {e}"),
             },
         };
@@ -265,12 +267,14 @@ pub fn spawn_download_dict(
     client: reqwest::Client,
     dict_dir: PathBuf,
     tx: mpsc::Sender<DictEvent>,
+    buffer_id: Option<String>,
 ) {
     tokio::spawn(async move {
         let base = crate::constants::DICTS_REPO_URL;
         let event = match download_dict_files(&client, base, &lang, &dict_dir).await {
-            Ok(()) => DictEvent::Downloaded { lang },
+            Ok(()) => DictEvent::Downloaded { buffer_id, lang },
             Err(e) => DictEvent::Error {
+                buffer_id,
                 message: format!("Failed to download {lang}: {e}"),
             },
         };
