@@ -1135,6 +1135,10 @@ pub(crate) fn cmd_me(app: &mut App, args: &[String]) {
     let Some(buf) = app.state.active_buffer() else {
         return;
     };
+    if !matches!(buf.buffer_type, crate::state::buffer::BufferType::Channel | crate::state::buffer::BufferType::Query | crate::state::buffer::BufferType::DccChat) {
+        add_local_event(app, "Cannot send actions to this buffer");
+        return;
+    }
     let target = buf.name.clone();
     let conn_id = buf.connection_id.clone();
     let buf_type = buf.buffer_type.clone();
@@ -1877,6 +1881,36 @@ mod empty_list_removal_tests {
             let ::irc::proto::Command::Raw(name, args) = &captured[first].command else { panic!("expected MODE") };
             assert_eq!(name, "MODE");
             assert_eq!(args, &["#here", &format!("-{mode}"), "*!*@fixture.example"]);
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod action_context_tests {
+    #[tokio::test]
+    async fn actions_require_a_conversation_buffer() {
+        use crate::irc::{IrcHandle, IrcSender};
+        use crate::state::buffer::{Buffer, BufferType};
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let config = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]\nnick='me'").unwrap();
+        app.setup_connection("fixture", &config);
+        let sender = IrcSender::capturing(0);
+        app.irc_handles.insert("fixture".into(), IrcHandle::new("fixture".into(), sender.clone(), None, None));
+        for kind in [BufferType::Server, BufferType::Mentions, BufferType::Special, BufferType::Log, BufferType::Shell] {
+            app.state.add_buffer(Buffer::for_test("fixture", kind, "invalid"));
+            app.state.set_active_buffer("fixture/invalid");
+            super::cmd_me(&mut app, &["waves".into()]);
+            assert!(sender.captured().is_empty());
+        }
+        for (kind, name) in [(BufferType::Channel, "#here"), (BufferType::Query, "peer")] {
+            app.state.add_buffer(Buffer::for_test("fixture", kind, name));
+            app.state.set_active_buffer(&format!("fixture/{name}"));
+            app.handle_submit("/me waves hello");
+            let captured = sender.captured();
+            let ::irc::proto::Command::PRIVMSG(target, text) = &captured.last().unwrap().command else { panic!("expected ACTION") };
+            assert_eq!(target, name);
+            assert_eq!(text, "\x01ACTION waves hello\x01");
         }
     }
 }
