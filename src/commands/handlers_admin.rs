@@ -106,6 +106,16 @@ fn manual_cred(value: Option<String>) -> CredUpdate {
 /// `commands::settings` has to have a counterpart here, or the two routes to the
 /// same state disagree.
 pub(crate) fn apply_reloaded_config(app: &mut App, new_config: crate::config::AppConfig) {
+    let runtime_changes: Vec<_> = crate::config::settings::BASE_PATHS.iter()
+        .filter(|path| **path != "general.theme"
+            && !path.starts_with("typing.")
+            && !path.starts_with("translate.")
+            && !path.starts_with("statusbar."))
+        .filter_map(|path| {
+            let next = crate::config::settings::get_config_value(&new_config, path)?;
+            let previous = crate::config::settings::get_config_value(&app.config, path)?;
+            (previous.value != next.value).then_some((*path, next.value))
+        }).collect();
     if app
         .translate_backend
         .as_ref()
@@ -116,6 +126,11 @@ pub(crate) fn apply_reloaded_config(app: &mut App, new_config: crate::config::Ap
     app.web_restart_pending |= app.config.web.requires_restart(&new_config.web);
     app.config = new_config;
     app.cached_config_toml = None;
+    app.inline_previews.invalidate_layout();
+    for (path, value) in runtime_changes {
+        super::settings::apply_setting_runtime(app, path, &value);
+    }
+    app.refresh_e2e_configured_networks();
     // A reload swaps out config.servers wholesale; an open edit-wizard
     // captured the old map and would resolve "keep" credentials against
     // a stale/absent entry on save, so close it.
@@ -1907,6 +1922,56 @@ mod server_add_tests {
 mod translate_reload_tests {
     use crate::app::input::submit_typing_tests::test_app;
     use crate::config::{TranslateAiConfig, TranslateAiModelConfig, TranslateBufferConfig};
+
+    #[test]
+    fn reload_applies_dcc_spellcheck_mentions_and_web_settings() {
+        let mut app = test_app();
+        app.config.spellcheck.enabled = true;
+        app.spellchecker = Some(crate::spellcheck::SpellChecker::load(&[], std::path::Path::new(""), false));
+        app.config.display.mentions_buffer = false;
+        let mut edited = app.config.clone();
+        edited.dcc.timeout = 137;
+        edited.dcc.own_ip = "192.0.2.10".into();
+        edited.dcc.port_range = "42000-42005".into();
+        edited.dcc.autoaccept_lowports = !edited.dcc.autoaccept_lowports;
+        edited.dcc.autochat_masks = vec!["friend!*@example.org".into()];
+        edited.dcc.max_connections = 7;
+        edited.spellcheck.enabled = false;
+        edited.display.mentions_buffer = true;
+        edited.web.line_height = 1.7;
+        edited.web.theme = "light".into();
+        edited.emotes.render = crate::config::RenderMode::Text;
+        super::apply_reloaded_config(&mut app, edited);
+        assert_eq!(app.dcc.timeout_secs, 137);
+        assert_eq!(app.dcc.own_ip, Some("192.0.2.10".parse().unwrap()));
+        assert_eq!(app.dcc.port_range, (42000, 42005));
+        assert_eq!(app.dcc.autoaccept_lowports, app.config.dcc.autoaccept_lowports);
+        assert_eq!(app.dcc.autochat_masks, ["friend!*@example.org"]);
+        assert_eq!(app.dcc.max_connections, 7);
+        assert!(app.spellchecker.is_none());
+        assert!(app.state.buffers.contains_key("_mentions"));
+        assert!(app.state.pending_web_events.iter().any(|event| matches!(event,
+            crate::web::protocol::WebEvent::SettingsChanged { theme, line_height, emotes_enabled: false, emotes_input_enabled: true, .. }
+                if theme == "light" && (*line_height - 1.7).abs() < f32::EPSILON)));
+        let mut edited = app.config.clone();
+        edited.display.mentions_buffer = false;
+        super::apply_reloaded_config(&mut app, edited);
+        assert!(!app.state.buffers.contains_key("_mentions"));
+    }
+
+    #[test]
+    fn reload_loaded_shrink_key_only_requires_worker_restart() {
+        let mut app = test_app();
+        app.state.add_buffer(crate::state::buffer::Buffer::for_test("net", crate::state::buffer::BufferType::Channel, "#test"));
+        app.state.set_active_buffer("net/#test");
+        app.config.shrink.enabled = false;
+        let mut edited = app.config.clone();
+        edited.shrink.enabled = true;
+        edited.shrink.api_key = "fixture-key".into();
+        super::apply_reloaded_config(&mut app, edited);
+        assert!(rows(&app).iter().any(|text| text.contains("restart to activate the shrink workers")));
+        assert!(!rows(&app).iter().any(|text| text.contains("set SHRINK_API_KEY")));
+    }
 
     #[test]
     fn reload_web_credentials_and_lifecycle_schedule_the_existing_restart_path() {
