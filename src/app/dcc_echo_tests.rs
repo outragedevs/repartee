@@ -291,3 +291,32 @@ async fn failed_dcc_signaling_leaves_no_outgoing_session_and_allows_accept_retry
         assert_eq!(app.dcc.chat_senders.len(), 1);
     }
 }
+
+#[tokio::test]
+async fn dcc_local_echo_uses_its_network_nick_for_messages_and_actions() {
+    let mut app = crate::app::input::submit_typing_tests::test_app();
+    let config = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]\nnick='firstnick'").unwrap();
+    for (network, nick) in [("first", "firstnick"), ("second", "secondnick")] {
+        app.setup_connection(network, &config);
+        app.state.connections.get_mut(network).unwrap().nick = nick.into();
+    }
+    for (network, nick) in [("first", "firstnick"), ("second", "secondnick")] {
+        receive(&mut app, network, &format!(":peer!user@host PRIVMSG {nick} :\x01DCC CHAT chat 2130706433 40000\x01"));
+        let id = app.dcc.records.values().find(|record| record.conn_id == network).unwrap().id.clone();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+        app.dcc.chat_senders.insert(id.clone(), sender);
+        app.handle_dcc_event(crate::dcc::DccEvent::ChatConnected { id });
+        let buffer_id = format!("{network}/=peer");
+        app.state.set_active_buffer(&buffer_id);
+        for input in ["plain message", "/msg =peer explicit message", "/me waves"] {
+            app.handle_submit(input);
+        }
+        assert_eq!(receiver.try_recv().unwrap(), "plain message");
+        assert_eq!(receiver.try_recv().unwrap(), "explicit message");
+        assert_eq!(receiver.try_recv().unwrap(), "\x01ACTION waves\x01");
+        let messages: Vec<_> = app.state.buffers[&buffer_id].messages.iter()
+            .filter(|message| matches!(message.message_type, crate::state::buffer::MessageType::Message | crate::state::buffer::MessageType::Action)).collect();
+        assert_eq!(messages.len(), 3);
+        assert!(messages.iter().all(|message| message.nick.as_deref() == Some(nick)));
+    }
+}

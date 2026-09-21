@@ -1079,8 +1079,7 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
             let our_nick = app
                 .state
                 .connections
-                .values()
-                .next()
+                .get(&conn_id)
                 .map(|c| c.nick.clone())
                 .unwrap_or_default();
             let msg_id = app.state.next_message_id();
@@ -1210,8 +1209,7 @@ pub(crate) fn cmd_me(app: &mut App, args: &[String]) {
             let our_nick = app
                 .state
                 .connections
-                .values()
-                .next()
+                .get(&conn_id)
                 .map(|c| c.nick.clone())
                 .unwrap_or_default();
             let buffer_id = app.state.active_buffer_id.clone().unwrap_or_default();
