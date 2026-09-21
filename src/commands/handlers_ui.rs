@@ -690,7 +690,7 @@ pub(crate) fn cmd_alias(app: &mut App, args: &[String]) {
         let name = removal.to_lowercase();
         if app.config.aliases.remove(&name).is_some() {
             app.cached_config_toml = None;
-            let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+            if !super::helpers::persist_session_config(app, &crate::constants::config_path()) { return; }
             add_local_event(app, &format!("{C_OK}Removed alias: /{name}{C_RST}"));
         } else {
             add_local_event(app, &format!("{C_ERR}No alias named: /{name}{C_RST}"));
@@ -727,7 +727,7 @@ pub(crate) fn cmd_alias(app: &mut App, args: &[String]) {
 
     app.config.aliases.insert(name.clone(), template.clone());
     app.cached_config_toml = None;
-    let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+    if !super::helpers::persist_session_config(app, &crate::constants::config_path()) { return; }
     add_local_event(app, &format!("{C_OK}Alias /{name} = {template}{C_RST}"));
 }
 
@@ -741,7 +741,7 @@ pub(crate) fn cmd_unalias(app: &mut App, args: &[String]) {
 
     if app.config.aliases.remove(&name).is_some() {
         app.cached_config_toml = None;
-        let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+        if !super::helpers::persist_session_config(app, &crate::constants::config_path()) { return; }
         add_local_event(app, &format!("{C_OK}Removed alias: /{name}{C_RST}"));
     } else {
         add_local_event(app, &format!("{C_ERR}No alias named: /{name}{C_RST}"));
@@ -791,7 +791,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
                         return;
                     }
                     app.config.statusbar.items.push(item);
-                    save_statusbar(app);
+                    if !save_statusbar(app) { return; }
                     add_local_event(app, &format!("{C_OK}Added {item_name} to statusbar{C_RST}"));
                 }
                 None => {
@@ -814,7 +814,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
                 Some(item) => {
                     if let Some(pos) = app.config.statusbar.items.iter().position(|i| *i == item) {
                         app.config.statusbar.items.remove(pos);
-                        save_statusbar(app);
+                        if !save_statusbar(app) { return; }
                         add_local_event(
                             app,
                             &format!("{C_OK}Removed {item_name} from statusbar{C_RST}"),
@@ -875,7 +875,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
             }
             let removed = app.config.statusbar.items.remove(current_pos);
             app.config.statusbar.items.insert(new_pos - 1, removed);
-            save_statusbar(app);
+            if !save_statusbar(app) { return; }
             add_local_event(
                 app,
                 &format!("{C_OK}Moved {item_name} to position {new_pos}{C_RST}"),
@@ -921,7 +921,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
                 .statusbar
                 .item_formats
                 .insert(item_name.clone(), fmt.clone());
-            save_statusbar(app);
+            if !save_statusbar(app) { return; }
             add_local_event(app, &format!("{C_OK}Set {item_name} format: {fmt}{C_RST}"));
         }
         "separator" => {
@@ -943,7 +943,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
                 }
             };
             app.config.statusbar.separator.clone_from(&separator);
-            save_statusbar(app);
+            if !save_statusbar(app) { return; }
             add_local_event(app, &format!("{C_OK}Separator set to: {separator}{C_RST}"));
         }
         "available" => {
@@ -956,7 +956,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
             app.config.statusbar.items = crate::config::StatusbarConfig::default().items;
             app.config.statusbar.item_formats.clear();
             app.config.statusbar.separator = " | ".to_string();
-            save_statusbar(app);
+            if !save_statusbar(app) { return; }
             add_local_event(app, &format!("{C_OK}Statusbar reset to defaults{C_RST}"));
         }
         _ => {
@@ -975,10 +975,10 @@ const AVAILABLE_ITEMS: &str = "time, nick_info, channel_info, typing, lag, activ
 /// The web status line renders from `statusbar.items` too, so a mutation that
 /// only touched the config would take effect in the terminal and nowhere else
 /// until the tab was reloaded — the two UIs must not be able to drift.
-fn save_statusbar(app: &mut App) {
-    app.cached_config_toml = None;
-    let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+fn save_statusbar(app: &mut App) -> bool {
+    let saved = super::helpers::persist_session_config(app, &crate::constants::config_path());
     push_statusbar_web_event(app);
+    saved
 }
 
 /// Queue the current status-line config for the connected web clients.

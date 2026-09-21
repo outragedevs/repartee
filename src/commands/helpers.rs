@@ -181,3 +181,38 @@ mod tests {
         }
     }
 }
+
+pub(super) fn persist_session_config(app: &mut App, path: &std::path::Path) -> bool {
+    app.cached_config_toml = None;
+    match crate::config::save_config(path, &app.config) {
+        Ok(()) => true,
+        Err(error) => {
+            let error = escape_format(&error.to_string());
+            add_local_event(app, &format!("{}Configuration changed for this session but could not be saved: {error}{}", super::types::C_ERR, super::types::C_RST));
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod persistence_feedback_tests {
+    #[test]
+    fn save_failure_is_reported_and_retry_persists_session_changes() {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        app.state.add_buffer(crate::state::buffer::Buffer::for_test("test", crate::state::buffer::BufferType::Server, "status"));
+        app.state.set_active_buffer("test/status");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::create_dir(&path).unwrap();
+        app.config.aliases.insert("example".into(), "/whois $0".into());
+        app.cached_config_toml = Some("stale".into());
+        assert!(!super::persist_session_config(&mut app, &path));
+        assert!(app.cached_config_toml.is_none());
+        assert_eq!(app.config.aliases["example"], "/whois $0");
+        assert!(app.state.active_buffer().unwrap().messages.back().unwrap().text.contains("for this session but could not be saved"));
+        std::fs::remove_dir(&path).unwrap();
+        assert!(super::persist_session_config(&mut app, &path));
+        let reloaded: crate::config::AppConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(reloaded.aliases["example"], "/whois $0");
+    }
+}
