@@ -469,7 +469,7 @@ impl App {
                 }
                 let prior = self.state.active_buffer_id.clone();
                 self.state.active_buffer_id = Some(buffer_id);
-                crate::commands::helpers::add_local_event(self, &display);
+                crate::commands::helpers::add_literal_local_event(self, &display);
                 self.state.active_buffer_id = prior;
             }
             ShrinkDeliver::Outgoing(out) => {
@@ -754,5 +754,25 @@ mod tests {
             apply_substitutions(text, &shorts, false),
             "https://shr.al/1 and https://shr.al/2"
         );
+    }
+}
+
+#[cfg(test)]
+mod manual_output_tests {
+    #[test]
+    fn manual_results_preserve_percent_sequences_in_the_original_buffer() {
+        use crate::state::buffer::{Buffer, BufferType};
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        for name in ["source", "other"] {
+            app.state.add_buffer(Buffer::for_test("test", BufferType::Query, name));
+        }
+        app.state.set_active_buffer("test/other");
+        let display = "Shortened: https://example.org/a%20b/%N/%Zabcdef → https://s.example/x%25 (cached)";
+        app.apply_shrink_deliver(super::ShrinkDeliver::Manual { buffer_id: "test/source".into(), display: display.into() });
+        let row = app.state.buffers["test/source"].messages.back().unwrap();
+        let rendered: String = crate::theme::parse_format_string(&row.text, &[]).iter().map(|span| span.text.as_str()).collect();
+        assert_eq!(rendered, display);
+        assert_eq!(app.state.active_buffer_id.as_deref(), Some("test/other"));
+        assert!(app.state.buffers["test/other"].messages.is_empty());
     }
 }

@@ -29,6 +29,10 @@ pub fn escape_format(text: &str) -> String {
     text.replace('%', "%%")
 }
 
+pub fn add_literal_local_event(app: &mut App, text: &str) {
+    add_local_event(app, &escape_format(text));
+}
+
 pub fn add_local_event(app: &mut App, text: &str) {
     let Some(active_id) = app.state.active_buffer_id.as_deref() else {
         return;
