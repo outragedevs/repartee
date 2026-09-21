@@ -119,7 +119,7 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
             "wizard",
             CommandDef {
                 handler: cmd_wizard,
-                description: "Open a guided add/edit form (server)",
+                description: "Open settings or the guided server form",
                 aliases: &[],
                 category: CommandCategory::Connection,
             },

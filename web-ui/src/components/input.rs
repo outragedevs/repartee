@@ -444,7 +444,7 @@ pub fn InputLine() -> impl IntoView {
             if ev.ctrl_key() || ev.alt_key() || ev.meta_key() {
                 return;
             }
-            if state.wizard_open.get_untracked()
+            if state.settings_open.get_untracked() || state.wizard_open.get_untracked()
                 || state.emote_picker_open.get_untracked()
                 || state.emoji_picker_open.get_untracked()
                 || state.appearance_open.get_untracked()
@@ -505,6 +505,10 @@ pub fn InputLine() -> impl IntoView {
         // Checked before the active-buffer guard so it works at bootstrap, when
         // a client with no servers yet has no active buffer.
         let whole = text.trim();
+        if whole == "/wizard" {
+            super::settings::open_settings(state);
+            return;
+        }
         if whole == "/wizard server" || whole.starts_with("/wizard server ") {
             state.wizard_open.set(true);
             return;

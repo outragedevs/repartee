@@ -14,6 +14,7 @@ pub mod status_line;
 pub mod styled_text;
 pub mod topic_bar;
 pub mod wizard;
+pub mod settings;
 
 use std::io::{self, Write};
 

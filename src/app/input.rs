@@ -166,6 +166,11 @@ impl App {
 
     #[allow(clippy::too_many_lines)]
     fn handle_key(&mut self, key: event::KeyEvent) {
+        if let Some(panel) = &mut self.settings_panel {
+            let action = panel.key(key);
+            self.settings_action(action);
+            return;
+        }
         // Shell input mode: forward most keys to the active shell PTY.
         if self.shell_input_active {
             if matches!(key.code, KeyCode::Char('a' | 'A'))
@@ -448,6 +453,10 @@ impl App {
     }
 
     pub(crate) fn handle_paste(&mut self, text: &str) {
+        if let Some(panel) = &mut self.settings_panel {
+            panel.insert(text);
+            return;
+        }
         // Wizard overlay (top-most modal) captures paste: insert it into the
         // focused text field. Fields are single-line, so take the first pasted
         // line and drop control chars. Swallowed even when a non-text field is
@@ -582,11 +591,21 @@ impl App {
         }
     }
 
+    #[expect(clippy::too_many_lines)]
     fn handle_mouse(&mut self, mouse: event::MouseEvent) {
+        if let Some(panel) = &mut self.settings_panel {
+            let action = panel.mouse(mouse);
+            self.settings_action(action);
+            return;
+        }
         let Some(regions) = self.ui_regions else {
             return;
         };
         let pos = Position::new(mouse.column, mouse.row);
+        if self.wizard.is_none() && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && regions.settings_area.is_some_and(|r| r.contains(pos)) {
+            self.open_settings();
+            return;
+        }
 
         // Wizard overlay (top-most modal) captures all mouse use while open.
         if self.wizard.is_some() {
@@ -2994,6 +3013,7 @@ pub mod submit_typing_tests {
             emote_anim_start: Instant::now(),
             emote_picker: crate::ui::emote_picker::EmotePickerState::default(),
             wizard: None,
+            settings_panel: None,
             needs_full_redraw: false,
             outer_terminal: "xterm".to_string(),
             color_support: crate::nick_color::ColorSupport::TrueColor,

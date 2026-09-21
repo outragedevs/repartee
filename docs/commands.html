@@ -1619,44 +1619,47 @@ HTTPS is required when the IRC connection uses TLS. Upload redirects are refused
 <div id="wizard" class="command-entry" data-command="wizard" data-category="Connection">
 <h1>/wizard</h1>
 <h2>Syntax</h2>
-<pre><code>/wizard server [id]
+<pre><code>/wizard
+/wizard server [id]
 </code></pre>
-<h2>Description</h2>
-<p>Open a guided popup form — a friendlier alternative to memorising <code>/server add</code>
-flags. The form is a fixed-size modal with two pages, <strong>Basics</strong> and
-<strong>Advanced</strong>, switched with the <code>◂ ▸</code> arrows or by clicking the tab row.</p>
-<p>Both keyboard and mouse work throughout:</p>
+<h2>Settings</h2>
+<p>Open Settings with <code>/wizard</code> or the gear in the top-right corner of the terminal
+or web interface. The panel contains Networks &amp; Connections, Appearance,
+Messages, Notifications, History &amp; Privacy, Keyboard, Extensions, and Advanced.
+Search finds settings across all sections. Each field includes a description
+and indicates whether a reconnect or restart is needed.</p>
+<p>Changes remain in a draft until <strong>Save</strong>. <strong>Cancel</strong> discards the draft and
+reverts browser appearance previews. <strong>Section defaults</strong> restores defaults for
+the selected section, preserving existing network identities and credentials.
+If an edited setting changed elsewhere, reopen the panel before saving it.</p>
+<p>Browser text size, line spacing, image-preview visibility, and following the
+terminal&#39;s active buffer remain local browser preferences. Other settings are
+shared with the terminal. Complex collections (aliases, ignore rules, statusbar
+items, translation models) use JSON fields with descriptions of their shape.</p>
+<p>Passwords are never prefilled. A configured indicator means an existing secret
+is present; leaving the field untouched preserves it. Replacements are written
+to <code>.env</code>, never to <code>config.toml</code>.</p>
+<h3>Terminal controls</h3>
 <ul>
-<li><strong>Tab</strong> / <strong>Shift-Tab</strong> move between fields and the Save/Cancel buttons</li>
-<li><strong>Space</strong> toggles the focused checkbox</li>
-<li><strong>← →</strong> switch pages (or cycle the focused dropdown, e.g. SASL mechanism)</li>
-<li><strong>Enter</strong> on Save commits; <strong>Esc</strong> (or Cancel) closes without saving</li>
-<li><strong>Click</strong> a field to focus it, a checkbox to toggle, a tab to switch pages, or
-a button to press it</li>
+<li>Click categories, fields, toggles, lists, or action buttons.</li>
+<li><strong>Tab / Shift-Tab</strong> or <strong>Down / Up</strong> move focus; the field list scrolls.</li>
+<li><strong>Alt+Left / Alt+Right</strong> switch categories; <strong>Ctrl+F</strong> focuses search.</li>
+<li><strong>Enter</strong> activates a focused button, toggle or choice.</li>
+<li><strong>Ctrl+S</strong> saves; <strong>Esc</strong> cancels.</li>
+<li>Text fields support arrows, Home/End, Delete/Backspace and paste.</li>
 </ul>
-<p><strong>Basics:</strong> Network Name, server address/IP, port, Use TLS/SSL, Verify TLS
-certificate, Bind IP.</p>
-<p><strong>Advanced:</strong> server id, nick, username, realname, channels, server password,
-SASL user/pass/mechanism, encoding, autoconnect, auto-reconnect, reconnect delay
-and max retries, autosendcmd, client cert path.</p>
-<p>Passwords (server password, SASL pass) are stored in <code>.env</code>, never <code>config.toml</code>.
-The manual <code>/server add</code> command is unchanged and still available.</p>
-<h2>Subcommands</h2>
-<h3>server</h3>
-<p>Open the add-server form.</p>
-<pre><code>/wizard server
-</code></pre>
-<p>With an id, open the form pre-filled to <strong>edit</strong> that existing server (the id
-field is locked):</p>
-<pre><code>/wizard server libera
-</code></pre>
-<p>On edit, leaving a password field blank keeps the stored credential unchanged.</p>
-<h2>Web UI</h2>
-<p>The wizard is also available in the web UI: click <strong>&quot;+ Add network&quot;</strong> or type
-<code>/wizard server</code>. The web form is add-only (editing an existing server is a TUI
-feature).</p>
+<p>The web panel supports desktop and phone layouts. Browser notifications use the
+existing push controls and require browser permission and server support.</p>
+<h2>Server shortcut</h2>
+<p><code>/wizard server</code> opens the existing guided add-network form. In the terminal,
+<code>/wizard server &lt;id&gt;</code> opens an existing network for editing. In the web client,
+existing networks can be edited in Settings under Networks &amp; Connections.</p>
+<p>The server form has Basics and Advanced pages. Tab/Shift-Tab move focus,
+Left/Right switch pages or choices, Space toggles checkboxes, and Enter on Save
+persists changes. Mouse controls are available throughout.</p>
 <h2>Examples</h2>
-<pre><code>/wizard server
+<pre><code>/wizard
+/wizard server
 /wizard server libera
 </code></pre>
 <h2>See Also</h2>

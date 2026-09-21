@@ -1,62 +1,62 @@
 ---
 category: Connection
-description: Open a guided add/edit form (server)
+description: Open settings or the guided server form
 ---
 
 # /wizard
 
 ## Syntax
 
+    /wizard
     /wizard server [id]
 
-## Description
+## Settings
 
-Open a guided popup form — a friendlier alternative to memorising `/server add`
-flags. The form is a fixed-size modal with two pages, **Basics** and
-**Advanced**, switched with the `◂ ▸` arrows or by clicking the tab row.
+Open Settings with `/wizard` or the gear in the top-right corner of the terminal
+or web interface. The panel contains Networks & Connections, Appearance,
+Messages, Notifications, History & Privacy, Keyboard, Extensions, and Advanced.
+Search finds settings across all sections. Each field includes a description
+and indicates whether a reconnect or restart is needed.
 
-Both keyboard and mouse work throughout:
+Changes remain in a draft until **Save**. **Cancel** discards the draft and
+reverts browser appearance previews. **Section defaults** restores defaults for
+the selected section, preserving existing network identities and credentials.
+If an edited setting changed elsewhere, reopen the panel before saving it.
 
-- **Tab** / **Shift-Tab** move between fields and the Save/Cancel buttons
-- **Space** toggles the focused checkbox
-- **← →** switch pages (or cycle the focused dropdown, e.g. SASL mechanism)
-- **Enter** on Save commits; **Esc** (or Cancel) closes without saving
-- **Click** a field to focus it, a checkbox to toggle, a tab to switch pages, or
-  a button to press it
+Browser text size, line spacing, image-preview visibility, and following the
+terminal's active buffer remain local browser preferences. Other settings are
+shared with the terminal. Complex collections (aliases, ignore rules, statusbar
+items, translation models) use JSON fields with descriptions of their shape.
 
-**Basics:** Network Name, server address/IP, port, Use TLS/SSL, Verify TLS
-certificate, Bind IP.
+Passwords are never prefilled. A configured indicator means an existing secret
+is present; leaving the field untouched preserves it. Replacements are written
+to `.env`, never to `config.toml`.
 
-**Advanced:** server id, nick, username, realname, channels, server password,
-SASL user/pass/mechanism, encoding, autoconnect, auto-reconnect, reconnect delay
-and max retries, autosendcmd, client cert path.
+### Terminal controls
 
-Passwords (server password, SASL pass) are stored in `.env`, never `config.toml`.
-The manual `/server add` command is unchanged and still available.
+- Click categories, fields, toggles, lists, or action buttons.
+- **Tab / Shift-Tab** or **Down / Up** move focus; the field list scrolls.
+- **Alt+Left / Alt+Right** switch categories; **Ctrl+F** focuses search.
+- **Enter** activates a focused button, toggle or choice.
+- **Ctrl+S** saves; **Esc** cancels.
+- Text fields support arrows, Home/End, Delete/Backspace and paste.
 
-## Subcommands
+The web panel supports desktop and phone layouts. Browser notifications use the
+existing push controls and require browser permission and server support.
 
-### server
+## Server shortcut
 
-Open the add-server form.
+`/wizard server` opens the existing guided add-network form. In the terminal,
+`/wizard server <id>` opens an existing network for editing. In the web client,
+existing networks can be edited in Settings under Networks & Connections.
 
-    /wizard server
-
-With an id, open the form pre-filled to **edit** that existing server (the id
-field is locked):
-
-    /wizard server libera
-
-On edit, leaving a password field blank keeps the stored credential unchanged.
-
-## Web UI
-
-The wizard is also available in the web UI: click **"+ Add network"** or type
-`/wizard server`. The web form is add-only (editing an existing server is a TUI
-feature).
+The server form has Basics and Advanced pages. Tab/Shift-Tab move focus,
+Left/Right switch pages or choices, Space toggles checkboxes, and Enter on Save
+persists changes. Mouse controls are available throughout.
 
 ## Examples
 
+    /wizard
     /wizard server
     /wizard server libera
 

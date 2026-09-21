@@ -1,6 +1,7 @@
 pub mod defaults;
 pub mod env;
 pub mod network_scope;
+pub mod settings;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -375,10 +376,7 @@ pub struct ServerConfig {
     pub bind_ip: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoding: Option<String>,
-    #[serde(
-        default = "default_true_option",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_reconnect: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconnect_delay: Option<u64>,
@@ -413,14 +411,6 @@ pub struct ServerConfig {
 fn deserialize_bouncer_network_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Option<String>, D::Error> {
     let value = Option::<String>::deserialize(deserializer)?;
     value.map(|id| crate::irc::bouncer::normalize_network_id(&id).map_err(serde::de::Error::custom)).transpose()
-}
-
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "serde default requires Option<bool> return type"
-)]
-const fn default_true_option() -> Option<bool> {
-    Some(true)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

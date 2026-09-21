@@ -64,7 +64,9 @@ pub fn Layout() -> impl IntoView {
             if event.key() != "Escape" {
                 return;
             }
-            if state.appearance_open.get_untracked() {
+            if state.settings_open.get_untracked() {
+                if !state.settings_saving.get_untracked() { state.settings_open.set(false); }
+            } else if state.appearance_open.get_untracked() {
                 state.appearance_open.set(false);
             } else if state.emoji_picker_open.get_untracked() {
                 state.emoji_picker_open.set(false);
@@ -83,6 +85,7 @@ pub fn Layout() -> impl IntoView {
         <div class="app">
             // Add-server wizard modal (fixed-position overlay; rendered once).
             <ServerWizard />
+            <super::settings::SettingsPanel />
             // Emote/emoji picker + appearance modals (fixed-position
             // overlays; rendered once — never inside the transformed slide
             // panels, where position:fixed would break).
@@ -102,7 +105,7 @@ pub fn Layout() -> impl IntoView {
                 </div>
             })}
             <div class="layout-host" inert=move || {
-                state.appearance_open.get()
+                (state.settings_open.get() || state.appearance_open.get())
                     || state.emoji_picker_open.get()
                     || state.emote_picker_open.get()
                     || state.wizard_open.get()
@@ -212,6 +215,7 @@ fn ResponsiveLayout() -> impl IntoView {
         <div class="responsive-layout" on:touchstart=on_touch_start on:touchend=on_touch_end>
             <div class="desktop-topic">
                 <TopicBar />
+                <super::settings::SettingsButton />
             </div>
             <div class="mobile-topbar">
                 <button type="button" class="hamburger" aria-label="Open buffers"
@@ -238,6 +242,7 @@ fn ResponsiveLayout() -> impl IntoView {
                     })}
                 </div>
                 <div class="mobile-topbar-right">
+                    <super::settings::SettingsButton />
                     {move || {
                         let count = state.mention_count.get();
                         (count > 0).then(|| view! {

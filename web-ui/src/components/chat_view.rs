@@ -1263,11 +1263,11 @@ fn nick_color_or_empty(state: AppState, nick: &str, colors_apply: bool) -> Strin
 /// previews even if the server has them enabled. Any other value (missing,
 /// `"true"`, etc.) means "show them". No UI toggle yet — power users flip
 /// it from devtools; a Settings panel toggle is the obvious follow-up.
-const IMAGE_PREVIEWS_TOGGLE_KEY: &str = "web_image_previews_enabled";
+pub const IMAGE_PREVIEWS_TOGGLE_KEY: &str = "web_image_previews_enabled";
 
 /// Read the per-browser image-previews override. Returns `true` (show) when
 /// the key is absent or any value other than the literal `"false"`.
-fn previews_enabled_in_browser() -> bool {
+pub fn previews_enabled_in_browser() -> bool {
     let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) else {
         return true;
     };
@@ -1289,6 +1289,7 @@ fn render_previews(
     msg_id: u64,
     previews: Vec<crate::protocol::LinkPreview>,
 ) -> Option<leptos::prelude::AnyView> {
+    let _ = state.browser_preferences_revision.get();
     if previews.is_empty() || !previews_enabled_in_browser() {
         return None;
     }

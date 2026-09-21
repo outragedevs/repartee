@@ -74,6 +74,7 @@ pub mod shrink;
 pub mod translate;
 pub mod typing;
 mod web;
+mod settings;
 mod who;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -485,6 +486,7 @@ pub struct App {
     pub emote_picker: crate::ui::emote_picker::EmotePickerState,
     /// Open add/edit-server (or future) wizard overlay, if any.
     pub wizard: Option<crate::ui::wizard::WizardState>,
+    pub settings_panel: Option<crate::ui::settings::SettingsPanel>,
     pub needs_full_redraw: bool,
     pub outer_terminal: String,
     pub color_support: crate::nick_color::ColorSupport,
@@ -960,6 +962,7 @@ impl App {
             emote_anim_start: Instant::now(),
             emote_picker: crate::ui::emote_picker::EmotePickerState::default(),
             wizard: None,
+            settings_panel: None,
             needs_full_redraw: false,
             outer_terminal: outer_terminal.to_string(),
             color_support,

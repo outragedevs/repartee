@@ -1439,3 +1439,36 @@ textarea {
 .push-settings button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .buffer-item .network-icon { width: 20px; height: 20px; object-fit: contain; flex: 0 0 20px; }
+
+.settings-gear { border: 0; background: transparent; color: inherit; font-size: 22px; cursor: pointer; padding: 2px 10px; flex-shrink: 0; }
+.desktop-topic { position: relative; padding-right: 42px; }
+.desktop-topic > .settings-gear { position: absolute; top: 0; right: 0; }
+.settings-overlay { position: fixed; inset: 0; z-index: 1200; background: #0008; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.settings-dialog { width: min(100%, 1000px); height: min(90dvh, 850px); display: flex; flex-direction: column; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.settings-dialog header, .settings-dialog footer { display: flex; align-items: center; gap: 12px; padding: 12px 16px; flex-shrink: 0; }
+.settings-dialog header h2 { flex: 1; font-size: 18px; }
+.settings-dialog button { cursor: pointer; color: inherit; background: var(--bg-alt); border: 1px solid var(--border); padding: 8px 12px; border-radius: 4px; }
+.settings-dialog button:disabled { opacity: .5; cursor: wait; }
+.settings-dialog input:not([type=checkbox]), .settings-dialog textarea, .settings-dialog select { width: 100%; padding: 8px; background: var(--bg-alt); color: inherit; border: 1px solid var(--border); border-radius: 4px; font: inherit; }
+.settings-dialog .settings-search { margin: 0 16px 12px; width: calc(100% - 32px); }
+.settings-body { display: flex; min-height: 0; flex: 1; }
+.settings-body nav { width: 220px; flex-shrink: 0; overflow: auto; padding: 0 12px; display: flex; flex-direction: column; gap: 6px; }
+.settings-body nav button { text-align: left; }
+.settings-body nav button.active { outline: 2px solid var(--accent); }
+.settings-fields { border: 0; margin: 0; min-width: 0; flex: 1; overflow: auto; padding: 0 16px 16px; }
+.settings-field { padding: 12px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.settings-field > label { display: block; margin-bottom: 6px; font-weight: bold; }
+.settings-field p, .settings-local label { margin-top: 8px; }
+.settings-field p, .settings-field small { opacity: .75; font-size: 12px; }
+.settings-field textarea { resize: vertical; min-height: 80px; }
+.settings-local { padding: 12px; border: 1px solid var(--border); margin-bottom: 12px; }
+.settings-local label { display: block; }
+.settings-error { color: var(--red, #e66); padding: 8px 16px; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+    .settings-overlay { padding: 0; }
+    .settings-dialog { height: 100dvh; width: 100%; border-radius: 0; }
+    .settings-body { flex-direction: column; }
+    .settings-body nav { width: 100%; flex-direction: row; padding-bottom: 10px; }
+    .settings-body nav button { white-space: nowrap; }
+    .settings-dialog footer { flex-wrap: wrap; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+}

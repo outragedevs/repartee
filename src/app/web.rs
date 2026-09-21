@@ -730,6 +730,15 @@ impl App {
                 }
                 self.force_broadcast_web_shell_screen(&web_id);
             }
+            WebCommand::GetSettings => {
+                self.broadcast_web(crate::web::protocol::WebEvent::SettingsSnapshot {
+                    fields: crate::config::settings::catalog::fields(&self.config), session_id: session_id.to_string(),
+                });
+            }
+            WebCommand::SaveSettings { changes } => {
+                let error = self.save_settings(&changes).err();
+                self.broadcast_web(crate::web::protocol::WebEvent::SettingsSaved { error, session_id: session_id.to_string() });
+            }
             WebCommand::SaveServer(cmd) => {
                 let form = crate::ui::wizard::server::WebServerForm {
                     id: cmd.id,

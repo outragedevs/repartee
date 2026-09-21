@@ -8,6 +8,8 @@ mod nick_color;
 mod protocol;
 mod push;
 mod state;
+#[path = "../../shared/settings.rs"]
+mod settings_model;
 mod ws;
 
 fn main() {

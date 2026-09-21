@@ -16,6 +16,7 @@ pub struct UiRegions {
     pub chat_area: Option<Rect>,
     pub nick_list_area: Option<Rect>,
     pub topic_area: Option<Rect>,
+    pub settings_area: Option<Rect>,
     pub status_area: Option<Rect>,
     pub input_area: Option<Rect>,
 }
@@ -81,10 +82,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .areas(frame.area());
 
+    let [topic_area, settings_area] = Layout::horizontal([Constraint::Min(0), Constraint::Length(3)]).areas(topic_area);
     super::topic_bar::render(frame, topic_area, app);
+    frame.render_widget(ratatui::widgets::Paragraph::new(" ⚙ "), settings_area);
 
     let mut regions = UiRegions {
         topic_area: Some(topic_area),
+        settings_area: Some(settings_area),
         ..Default::default()
     };
 
@@ -164,6 +168,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     // Wizard overlay (above the emote picker — the top-most modal when open).
     super::wizard::render(frame, frame.area(), app);
+    super::settings::render(frame, frame.area(), app);
 
     // Targeted repaint after image dismiss (Kitty/iTerm2 only).
     // The graphics layer was already cleaned up by escape sequences.
