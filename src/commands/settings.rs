@@ -16,7 +16,7 @@ pub use crate::config::settings::{get_setting_paths, parse_sasl_mechanism};
 
 // === Command handler ===
 
-fn decode_setting_value(raw: &str) -> Result<String, &'static str> {
+pub(super) fn decode_setting_value(raw: &str) -> Result<String, &'static str> {
     if raw.contains(['\n', '\r', '\0']) {
         return Err("Setting values must be a single line without NUL characters");
     }

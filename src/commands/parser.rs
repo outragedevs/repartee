@@ -71,6 +71,30 @@ pub fn parse_command(input: &str) -> Option<ParsedCommand> {
         rest.trim()
     };
 
+    if canonical == "items" {
+        let head_count = match rest.split_whitespace().next() {
+            Some("format") => 2,
+            Some("separator") => 1,
+            _ => 0,
+        };
+        if head_count > 0 {
+            let mut tail = rest;
+            let mut args = Vec::new();
+            for _ in 0..head_count {
+                if let Some(index) = tail.find(char::is_whitespace) {
+                    args.push(tail[..index].to_string());
+                    tail = tail[index..].trim_start();
+                } else {
+                    if !tail.is_empty() { args.push(tail.to_string()); }
+                    tail = "";
+                    break;
+                }
+            }
+            if !tail.is_empty() { args.push(tail.to_string()); }
+            return Some(ParsedCommand { name: command, args });
+        }
+    }
+
     if canonical == "upload" {
         let args = shell_words::split(&rest.replace('#', "\0"))
             .map(|words| words.into_iter().map(|word| word.replace('\0', "#")).collect())
@@ -261,5 +285,29 @@ mod tests {
         let cmd = parse_command("/connect irc.example.com:6697 -tls").unwrap();
         assert_eq!(cmd.name, "connect");
         assert_eq!(cmd.args, vec!["irc.example.com:6697", "-tls"]);
+    }
+}
+
+#[cfg(test)]
+mod items_value_tests {
+    #[test]
+    fn item_text_tails_preserve_spaces_and_decode_quotes() {
+        for command in ["/items format time", "/items separator"] {
+            for (value, expected) in [
+                ("one  two", "one  two"),
+                ("\"  %H:%M  text  \"", "  %H:%M  text  "),
+                ("' | '", " | "),
+                ("\"\"", ""),
+            ] {
+                let parsed = super::parse_command(&format!("{command} {value}")).unwrap();
+                let decoded = crate::commands::settings::decode_setting_value(parsed.args.last().unwrap()).unwrap();
+                assert_eq!(decoded, expected);
+            }
+            let parsed = super::parse_command(&format!("{command} \"unfinished")).unwrap();
+            assert!(crate::commands::settings::decode_setting_value(parsed.args.last().unwrap()).is_err());
+        }
+        assert_eq!(super::parse_command("/items move time 2").unwrap().args, ["move", "time", "2"]);
+        assert_eq!(super::parse_command("/items format time").unwrap().args, ["format", "time"]);
+        assert_eq!(super::parse_command("/items separator").unwrap().args, ["separator"]);
     }
 }

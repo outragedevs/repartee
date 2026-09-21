@@ -49,7 +49,9 @@ Set or view the format string for a statusbar item.
 
     /items format <item> [format_string]
 
-Without a format string, shows the current format.
+Without a format string, shows the current format. The full remaining text is
+used as the value. Enclose it in single or double quotes to preserve leading
+or trailing spaces; `""` sets an empty value.
 
 ### separator
 
@@ -57,7 +59,8 @@ Set or view the separator between statusbar items.
 
     /items separator [string]
 
-Without a string, shows the current separator.
+Without a string, shows the current separator. Quotes are removed from the
+value: `/items separator " | "` preserves spaces around the separator.
 
 ### available
 
