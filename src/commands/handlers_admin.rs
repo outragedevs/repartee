@@ -1022,10 +1022,32 @@ fn log_status(app: &mut App) {
 
 pub(crate) fn cmd_preview(app: &mut App, args: &[String]) {
     if args.is_empty() {
+        if let crate::app::translate::SubmitOrigin::Web(session_id) = &app.submit_origin {
+            app.broadcast_web(crate::web::protocol::WebEvent::Error {
+                message: "Usage: /preview <url>".into(),
+                session_id: Some(session_id.clone()),
+            });
+            return;
+        }
         add_local_event(app, "Usage: /preview <url>");
         return;
     }
     let url = &args[0];
+    if let crate::app::translate::SubmitOrigin::Web(session_id) = &app.submit_origin {
+        let session_id = session_id.clone();
+        let preview = app.state.web_preview_extractor.as_ref()
+            .and_then(|extractor| extractor.extract(url).into_iter().next());
+        if let Some(preview) = preview
+            && let Some(thumb) = preview.thumb_url {
+            app.broadcast_web(crate::web::protocol::WebEvent::PreviewImage { url: thumb, source: preview.link, session_id });
+        } else {
+            app.broadcast_web(crate::web::protocol::WebEvent::Error {
+                message: "Web previews are disabled or this URL cannot be previewed.".into(),
+                session_id: Some(session_id),
+            });
+        }
+        return;
+    }
 
     if !app.config.image_preview.enabled {
         add_local_event(
@@ -2353,5 +2375,22 @@ mod literal_search_tests {
             let rendered: Vec<String> = app.state.active_buffer().unwrap().messages.iter().map(|row| crate::theme::parse_format_string(&row.text, &[]).iter().map(|span| span.text.as_str()).collect()).collect();
             assert!(rendered.iter().any(|line| line.contains(original) && line.contains("<nick%N>")), "{rendered:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod web_preview_command_tests {
+    #[test]
+    fn preview_targets_requesting_browser_without_opening_terminal_preview() {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        app.submit_origin = crate::app::translate::SubmitOrigin::Web("browser-one".into());
+        app.state.web_preview_extractor = Some(std::sync::Arc::new(crate::web::preview::WebPreviewExtractor::new(vec![7; 32], 2, 1)));
+        let mut receiver = app.web_broadcaster.subscribe();
+        super::cmd_preview(&mut app, &["https://example.org/image.png".into()]);
+        let crate::web::protocol::WebEvent::PreviewImage { url, source, session_id } = receiver.try_recv().unwrap() else { panic!("expected browser preview") };
+        assert_eq!(session_id, "browser-one");
+        assert_eq!(source, "https://example.org/image.png");
+        assert!(url.starts_with("/api/preview?"));
+        assert!(matches!(app.image_preview, crate::image_preview::PreviewStatus::Hidden));
     }
 }

@@ -41,7 +41,7 @@ async fn updates_before_subscription_ack_are_scoped_and_seed_new_buffers() {
     for key in Key::ALL { receive(&mut app, &format!(":bouncer 770 * {}", key.wire())); }
     assert_eq!(app.bouncer_metadata["first"].acknowledged.len(), 3);
     assert!(logs.try_recv().is_err());
-    let snapshot = crate::web::snapshot::build_sync_init(&app.state, 0, "%H:%M", false, &app.config.statusbar);
+    let snapshot = crate::web::snapshot::build_sync_init(&app.state, 0, "%H:%M", false, false, &app.config.statusbar);
     let crate::web::protocol::WebEvent::SyncInit { buffers, .. } = snapshot else { panic!("missing snapshot"); };
     assert!(buffers.iter().find(|buffer| buffer.id == "first/#room").unwrap().pinned);
 }

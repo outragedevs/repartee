@@ -248,6 +248,14 @@ pub fn InputLine() -> impl IntoView {
     let (popup, set_popup) = signal(None::<PopupData>);
     let (popup_sel, set_popup_sel) = signal(0usize);
     let (popup_engaged, set_popup_engaged) = signal(false);
+    Effect::new(move |_| {
+        if !state.emotes_input_enabled.get() {
+            set_popup.set(None);
+            set_tab_matches.set(Vec::new());
+            set_tab_active.set(false);
+            set_popup_engaged.set(false);
+        }
+    });
 
     let input_ref = NodeRef::<leptos::html::Textarea>::new();
 
@@ -503,14 +511,7 @@ pub fn InputLine() -> impl IntoView {
         if super::settings::handle_wizard_command(state, whole) {
             return;
         }
-        // `/emoji` (and the `/emote`/`/emotes` aliases) open the GG emote picker
-        // client-side rather than dispatching to the server. `/emote <name>`
-        // still goes to the server for its insert/search behaviour.
-        if matches!(
-            whole.to_ascii_lowercase().as_str(),
-            "/emoji" | "/emote" | "/emotes"
-        ) {
-            state.emote_picker_open.set(true);
+        if super::emote_picker::handle_emote_command(state, whole) {
             return;
         }
         let Some(buffer_id) = state.active_buffer.get() else {
@@ -558,6 +559,7 @@ pub fn InputLine() -> impl IntoView {
         for line in text.lines() {
             if line.trim_start().starts_with('/') {
                 flush(&mut pending);
+                if super::emote_picker::handle_emote_command(state, line.trim()) { continue; }
                 crate::ws::send_command(&WebCommand::RunCommand {
                     buffer_id: buffer_id.clone(),
                     text: line.trim().to_string(),
@@ -573,7 +575,7 @@ pub fn InputLine() -> impl IntoView {
         // Ctrl+G opens the GG emote picker (parity with the TUI keybind).
         if ev.ctrl_key() && ev.key().eq_ignore_ascii_case("g") {
             ev.prevent_default();
-            state.emote_picker_open.set(true);
+            if state.emotes_input_enabled.get_untracked() { state.emote_picker_open.set(true); }
             return;
         }
 
@@ -831,7 +833,8 @@ pub fn InputLine() -> impl IntoView {
                 type="button"
                 class="input-emote-btn"
                 title="GG emotes (/emoji, Ctrl+G)"
-                on:click=move |_| state.emote_picker_open.set(true)
+                disabled=move || !state.emotes_input_enabled.get()
+                on:click=move |_| { if state.emotes_input_enabled.get_untracked() { state.emote_picker_open.set(true); } }
             >"GG"</button>
             <button
                 type="button"
@@ -1044,7 +1047,7 @@ fn compute_popup(text: &str, cursor: usize, state: &AppState) -> Option<PopupDat
     } else {
         Vec::new()
     };
-    popup_matches(text, cursor, &nicks, state.emotes_enabled.get_untracked())
+    popup_matches(text, cursor, &nicks, state.emotes_input_enabled.get_untracked())
 }
 
 /// Completion popup candidates for the word at the caret.
@@ -1177,7 +1180,7 @@ fn build_tab_matches(text: &str, word_start: usize, typed: &str, state: &AppStat
     }
 
     // Case 3: `:name:` emote completion (gated on the emotes setting).
-    if state.emotes_enabled.get_untracked() {
+    if state.emotes_input_enabled.get_untracked() {
         let emotes = emote_tab_matches(typed);
         if !emotes.is_empty() {
             return emotes;

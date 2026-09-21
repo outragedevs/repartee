@@ -155,6 +155,7 @@ impl App {
                 active_buffer_id: None,
                 timestamp_format: self.config.web.timestamp_format.clone(),
                 emotes_enabled: self.config.emotes.web_enabled(),
+                emotes_input_enabled: self.emotes_input_enabled(),
                 typing: std::collections::HashMap::new(),
                 statusbar_items: crate::web::snapshot::statusbar_item_names(
                     &self.config.statusbar,
@@ -352,6 +353,7 @@ impl App {
             mention_count,
             &self.config.web.timestamp_format,
             self.config.emotes.web_enabled(),
+            self.emotes_input_enabled(),
             &self.config.statusbar,
         );
         if let crate::web::protocol::WebEvent::SyncInit {
@@ -361,6 +363,7 @@ impl App {
             active_buffer_id,
             timestamp_format,
             emotes_enabled,
+            emotes_input_enabled,
             typing,
             statusbar_items,
             statusbar_enabled,
@@ -374,6 +377,7 @@ impl App {
             snap.active_buffer_id = active_buffer_id;
             snap.timestamp_format = timestamp_format;
             snap.emotes_enabled = emotes_enabled;
+            snap.emotes_input_enabled = emotes_input_enabled;
             snap.typing = typing;
             snap.statusbar_items = statusbar_items;
             snap.statusbar_enabled = statusbar_enabled;

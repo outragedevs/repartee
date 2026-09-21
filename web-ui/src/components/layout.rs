@@ -64,7 +64,9 @@ pub fn Layout() -> impl IntoView {
             if event.key() != "Escape" {
                 return;
             }
-            if state.settings_open.get_untracked() {
+            if state.manual_preview.get_untracked().is_some() {
+                state.manual_preview.set(None);
+            } else if state.settings_open.get_untracked() {
                 if !state.settings_saving.get_untracked() { state.settings_open.set(false); }
             } else if state.appearance_open.get_untracked() {
                 state.appearance_open.set(false);
@@ -85,6 +87,15 @@ pub fn Layout() -> impl IntoView {
         <div class="app">
             // Add-server wizard modal (fixed-position overlay; rendered once).
             <ServerWizard />
+            {move || state.manual_preview.get().map(|(url, source)| view! {
+                <div class="wizard-backdrop" on:click=move |_| state.manual_preview.set(None)></div>
+                <div class="wizard-modal" role="dialog" aria-modal="true" aria-label="Image preview">
+                    <div class="wizard-head"><h3>"Image preview"</h3><button type="button" class="wizard-x" aria-label="Close preview" on:click=move |_| state.manual_preview.set(None)>"×"</button></div>
+                    <img src=url alt="Image preview" style="display:block;max-width:100%;max-height:70vh;object-fit:contain;margin:auto" on:error=move |_| { state.manual_preview.set(None); state.error.set(Some("Could not load this preview.".into())); } />
+                    <div class="wizard-foot"><a class="wizard-btn s" href=source target="_blank" rel="noopener noreferrer">"Open original"</a></div>
+                </div>
+            })}
+
             <super::settings::SettingsPanel />
             // Emote/emoji picker + appearance modals (fixed-position
             // overlays; rendered once — never inside the transformed slide
@@ -109,6 +120,7 @@ pub fn Layout() -> impl IntoView {
                     || state.emoji_picker_open.get()
                     || state.emote_picker_open.get()
                     || state.wizard_open.get()
+                    || state.manual_preview.get().is_some()
             }>
                 <ResponsiveLayout />
             </div>
