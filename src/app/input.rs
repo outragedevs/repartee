@@ -2149,6 +2149,21 @@ mod tests {
     }
 
     #[test]
+    fn alias_substitutions_do_not_reinterpret_inserted_values() {
+        for marker in ["$1", "$1-", "$*", "$-"] {
+            let template = format!("/msg $0 {marker}");
+            let values = args(&["bob", "$0", "${N}", "$1-", "żółć"]);
+            let expected = match marker {
+                "$1" => "/msg bob $0",
+                "$1-" => "/msg bob $0 ${N} $1- żółć",
+                _ => "/msg bob bob $0 ${N} $1- żółć",
+            };
+            assert_eq!(expand_alias_template(&template, &values, "", "me", ""), expected);
+        }
+        assert_eq!(expand_alias_template("$C $N ${S} $T $unknown $", &[], "#x$0", "n$C", "s$*"), "#x$0 n$C s$* #x$0 $unknown $");
+    }
+
+    #[test]
     fn alias_positional_args() {
         let result = expand_alias_template("/join $0", &args(&["#test"]), "", "", "");
         assert_eq!(result, "/join #test");
