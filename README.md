@@ -261,6 +261,13 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v2.1.1
+
+- **Shared settings panels for terminal and web.** A complete settings interface now exposes validated drafts, section resets, inherited values, pending-save protection, mouse controls, and browser-local settings consistently in both clients. Redesigned modals add network tabs and structured collection editors without losing unsaved browser drafts across reconnects.
+- **Dedicated encryption and translation workflows.** E2E and translation have their own settings pages, with per-network and per-channel wizards available in both the TUI and web UI. Stored selections render correctly, legacy SASL choices remain intact, and conflicting settings are rejected before save.
+- **Reliable multi-network startup.** Startup commands stay scoped to their configured network and run before automatic channel joins, preventing commands and joins from crossing connections during concurrent startup.
+- **Fixes for history and DCC.** Local event parameters are stored safely so historical WHOIS and themed events render correctly, and echoed outgoing DCC CHAT offers are recognized per network instead of reappearing as incoming invitations.
+
 ### v2.1.0
 
 - **First-class IRC bouncer support.** repartee now discovers and binds bouncer-managed networks, keeps their identities separate, restores them across reconnects, and supports Soju network management from `/bouncer`. Explicit bouncer names, account-required flows, interrupted registration recovery, and implicit PASS-authenticated networks are handled without leaking state between connections.
