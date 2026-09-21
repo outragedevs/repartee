@@ -102,12 +102,9 @@ pub(crate) fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
     // Passive DCC (port == 0, has token): we become the listener and the
     // remote peer connects to us once we reply with our address + token.
     if record.port == 0 && record.passive_token.is_some() {
-        let own_ip = resolve_own_ip(app);
+        let own_ip = resolve_own_ip(app, &record.conn_id);
         let bind_port = pick_bind_port(app.dcc.port_range);
-        let bind_addr = std::net::SocketAddr::new(
-            own_ip.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
-            bind_port,
-        );
+        let bind_addr = listener_address(own_ip, bind_port);
 
         // Bind listener synchronously so we can extract the actual port.
         let listener = match std::net::TcpListener::bind(bind_addr) {
@@ -272,12 +269,9 @@ fn initiate_dcc_chat(app: &mut App, nick: &str, passive: bool) {
         );
     } else {
         // Active DCC: bind a listener, send CTCP with our IP + port.
-        let own_ip = resolve_own_ip(app);
+        let own_ip = resolve_own_ip(app, &conn_id);
         let bind_port = pick_bind_port(app.dcc.port_range);
-        let bind_addr = std::net::SocketAddr::new(
-            own_ip.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
-            bind_port,
-        );
+        let bind_addr = listener_address(own_ip, bind_port);
 
         let listener = match std::net::TcpListener::bind(bind_addr) {
             Ok(l) => l,
@@ -356,20 +350,28 @@ fn initiate_dcc_chat(app: &mut App, nick: &str, passive: bool) {
     }
 }
 
+fn listener_address(advertised: Option<std::net::IpAddr>, port: u16) -> std::net::SocketAddr {
+    let ip = if advertised.is_some_and(|ip| ip.is_ipv6()) {
+        std::net::Ipv6Addr::UNSPECIFIED.into()
+    } else {
+        std::net::Ipv4Addr::UNSPECIFIED.into()
+    };
+    std::net::SocketAddr::new(ip, port)
+}
+
 /// Resolve the IP address to advertise in DCC offers.
 ///
 /// Priority: config override > IRC socket local address > 127.0.0.1 fallback.
 /// Matches erssi's approach: `getsockname()` on the IRC socket, then
 /// `dcc_own_ip` override. We reverse the check order since config takes
 /// precedence in our architecture.
-fn resolve_own_ip(app: &App) -> Option<std::net::IpAddr> {
+fn resolve_own_ip(app: &App, conn_id: &str) -> Option<std::net::IpAddr> {
     // 1. Explicit config override
     if let Some(ip) = app.dcc.own_ip {
         return Some(ip);
     }
     // 2. Local address of the active IRC TCP socket (erssi: getsockname on iface)
-    if let Some(conn_id) = app.active_conn_id()
-        && let Some(conn) = app.state.connections.get(conn_id)
+    if let Some(conn) = app.state.connections.get(conn_id)
         && let Some(ip) = conn.local_ip
     {
         // Skip loopback — not useful for DCC to remote peers
