@@ -135,7 +135,7 @@ fn SettingsDialog() -> impl IntoView {
                     <nav aria-label="Settings categories">
                         {SECTIONS.iter().enumerate().map(|(i, label)| view! { <button type="button" class:active=move || section.get() == i on:click=move |_| { section.set(i); search.set(String::new()); }>{*label}</button> }).collect_view()}
                     </nav>
-                    <div class="settings-fields">
+                    <fieldset class="settings-fields" disabled=move || state.settings_saving.get()>
                         <Show when=move || fields.get().is_empty()><p>"Loading settings…"</p></Show>
                         <Show when=move || section.get() == 0 && search.get().is_empty()><button type="button" on:click=add_network>"Add network…"</button></Show>
                         <Show when=move || section.get() == 1 && search.get().is_empty()>
@@ -160,13 +160,13 @@ fn SettingsDialog() -> impl IntoView {
                             let query = search.get().to_lowercase();
                             fields.get().into_iter().filter(|f| if query.is_empty() { f.spec.section == section.get() } else { format!("{} {} {}", f.spec.path, f.spec.label, f.spec.description).to_lowercase().contains(&query) }).collect::<Vec<_>>()
                         } key=|f| f.spec.path.clone() children=move |field| view! { <SettingsField field /> } />
-                    </div>
+                    </fieldset>
                 </div>
                 {move || state.settings_error.get().map(|error| view! { <p class="settings-error" role="alert">{error}</p> })}
                 <footer>
                     <button type="button" disabled=move || state.settings_saving.get() || fields.get().is_empty() on:click=save>{move || if state.settings_saving.get() { "Saving…" } else { "Save" }}</button>
                     <button type="button" disabled=move || state.settings_saving.get() on:click=move |_| state.settings_open.set(false)>"Cancel"</button>
-                    <button type="button" disabled=move || state.settings_saving.get() on:click=defaults>"Section defaults"</button>
+                    <button type="button" disabled=move || state.settings_saving.get() || !search.get().is_empty() title="Choose a category without an active search to restore its defaults" on:click=defaults>"Section defaults"</button>
                 </footer>
             </section>
         </div>

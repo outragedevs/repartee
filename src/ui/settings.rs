@@ -163,6 +163,10 @@ impl SettingsPanel {
             Focus::Cancel => Action::Cancel,
             Focus::Network => Action::Network,
             Focus::Defaults => {
+                if !self.query.is_empty() {
+                    self.error = Some("Choose a category without an active search before restoring defaults.".into());
+                    return Action::None;
+                }
                 for (i, field) in self
                     .fields
                     .iter_mut()
@@ -435,6 +439,7 @@ mod tests {
     fn focusing_secret_does_not_clear_it_and_cancel_keeps_source_unchanged() {
         let mut config = crate::config::AppConfig::default();
         config.web.password = "fixture-secret".into();
+        config.general.nick = "custom-nick".into();
         let mut panel = SettingsPanel::new(&config);
         let secret = panel
             .fields
@@ -444,6 +449,12 @@ mod tests {
         panel.set_focus(Focus::Field(secret));
         panel.activate();
         assert!(panel.changes().is_empty());
+        panel.query = "logging".into();
+        panel.set_focus(Focus::Defaults);
+        panel.activate();
+        assert!(panel.changes().is_empty());
+        assert!(panel.error.is_some());
+        panel.query.clear();
         let nick = panel
             .fields
             .iter()

@@ -40,7 +40,7 @@ All interface text is English. Open Settings through `/wizard` or the top-right 
 - [x] Browser practical check of the same flows at desktop and phone widths.
 - [x] Required `make clippy`, then `make test`; build WASM for web changes.
 - [x] Valuable regressions only: failed batch/save, secret redaction, draft cancellation, persistence and client isolation.
-- [ ] Clean pinned review, PR creation/attachment, merge, main synchronization and clean worktree verification.
+- Delivery gate: clean pinned review, PR creation/attachment, merge, main synchronization and clean worktree verification. Review and merge evidence is recorded on PR #130.
 
 ## Current evidence
 
@@ -59,3 +59,5 @@ Local checks passed: `make clippy` with no project warnings; `make test` with 2,
 Practical checks used an isolated daemon on HTTPS localhost port 18879 with synthetic credentials and no external IRC connection. Playwright exercised desktop and 390px-wide phone layouts, gear opening, draft cancellation, literal quote/percent/trailing-space persistence, invalid port rejection, preview rollback, browser-local persistence, section-default cancellation, and credential redaction. An attached PTY exercised the gear, `/wizard`, mouse edit/cancel, keyboard save, persisted reopen, and `/wizard server`.
 
 Temporary evidence: `/tmp/repartee-settings-audit/browser.log`, `desktop.png`, `mobile.png`, `tui.log`, and `tui-screen.txt`. A final pinned review and delivery audit remain required.
+
+The first pinned Sol medium review of `a7e5b06` returned no actionable findings. A subsequent UI audit tightened two interaction guards: fields are disabled while a web save is in flight, and section defaults require clearing cross-section search first. These final changes require a fresh review before merge. Restarting the isolated daemon also preserved the tested settings.

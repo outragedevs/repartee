@@ -1455,7 +1455,7 @@ textarea {
 .settings-body nav { width: 220px; flex-shrink: 0; overflow: auto; padding: 0 12px; display: flex; flex-direction: column; gap: 6px; }
 .settings-body nav button { text-align: left; }
 .settings-body nav button.active { outline: 2px solid var(--accent); }
-.settings-fields { min-width: 0; flex: 1; overflow: auto; padding: 0 16px 16px; }
+.settings-fields { border: 0; margin: 0; min-width: 0; flex: 1; overflow: auto; padding: 0 16px 16px; }
 .settings-field { padding: 12px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
 .settings-field > label { display: block; margin-bottom: 6px; font-weight: bold; }
 .settings-field p, .settings-local label { margin-top: 8px; }
