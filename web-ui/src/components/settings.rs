@@ -15,7 +15,6 @@ pub fn open_settings(state: AppState) {
     state.settings_error.set(None);
     state.settings_saving.set(false);
     state.settings_open.set(true);
-    crate::ws::send_command(&WebCommand::GetSettings);
 }
 
 #[component]
@@ -33,6 +32,11 @@ pub fn SettingsPanel() -> impl IntoView {
 #[component]
 fn SettingsDialog() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
+    Effect::new(move || {
+        if state.connected.get() && state.settings_fields.get_untracked().is_empty() {
+            crate::ws::send_command(&WebCommand::GetSettings);
+        }
+    });
     let section = RwSignal::new(0usize);
     let search = RwSignal::new(String::new());
     let fields = RwSignal::new(Vec::<DraftField>::new());

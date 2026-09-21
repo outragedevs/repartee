@@ -978,6 +978,9 @@ pub fn save_changes(
     config_path: &std::path::Path,
     env_path: &std::path::Path,
 ) -> Result<AppConfig, String> {
+    if changes.is_empty() {
+        return Ok(config.clone());
+    }
     let mut seen = std::collections::HashSet::new();
     for change in changes {
         if !seen.insert(&change.path) {
@@ -1068,6 +1071,20 @@ pub fn save_changes(
 #[cfg(test)]
 mod draft_tests {
     use super::*;
+
+    #[test]
+    fn empty_save_preserves_files_and_needs_no_writable_destination() {
+        let config = AppConfig::default();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let env = dir.path().join(".env");
+        let contents = "# Keep this comment\nunknown_key = true\n";
+        std::fs::write(&path, contents).unwrap();
+        save_changes(&config, &[], &path, &env).unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), contents);
+        assert!(!env.exists());
+        assert!(save_changes(&config, &[], dir.path(), dir.path()).is_ok());
+    }
 
     #[test]
     fn invalid_batch_keeps_original_and_rejects_unknown_paths() {
