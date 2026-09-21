@@ -1403,8 +1403,7 @@ impl App {
                 let our_nick = self
                     .state
                     .connections
-                    .values()
-                    .next()
+                    .get(&record.conn_id)
                     .map(|c| c.nick.clone())
                     .unwrap_or_default();
                 for line in text.split('\n') {
