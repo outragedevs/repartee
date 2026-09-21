@@ -1000,6 +1000,12 @@ pub fn save_changes(
         .map(|c| (c.path.as_str(), c.value.as_str()))
         .collect();
     let draft = prepare_changes(config, &values)?;
+    if changes.iter().any(|change| change.path == "general.theme") {
+        let theme_path = config_path.parent().unwrap_or_else(|| std::path::Path::new("."))
+            .join("themes").join(format!("{}.theme", draft.general.theme));
+        crate::theme::load_theme(&theme_path)
+            .map_err(|error| format!("general.theme: cannot load theme: {error}"))?;
+    }
     let mut env_changes: Vec<_> = changes
         .iter()
         .filter_map(|c| {
@@ -1071,6 +1077,37 @@ pub fn save_changes(
 #[cfg(test)]
 mod draft_tests {
     use super::*;
+
+    #[test]
+    fn broken_theme_rejects_the_whole_save_before_changing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let themes = dir.path().join("themes");
+        std::fs::create_dir(&themes).unwrap();
+        std::fs::write(themes.join("broken.theme"), "[invalid").unwrap();
+        let config = AppConfig::default();
+        let path = dir.path().join("config.toml");
+        let env = dir.path().join(".env");
+        let config_before = toml::to_string(&config).unwrap();
+        let env_before = "WEB_PASSWORD=old-fixture-password\n";
+        std::fs::write(&path, &config_before).unwrap();
+        std::fs::write(&env, env_before).unwrap();
+        let changes = [
+            crate::settings_model::SettingChange {
+                path: "general.theme".into(), original: config.general.theme.clone(), value: "broken".into(),
+            },
+            crate::settings_model::SettingChange {
+                path: "web.password".into(), original: String::new(), value: "new-fixture-password".into(),
+            },
+        ];
+        let error = save_changes(&config, &changes, &path, &env).unwrap_err();
+        assert!(error.contains("general.theme"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), config_before);
+        assert_eq!(std::fs::read_to_string(&env).unwrap(), env_before);
+        std::fs::write(themes.join("broken.theme"), "[colors]\naccent = '#123456'\n").unwrap();
+        let saved = save_changes(&config, &changes, &path, &env).unwrap();
+        assert_eq!(saved.general.theme, "broken");
+        assert_eq!(crate::config::load_config(&path).unwrap().general.theme, "broken");
+    }
 
     #[test]
     fn empty_save_preserves_files_and_needs_no_writable_destination() {
