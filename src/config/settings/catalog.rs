@@ -291,6 +291,12 @@ fn section(path: &str) -> usize {
 
 fn effect(path: &str) -> &'static str {
     match path {
+        "web.cloudflare_tunnel_name" | "image_preview.kitty_format" => {
+            "Reserved setting: saved, but not currently used at runtime."
+        }
+        "image_preview.cache_max_mb" | "image_preview.cache_max_days" => {
+            "Used when running /image cleanup."
+        }
         _ if path.starts_with("servers.")
             || matches!(
                 path,
@@ -298,6 +304,7 @@ fn effect(path: &str) -> &'static str {
                     | "general.username"
                     | "general.realname"
                     | "general.default_bind_ip"
+                    | "general.ctcp_version"
             ) =>
         {
             "Reconnect the network to apply connection changes."

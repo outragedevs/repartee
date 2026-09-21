@@ -61,3 +61,5 @@ Practical checks used an isolated daemon on HTTPS localhost port 18879 with synt
 Temporary evidence: `/tmp/repartee-settings-audit/browser.log`, `desktop.png`, `mobile.png`, `tui.log`, and `tui-screen.txt`. A final pinned review and delivery audit remain required.
 
 The first pinned Sol medium review of `a7e5b06` returned no actionable findings. A subsequent UI audit tightened two interaction guards: fields are disabled while a web save is in flight, and section defaults require clearing cross-section search first. These final changes require a fresh review before merge. Restarting the isolated daemon also preserved the tested settings.
+
+The second review identified stale SASL username writes and a wrapped footer control outside very narrow TUI panels. The fixes preserve SASL username conflict checks and calculate footer height from its actual wrapped controls. Dedicated regressions cover both. Runtime-effect labels also distinguish CTCP reconnects, manual image cleanup, and reserved configuration fields.

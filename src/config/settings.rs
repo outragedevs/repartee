@@ -235,7 +235,7 @@ pub fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
         }
         "servers" if parts.len() >= 3 => {
             let server = config.servers.get(parts[1])?;
-            let is_cred = matches!(parts[2], "password" | "sasl_pass" | "sasl_user");
+            let is_cred = matches!(parts[2], "password" | "sasl_pass");
             let val = match parts[2] {
                 "label" => server.label.clone(),
                 "address" => server.address.clone(),
@@ -1096,11 +1096,55 @@ mod persistence_tests {
         let mut config = AppConfig::default();
         let original = config.general.nick.clone();
         config.general.realname = "Changed elsewhere".into();
-        let change = SettingChange { path: "general.nick".into(), original, value: "newnick".into() };
+        let change = SettingChange {
+            path: "general.nick".into(),
+            original,
+            value: "newnick".into(),
+        };
         let saved = save_changes(&config, std::slice::from_ref(&change), &path, &env).unwrap();
         assert_eq!(saved.general.realname, "Changed elsewhere");
-        assert_eq!(crate::config::load_config(&path).unwrap().general.nick, "newnick");
-        assert!(save_changes(&saved, &[change], &path, &env).unwrap_err().contains("changed elsewhere"));
+        assert_eq!(
+            crate::config::load_config(&path).unwrap().general.nick,
+            "newnick"
+        );
+        assert!(
+            save_changes(&saved, &[change], &path, &env)
+                .unwrap_err()
+                .contains("changed elsewhere")
+        );
+        assert!(!env.exists());
+    }
+
+    #[test]
+    fn sasl_username_edits_reject_stale_values_without_touching_passwords() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let env = dir.path().join(".env");
+        let mut config = AppConfig::default();
+        config.servers.insert(
+            "test".into(),
+            serde_json::from_value(serde_json::json!({
+                "label": "Test", "address": "localhost", "port": 6697, "tls": true,
+                "channels": [], "sasl_user": "first", "sasl_pass": "test-secret"
+            }))
+            .unwrap(),
+        );
+        let change = crate::settings_model::SettingChange {
+            path: "servers.test.sasl_user".into(),
+            original: "first".into(),
+            value: "second".into(),
+        };
+        let saved = save_changes(&config, std::slice::from_ref(&change), &path, &env).unwrap();
+        assert_eq!(saved.servers["test"].sasl_user.as_deref(), Some("second"));
+        assert_eq!(
+            saved.servers["test"].sasl_pass.as_deref(),
+            Some("test-secret")
+        );
+        assert!(
+            save_changes(&saved, &[change], &path, &env)
+                .unwrap_err()
+                .contains("changed elsewhere")
+        );
         assert!(!env.exists());
     }
 
@@ -1112,14 +1156,25 @@ mod persistence_tests {
         std::fs::write(&env, previous).unwrap();
         let mut config = AppConfig::default();
         config.web.password = "old-test-password".into();
-        let changes = [SettingChange { path: "web.password".into(), original: String::new(), value: "new-test-password".into() }];
+        let changes = [SettingChange {
+            path: "web.password".into(),
+            original: String::new(),
+            value: "new-test-password".into(),
+        }];
         assert!(save_changes(&config, &changes, dir.path(), &env).is_err());
         assert_eq!(std::fs::read(&env).unwrap(), previous);
         assert_eq!(config.web.password, "old-test-password");
         let path = dir.path().join("config.toml");
         let saved = save_changes(&config, &changes, &path, &env).unwrap();
         assert_eq!(saved.web.password, "new-test-password");
-        assert_eq!(crate::config::load_env(&env).unwrap()["WEB_PASSWORD"], "new-test-password");
-        assert!(!std::fs::read_to_string(path).unwrap().contains("test-password"));
+        assert_eq!(
+            crate::config::load_env(&env).unwrap()["WEB_PASSWORD"],
+            "new-test-password"
+        );
+        assert!(
+            !std::fs::read_to_string(path)
+                .unwrap()
+                .contains("test-password")
+        );
     }
 }

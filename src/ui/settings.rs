@@ -164,7 +164,10 @@ impl SettingsPanel {
             Focus::Network => Action::Network,
             Focus::Defaults => {
                 if !self.query.is_empty() {
-                    self.error = Some("Choose a category without an active search before restoring defaults.".into());
+                    self.error = Some(
+                        "Choose a category without an active search before restoring defaults."
+                            .into(),
+                    );
                     return Action::None;
                 }
                 for (i, field) in self
@@ -295,19 +298,27 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut crate::app::App) {
     frame.render_widget(block, area);
     panel.hits.clear();
     panel.sections.clear();
-    if inner.width < 20 || inner.height < 8 {
+    if inner.width < 20 || inner.height < 12 {
+        frame.render_widget(
+            Paragraph::new("Resize to at least 22 × 14. Esc cancels.")
+                .wrap(Wrap { trim: true })
+                .style(base),
+            inner,
+        );
         return;
     }
+    let buttons = footer_controls(inner);
+    let content_height = buttons[0].2.y.saturating_sub(inner.y + 1);
     let nav_width = 23.min(inner.width / 3);
     let body = Rect::new(
         inner.x + nav_width + 1,
         inner.y,
         inner.width.saturating_sub(nav_width + 1),
-        inner.height,
+        content_height,
     );
     for (i, name) in SECTIONS.iter().enumerate() {
         let y = inner.y + u16::try_from(i).unwrap_or(0);
-        if y >= inner.bottom().saturating_sub(2) {
+        if y >= body.bottom() {
             break;
         }
         let rect = Rect::new(inner.x, y, nav_width, 1);
@@ -328,7 +339,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut crate::app::App) {
     );
     panel.hits.push((search, Focus::Search));
     let visible = panel.visible();
-    let rows = usize::from(body.height.saturating_sub(9) / 2).max(1);
+    let rows = usize::from(body.height.saturating_sub(5) / 2).max(1);
     if let Focus::Field(i) = panel.focus
         && let Some(at) = visible.iter().position(|v| *v == i)
     {
@@ -401,23 +412,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut crate::app::App) {
     };
     frame.render_widget(
         Paragraph::new(help).wrap(Wrap { trim: true }).style(base),
-        Rect::new(body.x, body.bottom().saturating_sub(6), body.width, 3),
+        Rect::new(body.x, body.bottom().saturating_sub(3), body.width, 3),
     );
-    let labels = [
-        (" Save ", Focus::Save),
-        (" Cancel ", Focus::Cancel),
-        (" Defaults ", Focus::Defaults),
-        (" Add network ", Focus::Network),
-    ];
-    let mut x = inner.x;
-    let mut y = inner.bottom().saturating_sub(2);
-    for (label, focus) in labels {
-        let width = u16::try_from(label.len()).unwrap_or(0);
-        if x + width > inner.right() {
-            x = inner.x;
-            y += 1;
-        }
-        let rect = Rect::new(x, y, width.min(inner.right().saturating_sub(x)), 1);
+    for (label, focus, rect) in buttons {
         frame.render_widget(
             Paragraph::new(label).style(if panel.focus == focus {
                 selected
@@ -427,13 +424,54 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut crate::app::App) {
             rect,
         );
         panel.hits.push((rect, focus));
+    }
+}
+
+fn footer_controls(inner: Rect) -> Vec<(&'static str, Focus, Rect)> {
+    let labels = [
+        (" Save ", Focus::Save),
+        (" Cancel ", Focus::Cancel),
+        (" Defaults ", Focus::Defaults),
+        (" Add network ", Focus::Network),
+    ];
+    let mut controls = Vec::new();
+    let mut x = inner.x;
+    let mut row = 0;
+    for (label, focus) in labels {
+        let width = u16::try_from(label.len()).unwrap_or(0).min(inner.width);
+        if x + width > inner.right() {
+            x = inner.x;
+            row += 1;
+        }
+        controls.push((label, focus, Rect::new(x, row, width, 1)));
         x += width + 1;
     }
+    let start = inner.bottom().saturating_sub(row + 1);
+    for (_, _, rect) in &mut controls {
+        rect.y += start;
+    }
+    controls
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn narrow_terminal_footer_keeps_all_buttons_visible_and_clickable() {
+        let inner = Rect::new(1, 1, 20, 12);
+        let controls = footer_controls(inner);
+        assert_eq!(controls.len(), 4);
+        for (_, _, rect) in &controls {
+            assert!(inner.contains(Position::new(rect.x, rect.y)));
+            assert!(inner.contains(Position::new(rect.right() - 1, rect.bottom() - 1)));
+        }
+        assert!(
+            controls
+                .windows(2)
+                .all(|pair| !pair[0].2.intersects(pair[1].2))
+        );
+    }
 
     #[test]
     fn focusing_secret_does_not_clear_it_and_cancel_keeps_source_unchanged() {
