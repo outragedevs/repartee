@@ -39,6 +39,9 @@ Use `;` to chain multiple commands in one alias:
 
     /alias j /join $0; /msg $0 hello everyone
 
+Semicolons separate commands only in the saved alias body. Semicolons in
+arguments remain part of the argument text, including through nested aliases.
+
 ### Recursion Guard
 
 Aliases can reference other aliases. Recursion is capped at 10 levels to

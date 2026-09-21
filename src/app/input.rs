@@ -1294,14 +1294,19 @@ impl App {
         } else if let Some(template) = self.config.aliases.get(&parsed.name).cloned() {
             // Gather context for variable expansion
             let (channel, nick, server) = self.alias_context();
-            let expanded = expand_alias_template(&template, &parsed.args, &channel, &nick, &server);
-
-            // Split by ; for command chaining
-            for part in expanded.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-                if let Some(reparsed) = crate::commands::parser::parse_command(part) {
+            let template = if template.contains('$') {
+                template
+            } else {
+                format!("{template} $*")
+            };
+            for part in template.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+                let args = if part.contains('$') { parsed.args.as_slice() } else { &[] };
+                let expanded = expand_alias_template(part, args, &channel, &nick, &server);
+                if expanded.is_empty() { continue; }
+                if let Some(reparsed) = crate::commands::parser::parse_command(&expanded) {
                     self.execute_command_with_depth(&reparsed, depth + 1);
                 } else {
-                    self.handle_plain_message(part);
+                    self.handle_plain_message(&expanded);
                 }
             }
         } else if self.script_manager.as_ref().is_some_and(|m| {
@@ -3143,5 +3148,32 @@ mod activity_shortcut_tests {
         app.handle_event(Event::Key(event::KeyEvent::new(KeyCode::Char('A'), KeyModifiers::ALT | KeyModifiers::SHIFT)));
         assert!(!app.shell_input_active);
         assert_eq!(app.state.active_buffer_id.as_deref(), Some("net/#chat"));
+    }
+}
+
+#[cfg(test)]
+mod alias_command_boundary_tests {
+    #[tokio::test]
+    async fn arguments_remain_literal_while_template_commands_still_chain() {
+        use crate::irc::{IrcHandle, IrcSender};
+        let mut app = super::submit_typing_tests::test_app();
+        let config = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]").unwrap();
+        app.setup_connection("fixture", &config);
+        app.state.set_active_buffer("fixture/fixture");
+        let sender = IrcSender::capturing(0);
+        app.irc_handles.insert("fixture".into(), IrcHandle::new("fixture".into(), sender.clone(), None, None));
+        app.config.aliases.insert("tell".into(), "/msg $0 $1-".into());
+        app.config.aliases.insert("twice".into(), "/tell $0 $1-; /msg $0 done".into());
+        app.config.aliases.insert("implicit".into(), "/msg bob first; /msg bob".into());
+        app.handle_submit("/twice bob hello; /quit");
+        app.handle_submit("/implicit final; /quit");
+        assert!(!app.should_quit);
+        let captured = sender.captured();
+        let payloads: Vec<_> = captured.iter().map(|message| {
+            let ::irc::proto::Command::PRIVMSG(target, text) = &message.command else { panic!("unexpected command") };
+            assert_eq!(target, "bob");
+            text.as_str()
+        }).collect();
+        assert_eq!(payloads, vec!["hello; /quit", "done", "first", "final; /quit"]);
     }
 }
