@@ -708,10 +708,13 @@ pub(crate) fn cmd_kickban(app: &mut App, args: &[String]) {
 
     // Resolve ban mask from cached WHOX data (ident + host)
     // Falls back to nick!*@* if user info is not available
-    let ban_mask = app
-        .state
-        .active_buffer()
-        .and_then(|buf| buf.users.get(&nick.to_lowercase()))
+    let mapping = app.active_conn_id().and_then(|id| app.state.connections.get(id))
+        .map_or("rfc1459", |conn| conn.isupport_parsed.casemapping());
+    let folded_nick = crate::irc::isupport::casefold(&nick, mapping);
+    let ban_mask = channel_buffer(app, &channel)
+        .and_then(|buf| buf.users.values().find(|entry| {
+            crate::irc::isupport::casefold(&entry.nick, mapping) == folded_nick
+        }))
         .and_then(|entry| match (&entry.ident, &entry.host) {
             (Some(ident), Some(host)) => Some(format!("*!*{ident}@{host}")),
             _ => None,
@@ -1798,6 +1801,44 @@ mod cycle_target_tests {
             let ::irc::proto::Command::JOIN(channel, key, _) = &captured[first + 1].command else { panic!("expected JOIN") };
             assert_eq!(channel, target);
             assert_eq!(key.as_deref(), expected_key);
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod kickban_target_tests {
+    #[tokio::test]
+    async fn kickban_uses_target_channel_user_data_instead_of_active_buffer_data() {
+        use crate::irc::{IrcHandle, IrcSender};
+        use crate::state::buffer::{Buffer, BufferType, NickEntry};
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let config = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]\nnick='me'").unwrap();
+        app.setup_connection("fixture", &config);
+        app.setup_connection("other", &config);
+        let sender = IrcSender::capturing(0);
+        app.irc_handles.insert("fixture".into(), IrcHandle::new("fixture".into(), sender.clone(), None, None));
+        for (network, channel, ident) in [("fixture", "#here", "current"), ("fixture", "#target[", "target"), ("other", "#target[", "unrelated")] {
+            let mut buffer = Buffer::for_test(network, BufferType::Channel, channel);
+            buffer.users.insert("peer[".into(), NickEntry {
+                nick: "peer[".into(), ident: Some(ident.into()), host: Some("fixture.example".into()),
+                realname: None, prefix: String::new(), modes: String::new(), away: false, account: None,
+            });
+            app.state.add_buffer(buffer);
+        }
+        app.state.set_active_buffer("fixture/#here");
+        for (input, channel, mask) in [
+            ("/kb #TARGET{ PEER{ reason", "#TARGET{", "*!*target@fixture.example"),
+            ("/kb #unknown PEER{ reason", "#unknown", "PEER{!*@*"),
+            ("/kb PEER{ reason", "#here", "*!*current@fixture.example"),
+        ] {
+            let first = sender.captured().len();
+            app.handle_submit(input);
+            let captured = sender.captured();
+            assert_eq!(captured.len(), first + 2);
+            let ::irc::proto::Command::Raw(command, args) = &captured[first + 1].command else { panic!("expected MODE") };
+            assert_eq!(command, "MODE");
+            assert_eq!(args, &[channel, "+b", mask]);
         }
     }
 }
