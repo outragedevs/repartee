@@ -5,6 +5,23 @@ use crate::app::App;
 
 // === Connection ===
 
+fn parse_connect_address(raw: &str) -> (String, u16) {
+    let unbracketed = raw.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')).unwrap_or(raw);
+    if let Ok(address) = unbracketed.parse::<std::net::Ipv6Addr>() {
+        return (address.to_string(), 6667);
+    }
+    if let Ok(socket) = raw.parse::<std::net::SocketAddr>() {
+        return (socket.ip().to_string(), socket.port());
+    }
+    if let Some((address, port)) = raw.rsplit_once(':')
+        && !address.contains(':')
+        && let Ok(port) = port.parse::<u16>()
+    {
+        return (address.to_string(), port);
+    }
+    (raw.to_string(), 6667)
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_connect(app: &mut App, args: &[String]) {
     if args.is_empty() {
@@ -64,18 +81,8 @@ pub(crate) fn cmd_connect(app: &mut App, args: &[String]) {
 
     // 3. Ad-hoc connection: parse as address[:port]
     let raw_target = &args[0]; // preserve original case for label
-    let mut address = raw_target.clone();
-    let mut port: u16 = 6667;
+    let (address, mut port) = parse_connect_address(raw_target);
     let mut tls = flag_tls;
-
-    // Parse address:port
-    if let Some(colon_pos) = raw_target.rfind(':') {
-        let port_str = &raw_target[colon_pos + 1..];
-        if let Ok(p) = port_str.parse::<u16>() {
-            address = raw_target[..colon_pos].to_string();
-            port = p;
-        }
-    }
 
     // Also accept port as second positional arg (not starting with -)
     if args.len() > 1
@@ -1911,6 +1918,27 @@ mod action_context_tests {
             let ::irc::proto::Command::PRIVMSG(target, text) = &captured.last().unwrap().command else { panic!("expected ACTION") };
             assert_eq!(target, name);
             assert_eq!(text, "\x01ACTION waves hello\x01");
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod connect_address_tests {
+    #[test]
+    fn ipv6_suffixes_are_not_ports_without_brackets() {
+        for (raw, address, port) in [
+            ("::1", "::1", 6667),
+            ("2001:db8::42", "2001:db8::42", 6667),
+            ("2001:db8::1:6697", "2001:db8::1:6697", 6667),
+            ("[2001:db8::42]", "2001:db8::42", 6667),
+            ("[2001:db8::42]:7000", "2001:db8::42", 7000),
+            ("[::1]:6697", "::1", 6697),
+            ("irc.example:7000", "irc.example", 7000),
+            ("127.0.0.1:7000", "127.0.0.1", 7000),
+            ("irc.example", "irc.example", 6667),
+        ] {
+            assert_eq!(super::parse_connect_address(raw), (address.to_string(), port), "{raw}");
         }
     }
 }
