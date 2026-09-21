@@ -119,11 +119,13 @@ pub(crate) fn cmd_log_search(app: &mut App, args: &[String]) {
         drop(db);
         let needle = query.to_lowercase();
         let scan_capped = scanned.len() == MAX_ENCRYPTED_SCAN;
-        let hits: Vec<_> = scanned
+        let mut hits: Vec<_> = scanned
             .into_iter()
+            .rev()
             .filter(|m| m.text.to_lowercase().contains(&needle))
             .take(SEARCH_LIMIT)
             .collect();
+        hits.reverse();
         // Header line tells the user up front whether this was a
         // full-buffer search (FTS-impossible because encrypted, but
         // we did go end-to-end of the active buffer) or a recent-only
@@ -176,5 +178,34 @@ pub(crate) fn cmd_log_search(app: &mut App, args: &[String]) {
             .unwrap_or_default();
         let nick = hit.nick.as_deref().unwrap_or("*");
         add_local_event(app, &format!("{when}  <{nick}> {}", hit.text));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn encrypted_search_retains_latest_matches_in_chronological_order() {
+        use crate::state::buffer::{Buffer, BufferType};
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let storage = crate::storage::Storage::in_memory();
+        let key = crate::storage::crypto::import_key(&"07".repeat(32)).unwrap();
+        let mut expected = Vec::new();
+        {
+            let db = storage.db.lock().unwrap();
+            for index in 0..1200 {
+                let text = if index % 10 == 0 { format!("unrelated {index}") } else { format!("Needle {index}") };
+                if index % 10 != 0 { expected.push(text.clone()); }
+                let encrypted = crate::storage::crypto::encrypt(&text, &key).unwrap();
+                db.execute("INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, iv) VALUES (?1, 'net', '#test', ?2, 'message', 'tester', ?3, ?4)",
+                    rusqlite::params![index.to_string(), index, encrypted.ciphertext, encrypted.iv]).unwrap();
+            }
+        }
+        app.state.add_buffer(Buffer::for_test("_log_net", BufferType::Log, "#test"));
+        app.state.set_active_buffer("_log_net/#test");
+        app.log_db = Some(crate::storage::LogDb { db: std::sync::Arc::clone(&storage.db), crypto_key: Some(key), has_fts: false });
+        super::cmd_log_search(&mut app, &["needle".into()]);
+        let rows = &app.state.active_buffer().unwrap().messages;
+        let hits: Vec<_> = rows.iter().filter_map(|message| message.text.split_once("<tester> ").map(|(_, text)| text.to_string())).collect();
+        assert_eq!(hits, expected[expected.len() - 1000..]);
     }
 }
