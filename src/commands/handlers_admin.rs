@@ -1014,10 +1014,10 @@ pub(crate) fn cmd_log(app: &mut App, args: &[String]) {
 fn log_status(app: &mut App) {
     // Collect all output lines first to avoid borrow conflicts
     let lines: Vec<String> = if let Some(ref storage) = app.storage {
-        let count = match storage.db.lock() {
-            Ok(db) => storage::query::get_message_count(&db).map_err(|error| error.to_string()),
-            Err(_) => Err("Log DB lock poisoned".to_string()),
-        };
+        let count = storage.db.lock().map_or_else(
+            |_| Err("Log DB lock poisoned".to_string()),
+            |db| storage::query::get_message_count(&db).map_err(|error| error.to_string()),
+        );
         let count = match count {
             Ok(count) => count.to_string(),
             Err(error) => format!("unavailable ({})", super::helpers::escape_format(&error)),
