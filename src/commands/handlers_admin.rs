@@ -113,6 +113,7 @@ pub(crate) fn apply_reloaded_config(app: &mut App, new_config: crate::config::Ap
     {
         app.translate_backend = None;
     }
+    app.web_restart_pending |= app.config.web.requires_restart(&new_config.web);
     app.config = new_config;
     app.cached_config_toml = None;
     // A reload swaps out config.servers wholesale; an open edit-wizard
@@ -1885,6 +1886,40 @@ mod server_add_tests {
 mod translate_reload_tests {
     use crate::app::input::submit_typing_tests::test_app;
     use crate::config::{TranslateAiConfig, TranslateAiModelConfig, TranslateBufferConfig};
+
+    #[test]
+    fn reload_web_credentials_and_lifecycle_schedule_the_existing_restart_path() {
+        let mut app = test_app();
+        app.config.web.enabled = true;
+        app.config.web.password = "old-fixture-password".into();
+        let mut edited = app.config.clone();
+        edited.web.theme = "light".into();
+        super::apply_reloaded_config(&mut app, edited);
+        assert!(!app.web_restart_pending);
+
+        let mut edited = app.config.clone();
+        super::apply_env_credentials(&mut edited, &std::collections::HashMap::from([
+            ("WEB_PASSWORD".into(), "new-fixture-password".into()),
+        ]));
+        super::apply_reloaded_config(&mut app, edited);
+        assert!(app.web_restart_pending);
+        assert_eq!(app.config.web.password, "new-fixture-password");
+        let unchanged = app.config.clone();
+        super::apply_reloaded_config(&mut app, unchanged);
+        assert!(app.web_restart_pending);
+        app.web_restart_pending = false;
+
+        let mut edited = app.config.clone();
+        edited.web.session_secret = vec![42; 32];
+        super::apply_reloaded_config(&mut app, edited);
+        assert!(app.web_restart_pending);
+        app.web_restart_pending = false;
+        let mut edited = app.config.clone();
+        edited.web.enabled = false;
+        super::apply_reloaded_config(&mut app, edited);
+        assert!(app.web_restart_pending);
+        assert!(!app.config.web.enabled);
+    }
 
     #[test]
     fn reload_env_failure_preserves_credentials_and_runtime_config() {
