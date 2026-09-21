@@ -883,6 +883,23 @@ pub struct WebConfig {
     pub session_secret: Vec<u8>,
 }
 
+impl WebConfig {
+    pub(crate) fn requires_restart(&self, next: &Self) -> bool {
+        self.enabled != next.enabled
+            || self.port != next.port
+            || self.bind_address != next.bind_address
+            || self.password != next.password
+            || self.session_secret != next.session_secret
+            || self.tls_cert != next.tls_cert
+            || self.tls_key != next.tls_key
+            || self.session_days != next.session_days
+            || self.username != next.username
+            || self.image_previews != next.image_previews
+            || self.image_previews_max_per_msg != next.image_previews_max_per_msg
+            || self.thumbnail_cache_mb != next.thumbnail_cache_mb
+    }
+}
+
 impl Default for WebConfig {
     fn default() -> Self {
         Self {
