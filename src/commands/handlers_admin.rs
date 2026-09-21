@@ -31,9 +31,8 @@ pub(crate) enum CredUpdate {
 ///
 /// `CredUpdate::Keep` preserves the credential already stored for `id` in
 /// `config.servers` (the single source of truth for the running session), so a
-/// re-add/edit that omits a password never silently drops it. `config.toml` is
-/// saved *before* `.env` is touched, so a save failure can never leave an
-/// orphaned secret in `.env` for a server that isn't persisted.
+/// re-add/edit that omits a password never silently drops it. Runtime state is
+/// committed only after both files are saved; failed saves restore credentials.
 ///
 /// # Errors
 /// Propagates I/O errors from writing `config.toml` or `.env`.
@@ -64,21 +63,55 @@ pub(crate) fn apply_server_config(
         CredUpdate::Keep => existing_sasl,
     };
 
-    // Persist the non-secret config first: a failure here must not leave secrets
-    // in `.env` for a server that never made it into config.toml.
-    config.servers.insert(id.to_string(), server);
-    crate::config::save_config(config_path, config)?;
+    let mut draft = config.clone();
+    draft.servers.insert(id.to_string(), server);
+    persist_server_config(&draft, config_path, env_path, &[(pw_key, password), (sasl_key, sasl_pass)])?;
+    *config = draft;
+    Ok(())
+}
 
-    // Then route secrets to `.env`.
-    match password {
-        CredUpdate::Set(v) => crate::config::env::set_env_value(env_path, &pw_key, &v)?,
-        CredUpdate::Remove => crate::config::env::remove_env_value(env_path, &pw_key)?,
-        CredUpdate::Keep => {}
-    }
-    match sasl_pass {
-        CredUpdate::Set(v) => crate::config::env::set_env_value(env_path, &sasl_key, &v)?,
-        CredUpdate::Remove => crate::config::env::remove_env_value(env_path, &sasl_key)?,
-        CredUpdate::Keep => {}
+fn persist_server_config(
+    draft: &crate::config::AppConfig,
+    config_path: &std::path::Path,
+    env_path: &std::path::Path,
+    updates: &[(String, CredUpdate)],
+) -> color_eyre::eyre::Result<()> {
+    let changes_env = updates.iter().any(|(_, update)| !matches!(update, CredUpdate::Keep));
+    let old_env = if changes_env {
+        match std::fs::read(env_path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(color_eyre::eyre::eyre!("Cannot read credential file: {error}")),
+        }
+    } else {
+        None
+    };
+    let mut env_written = false;
+    let result: color_eyre::eyre::Result<()> = (|| {
+        for (key, update) in updates {
+            match update {
+                CredUpdate::Set(value) => crate::config::env::set_env_value(env_path, key, value)?,
+                CredUpdate::Remove => crate::config::env::remove_env_value(env_path, key)?,
+                CredUpdate::Keep => continue,
+            }
+            env_written = true;
+        }
+        crate::config::save_config(config_path, draft)
+    })();
+    if let Err(error) = result {
+        if env_written {
+            let restored = old_env.map_or_else(
+                || match std::fs::remove_file(env_path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    result => result,
+                },
+                |bytes| crate::fs_secure::write_file(env_path, bytes, 0o600),
+            );
+            if let Err(rollback) = restored {
+                color_eyre::eyre::bail!("{error}; credential rollback failed: {rollback}. Runtime and config.toml are unchanged; .env may contain partial changes.");
+            }
+        }
+        return Err(error);
     }
     Ok(())
 }
@@ -1806,6 +1839,40 @@ mod server_add_tests {
             sasl_key_path: None,
             bouncer_network_id: None,
             bouncer_control: false,
+        }
+    }
+
+    #[test]
+    fn apply_server_config_failures_preserve_runtime_and_files() {
+        for failure in ["config", "env", "second-secret"] {
+            for existing_env in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let cfg_path = dir.path().join("config.toml");
+                let env_path = dir.path().join(".env");
+                let mut config = crate::config::AppConfig::default();
+                let mut original = server_cfg("Existing", "old.example.org");
+                original.password = Some("old-password".into());
+                config.servers.insert("test".into(), original);
+                crate::config::save_config(&cfg_path, &config).unwrap();
+                let old_config = std::fs::read(&cfg_path).unwrap();
+                if existing_env {
+                    std::fs::write(&env_path, "# preserved comment\nTEST_PASSWORD=old-password\nOTHER_KEY=fixture\n").unwrap();
+                }
+                let old_env = std::fs::read(&env_path).ok();
+                if failure != "second-secret" {
+                    let name = if failure == "config" { "config.toml" } else { ".env" };
+                    std::fs::create_dir(dir.path().join(format!(".{name}.tmp-{}", std::process::id()))).unwrap();
+                }
+                let sasl = if failure == "second-secret" { "invalid\nvalue" } else { "new-sasl" };
+                let result = apply_server_config(&mut config, &cfg_path, &env_path, "test",
+                    server_cfg("Replacement", "new.example.org"),
+                    CredUpdate::Set("new-password".into()), CredUpdate::Set(sasl.into()));
+                assert!(result.is_err(), "{failure}");
+                assert_eq!(config.servers["test"].address, "old.example.org");
+                assert_eq!(config.servers["test"].password.as_deref(), Some("old-password"));
+                assert_eq!(std::fs::read(&cfg_path).unwrap(), old_config);
+                assert_eq!(std::fs::read(&env_path).ok(), old_env);
+            }
         }
     }
 
