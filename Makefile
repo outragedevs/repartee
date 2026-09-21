@@ -1,4 +1,4 @@
-.PHONY: all clean wasm build release install test clippy check test-web clippy-web docs docs-check
+.PHONY: all clean wasm build release package publish install test clippy check test-web clippy-web docs docs-check
 
 # Full clean rebuild: clean → WASM → native release
 all: clean wasm release
@@ -17,6 +17,14 @@ wasm:
 # Native release build (embeds WASM from static/web/)
 release:
 	cargo build --release
+
+# Verify the exact crate that would be uploaded to crates.io.
+package:
+	cargo publish --dry-run --locked
+
+# Publish the release crate after its commit has landed on main.
+publish:
+	cargo publish --locked
 
 # Native dev build (no WASM rebuild)
 build:

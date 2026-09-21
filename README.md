@@ -261,6 +261,17 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v2.1.0
+
+- **First-class IRC bouncer support.** repartee now discovers and binds bouncer-managed networks, keeps their identities separate, restores them across reconnects, and supports Soju network management from `/bouncer`. Explicit bouncer names, account-required flows, interrupted registration recovery, and implicit PASS-authenticated networks are handled without leaking state between connections.
+- **Server-backed history that survives every client lifecycle.** Channel and query history is discovered, paged over bounded ranges, deduplicated, and reconciled with live traffic, local SQLite, daemon sessions, and browser reconnects. Read markers and per-client presence keep the TUI and web UI aligned while allowing independent history readers, and empty queries now load their backlog when opened.
+- **Modern bouncer capabilities.** Added labeled-response routing, live batch isolation, `MONITOR`, `SETNAME`, extended ISUPPORT, channel-context, buffer metadata, message redaction, network icons, server-side search, and upstream SASL including OAUTHBEARER. The implementations account for unlabeled replies, capability transitions, expired or partial batches, pagination, and concurrent requests.
+- **Account, certificate, and credential workflows.** Account registration, SASL EXTERNAL client certificates, provider-specific PASS credentials, TLS validation diagnostics, and account lifecycle handling are available through the native and web flows. Sensitive material is kept out of ordinary history and owned E2E secrets are zeroized when released.
+- **WebPush and file hosting for bouncer users.** Bouncer-compatible WebPush registration and delivery now work in browsers and after authenticated PASS login, with payload, settings, worker, and lock handling covered by acceptance fixtures. The bouncer file host provides bounded uploads and browser-facing delivery without exposing unrelated network state.
+- **Inline images and faster navigation.** Opt-in inline chat image previews render with bounded fetching and stable terminal output, while `Alt+A` jumps through unread buffers by activity priority. Terminal resize reconciliation, wide-glyph redraws, literal percent messages, native detach in legacy terminals, shell quoting, and mobile preview scrolling were hardened along the way.
+- **Translation and runtime refinements.** Italian and Finnish language detection were added, refusal detection was narrowed, runtime ignore changes take effect immediately, Lua scripts observe accepted buffer switches without delay, quoted `/set` values round-trip correctly, and provider SAFERATE limits now feed IRC flood control.
+- **Bouncer-focused documentation and validation.** New command references and connection guidance cover the expanded bouncer surface, backed by protocol fixtures and acceptance scenarios for Soju and Lurker covering history, presence, search, metadata, WebPush, certificates, redaction, and failure recovery.
+
 ### v2.0.0
 
 - **Live AI translation for IRC conversations.** Translation can be enabled independently for incoming and outgoing traffic on each channel or query, with separate conversation and personal languages. Translated lines can retain a dimmed original, and the display boundary is persisted in SQLite so history looks the same after restart. `/translate` manages mappings at runtime, while `/set translate.*` exposes timeouts, concurrency, queue limits, language defaults, and backend selection.
