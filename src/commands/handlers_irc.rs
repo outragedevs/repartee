@@ -250,6 +250,18 @@ pub(crate) fn cmd_join(app: &mut App, args: &[String]) {
     }
 }
 
+fn channel_buffer<'a>(app: &'a App, channel: &str) -> Option<&'a crate::state::buffer::Buffer> {
+    let conn_id = app.active_conn_id()?;
+    let mapping = app.state.connections.get(conn_id)
+        .map_or("rfc1459", |conn| conn.isupport_parsed.casemapping());
+    let target = crate::irc::isupport::casefold(channel, mapping);
+    app.state.buffers.values().find(|buffer| {
+        buffer.connection_id == conn_id
+            && buffer.buffer_type == crate::state::buffer::BufferType::Channel
+            && crate::irc::isupport::casefold(&buffer.name, mapping) == target
+    })
+}
+
 fn current_channel(app: &mut App) -> Option<String> {
     let channel = app.state.active_buffer()
         .filter(|buffer| buffer.buffer_type == crate::state::buffer::BufferType::Channel)
@@ -912,9 +924,7 @@ pub(crate) fn cmd_cycle(app: &mut App, args: &[String]) {
     };
 
     // Collect the channel key if one is set (to rejoin key-protected channels)
-    let key = app
-        .state
-        .active_buffer()
+    let key = channel_buffer(app, &channel)
         .and_then(|b| b.mode_params.as_ref())
         .and_then(|p| p.get("k").cloned());
 
@@ -1757,6 +1767,37 @@ mod implicit_channel_tests {
             let ::irc::proto::Command::Raw(command, args) = &message.command else { panic!("expected KICK") };
             assert_eq!(command, "KICK");
             assert_eq!(args, &["#there", nicks, "reason"]);
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod cycle_target_tests {
+    #[tokio::test]
+    async fn cycle_uses_only_the_target_channel_key_on_the_current_network() {
+        use crate::irc::{IrcHandle, IrcSender};
+        use crate::state::buffer::{Buffer, BufferType};
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let config = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]\nnick='me'").unwrap();
+        app.setup_connection("fixture", &config);
+        app.setup_connection("other", &config);
+        let sender = IrcSender::capturing(0);
+        app.irc_handles.insert("fixture".into(), IrcHandle::new("fixture".into(), sender.clone(), None, None));
+        for (network, channel, key) in [("fixture", "#here", "current-key"), ("fixture", "#other[", "target-key"), ("other", "#other[", "unrelated-key")] {
+            let mut buffer = Buffer::for_test(network, BufferType::Channel, channel);
+            buffer.mode_params = Some(std::collections::HashMap::from([("k".into(), key.into())]));
+            app.state.add_buffer(buffer);
+        }
+        app.state.set_active_buffer("fixture/#here");
+        for (input, target, expected_key) in [("/cycle #OTHER{", "#OTHER{", Some("target-key")), ("/cycle #missing", "#missing", None), ("/cycle", "#here", Some("current-key"))] {
+            let first = sender.captured().len();
+            app.handle_submit(input);
+            let captured = sender.captured();
+            assert_eq!(captured.len(), first + 2);
+            let ::irc::proto::Command::JOIN(channel, key, _) = &captured[first + 1].command else { panic!("expected JOIN") };
+            assert_eq!(channel, target);
+            assert_eq!(key.as_deref(), expected_key);
         }
     }
 }
