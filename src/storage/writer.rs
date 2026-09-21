@@ -144,12 +144,25 @@ fn flush(
             None => (row.text.clone(), None),
         };
 
+        let params_json = row.event_params.as_ref().map(|params| serde_json::to_string(params).expect("string vectors serialize"));
+        let (event_params, event_params_iv) = match (params_json, crypto_key) {
+            (Some(json), Some(key)) => match crypto::encrypt(&json, key) {
+                Ok(enc) => (Some(enc.ciphertext), Some(enc.iv)),
+                Err(error) => {
+                    tracing::error!("event parameter encryption failed: {error}");
+                    failed += 1;
+                    continue;
+                }
+            },
+            (json, _) => (json, None),
+        };
+
         // `OR IGNORE`: a row whose `msg_id` already exists (a live message and
         // its CHATHISTORY replay share the server @msgid) is silently skipped by
         // the unique index instead of raising an error we'd log as a failure.
         if let Err(e) = conn.execute(
-            "INSERT OR IGNORE INTO messages (msg_id, network, buffer, timestamp, ts_ms, type, nick, text, translation_suffix_at, highlight, iv, ref_id, tags, event_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "INSERT OR IGNORE INTO messages (msg_id, network, buffer, timestamp, ts_ms, type, nick, text, translation_suffix_at, highlight, iv, ref_id, tags, event_key, event_params, event_params_iv)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 row.msg_id,
                 row.network,
@@ -165,6 +178,8 @@ fn flush(
                 row.ref_id,
                 row.tags,
                 row.event_key,
+                event_params,
+                event_params_iv,
             ],
         ) {
             // Log once and skip — do NOT return the queue for retry, as
@@ -210,6 +225,7 @@ mod tests {
             ref_id: None,
             tags: None,
             event_key: None,
+            event_params: None,
         }
     }
 

@@ -24,6 +24,7 @@ pub struct LogRow {
     /// IRC event type key (e.g. "join", "kick", "kicked").
     /// `None` for message types that don't have an event key.
     pub event_key: Option<String>,
+    pub event_params: Option<Vec<String>>,
 }
 
 /// A message read back from the database.
@@ -48,6 +49,7 @@ pub struct StoredMessage {
     pub tags: Option<String>,
     /// IRC event type key (e.g. "join", "kick", "kicked").
     pub event_key: Option<String>,
+    pub event_params: Option<Vec<String>>,
 }
 
 /// Per-client read position for a buffer.

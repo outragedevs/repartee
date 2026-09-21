@@ -332,6 +332,36 @@ pub fn resolve_abstractions(
 // parse_format_string
 // ---------------------------------------------------------------------------
 
+fn preformatted_event(key: Option<&str>) -> bool {
+    key.is_none_or(|key| {
+        key == "whois"
+            || key.starts_with("whois_")
+            || matches!(
+                key,
+                "end_of_whois" | "no_such_nick" | "no_such_server" | "try_again"
+            )
+    })
+}
+
+pub fn event_fallback_text(text: &str, key: Option<&str>, params: Option<&[String]>) -> String {
+    if preformatted_event(key) {
+        if let (Some(key), Some(params)) = (key, params) {
+            static THEME: std::sync::LazyLock<super::ThemeFile> = std::sync::LazyLock::new(|| {
+                toml::from_str(include_str!("../../themes/default.theme"))
+                    .expect("bundled default theme must parse")
+            });
+            if let Some(template) = THEME.formats.events.get(key) {
+                let resolved = resolve_abstractions(template, &THEME.abstracts, 0);
+                let params: Vec<&str> = params.iter().map(String::as_str).collect();
+                return substitute_vars_impl(&resolved, &params, true);
+            }
+        }
+        text.to_owned()
+    } else {
+        text.replace('%', "%%")
+    }
+}
+
 pub fn parse_irc_text(text: &str) -> Vec<StyledSpan> {
     parse_format_string(&text.replace('%', "%%"), &[])
 }

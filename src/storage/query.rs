@@ -56,6 +56,17 @@ fn map_row(
     let tags: Option<String> = row.get("tags")?;
     let event_key: Option<String> = row.get("event_key")?;
 
+    let params_json: Option<String> = row.get("event_params").unwrap_or(None);
+    let params_iv: Option<Vec<u8>> = row.get("event_params_iv").unwrap_or(None);
+    let event_params = params_json.and_then(|json| {
+        let plaintext = match params_iv {
+            Some(iv) if iv.len() == 12 => crypto_key.and_then(|key| crypto::decrypt(&json, &iv, key).ok()),
+            Some(_) => None,
+            None => Some(json),
+        };
+        plaintext.and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+    });
+
     Ok(StoredMessage {
         id,
         msg_id,
@@ -71,6 +82,7 @@ fn map_row(
         ref_id,
         tags,
         event_key,
+        event_params,
     })
 }
 
@@ -122,6 +134,10 @@ fn select_message_columns(db: &Connection) -> String {
     } else {
         "NULL"
     };
+    let has_params = db.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'event_params'")
+        .and_then(|mut stmt| stmt.exists([])).unwrap_or(false);
+    let params = if has_params { "m.event_params" } else { "NULL" };
+    let params_iv = if has_params { "m.event_params_iv" } else { "NULL" };
     format!(
         "m.id, m.msg_id, m.network, m.buffer, m.timestamp,
          {} AS ts_ms,
@@ -130,7 +146,7 @@ fn select_message_columns(db: &Connection) -> String {
          {translation_suffix} AS translation_suffix_at,
          m.highlight,
          COALESCE(p.iv,   m.iv)   AS iv,
-         m.ref_id, m.tags, m.event_key",
+         m.ref_id, m.tags, m.event_key, {params} AS event_params, {params_iv} AS event_params_iv",
         ts_ms_expr(db, "m.")
     )
 }
