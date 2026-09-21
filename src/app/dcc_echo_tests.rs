@@ -257,3 +257,37 @@ async fn dcc_public_advertised_addresses_do_not_need_to_exist_locally() {
         }
     }
 }
+
+
+#[tokio::test]
+async fn failed_dcc_signaling_leaves_no_outgoing_session_and_allows_accept_retry() {
+    use crate::dcc::types::DccState;
+    use crate::irc::{IrcHandle, IrcSender};
+    for failed_writer in [false, true] {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let config = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]\nnick='me'").unwrap();
+        app.setup_connection("fixture", &config);
+        app.state.set_active_buffer("fixture/fixture");
+        app.dcc.own_ip = Some(std::net::Ipv4Addr::LOCALHOST.into());
+        if failed_writer {
+            app.irc_handles.insert("fixture".into(), IrcHandle::new("fixture".into(), IrcSender::capturing_then_failing(0), None, None));
+        }
+        for command in ["/dcc chat peer", "/dcc chat -passive peer"] {
+            app.handle_submit(command);
+            assert!(app.dcc.records.is_empty());
+            assert!(app.dcc.chat_senders.is_empty());
+        }
+        receive(&mut app, "fixture", ":peer!user@host PRIVMSG me :\x01DCC CHAT chat 2130706433 0 42\x01");
+        let id = app.dcc.records.values().next().unwrap().id.clone();
+        app.handle_submit("/dcc chat peer");
+        assert_eq!(app.dcc.records[&id].state, DccState::WaitingUser);
+        assert!(app.dcc.chat_senders.is_empty());
+        assert!(!app.state.buffers["fixture/fixture"].messages.iter().any(|m| m.text.contains("listening on port") || m.text.contains("sent passive offer")));
+        let sender = IrcSender::capturing(0);
+        app.irc_handles.insert("fixture".into(), IrcHandle::new("fixture".into(), sender.clone(), None, None));
+        app.handle_submit("/dcc chat peer");
+        assert_eq!(app.dcc.records[&id].state, DccState::Listening);
+        assert_eq!(sender.captured().len(), 1);
+        assert_eq!(app.dcc.chat_senders.len(), 1);
+    }
+}
