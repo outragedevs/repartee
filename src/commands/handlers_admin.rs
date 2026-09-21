@@ -295,14 +295,17 @@ pub(crate) fn cmd_flood(app: &mut App, args: &[String]) {
     }
 
     if subcmd.eq_ignore_ascii_case("on") || subcmd.eq_ignore_ascii_case("enable") {
+        let changed = !app.config.general.flood_protection;
         app.config.general.flood_protection = true;
         app.state.flood_protection = true;
+        if changed { super::settings::warn_flood_reconnect(app); }
         if !save_flood_settings(app) { return; }
         add_local_event(app, &format!("{C_OK}Flood protection enabled{C_RST}"));
         return;
     }
 
     if subcmd.eq_ignore_ascii_case("off") || subcmd.eq_ignore_ascii_case("disable") {
+        let changed = app.config.general.flood_protection;
         app.config.general.flood_protection = false;
         app.state.flood_protection = false;
         // Only affects FUTURE connections: `flood_penalty_threshold` is baked
@@ -310,6 +313,7 @@ pub(crate) fn cmd_flood(app: &mut App, args: &[String]) {
         // reconfig, so a live connection keeps throttling — and keeps the
         // matching threshold on its own `IrcSender` budget — until it is
         // reopened.
+        if changed { super::settings::warn_flood_reconnect(app); }
         if !save_flood_settings(app) { return; }
         add_local_event(app, &format!("{C_OK}Flood protection disabled{C_RST}"));
         return;

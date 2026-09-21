@@ -107,6 +107,13 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
     }
 }
 
+pub(super) fn warn_flood_reconnect(app: &mut App) {
+    if !app.irc_handles.is_empty() {
+        super::helpers::add_local_event(app,
+            &format!("{C_DIM}Existing connections keep their outgoing flood limits. Reconnect to apply this change to outgoing messages.{C_RST}"));
+    }
+}
+
 #[expect(clippy::too_many_lines)]
 pub fn apply_setting_runtime(app: &mut App, path: &str, raw: &str) {
     let ev = super::helpers::add_local_event;
@@ -133,7 +140,9 @@ pub fn apply_setting_runtime(app: &mut App, path: &str, raw: &str) {
 
     // Sync runtime state from config
     if path == "general.flood_protection" {
+        let changed = app.state.flood_protection != app.config.general.flood_protection;
         app.state.flood_protection = app.config.general.flood_protection;
+        if changed { warn_flood_reconnect(app); }
     }
     if path == "general.flood_exemptions" {
         app.state
