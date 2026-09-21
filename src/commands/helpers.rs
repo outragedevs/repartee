@@ -38,9 +38,14 @@ pub fn add_local_event(app: &mut App, text: &str) {
         return;
     };
     let active_id = active_id.to_string();
+    add_local_event_to(app, &active_id, text);
+}
+
+pub fn add_local_event_to(app: &mut App, buffer_id: &str, text: &str) {
+    if !app.state.buffers.contains_key(buffer_id) { return; }
     let id = app.state.next_message_id();
     app.state.add_local_message(
-        &active_id,
+        buffer_id,
         Message {
             redaction_ref: None,
             redaction_msgid: None,

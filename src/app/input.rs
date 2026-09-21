@@ -1996,9 +1996,17 @@ impl App {
     pub(crate) fn handle_dict_event(&mut self, ev: crate::spellcheck::DictEvent) {
         use crate::commands::types::{C_CMD, C_DIM, C_ERR, C_OK, C_RST, divider};
         use crate::spellcheck::DictEvent;
-        let ev_fn = crate::commands::helpers::add_local_event;
+        let buffer_id = match &ev {
+            DictEvent::ListResult { buffer_id, .. } | DictEvent::Downloaded { buffer_id, .. }
+                | DictEvent::Error { buffer_id, .. } => buffer_id.clone(),
+        };
+        let ev_fn = |app: &mut Self, text: &str| {
+            if let Some(buffer_id) = &buffer_id {
+                crate::commands::helpers::add_local_event_to(app, buffer_id, text);
+            }
+        };
         match ev {
-            DictEvent::ListResult { entries } => {
+            DictEvent::ListResult { entries, .. } => {
                 ev_fn(self, &divider("Available Dictionaries"));
                 for entry in &entries {
                     let status = if entry.installed {
@@ -2016,7 +2024,7 @@ impl App {
                     &format!("  {C_DIM}Use /spellcheck get <lang> to download{C_RST}"),
                 );
             }
-            DictEvent::Downloaded { lang } => {
+            DictEvent::Downloaded { lang, .. } => {
                 ev_fn(
                     self,
                     &format!("{C_OK}Dictionary {lang} downloaded successfully{C_RST}"),
@@ -2031,7 +2039,7 @@ impl App {
                     &format!("{C_OK}Spell checker reloaded ({loaded} dictionaries){C_RST}"),
                 );
             }
-            DictEvent::Error { message } => {
+            DictEvent::Error { message, .. } => {
                 ev_fn(self, &format!("{C_ERR}{message}{C_RST}"));
             }
         }
@@ -3190,5 +3198,35 @@ mod alias_command_boundary_tests {
             text.as_str()
         }).collect();
         assert_eq!(payloads, vec!["hello; /quit", "done", "first", "final; /quit"]);
+    }
+}
+
+#[cfg(test)]
+mod dict_result_tests {
+    #[test]
+    fn dictionary_results_stay_in_the_request_buffer_after_switching_or_closing() {
+        use crate::spellcheck::{DictEvent, DictListEntry};
+        use crate::state::buffer::{Buffer, BufferType};
+        let mut app = super::submit_typing_tests::test_app();
+        for name in ["#origin", "#other"] {
+            app.state.add_buffer(Buffer::for_test("net", BufferType::Channel, name));
+        }
+        app.state.set_active_buffer("net/#other");
+        let buffer_id = Some("net/#origin".to_string());
+        app.handle_dict_event(DictEvent::ListResult { buffer_id: buffer_id.clone(), entries: vec![DictListEntry { code: "pl_PL".into(), name: "Polish".into(), installed: false }] });
+        app.handle_dict_event(DictEvent::Error { buffer_id: buffer_id.clone(), message: "download failed".into() });
+        app.config.spellcheck.enabled = false;
+        app.handle_dict_event(DictEvent::Downloaded { buffer_id: buffer_id.clone(), lang: "pl_PL".into() });
+        let rows = &app.state.buffers["net/#origin"].messages;
+        assert!(rows.iter().any(|row| row.text.contains("Polish")));
+        assert!(rows.iter().any(|row| row.text.contains("download failed")));
+        assert!(rows.iter().any(|row| row.text.contains("downloaded successfully")));
+        assert!(app.state.buffers["net/#other"].messages.is_empty());
+        app.state.remove_buffer("net/#origin");
+        app.state.pending_web_events.clear();
+        app.handle_dict_event(DictEvent::Error { buffer_id, message: "late failure".into() });
+        assert!(app.state.pending_web_events.is_empty());
+        assert!(app.state.buffers["net/#other"].messages.is_empty());
+        assert_eq!(app.state.active_buffer_id.as_deref(), Some("net/#other"));
     }
 }
