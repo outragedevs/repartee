@@ -537,6 +537,17 @@ impl App {
         use crate::web::protocol::WebCommand;
         use crate::web::snapshot;
 
+        if let WebCommand::SendMessage { buffer_id, .. }
+        | WebCommand::RunCommand { buffer_id, .. } = &cmd
+            && !self.state.buffers.contains_key(buffer_id)
+        {
+            self.broadcast_web(crate::web::protocol::WebEvent::Error {
+                message: "This conversation is no longer open. Select an existing conversation before sending.".into(),
+                session_id: Some(session_id.to_string()),
+            });
+            return;
+        }
+
         match cmd {
             WebCommand::WebPush(request) => self.handle_webpush_request(&request, session_id),
             WebCommand::UploadFile { submission } => {
@@ -1086,6 +1097,57 @@ impl App {
             mentions: wire,
             session_id: Some(session_id.to_string()),
         });
+    }
+}
+
+#[cfg(test)]
+mod command_context_tests {
+    use crate::irc::{IrcHandle, IrcSender};
+    use crate::state::buffer::{Buffer, BufferType};
+    use crate::web::protocol::{WebCommand, WebEvent};
+
+    #[tokio::test]
+    async fn removed_web_conversation_never_falls_back_to_another_network() {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        for id in ["one", "two"] {
+            let config = toml::from_str(
+                "label='Server'\naddress='localhost'\nport=1\ntls=false\nchannels=[]\nnick='me'",
+            )
+            .unwrap();
+            app.setup_connection(id, &config);
+            app.state.add_buffer(Buffer::for_test(id, BufferType::Channel, "#room"));
+            app.irc_handles.insert(
+                id.into(),
+                IrcHandle::new(id.into(), IrcSender::capturing(0), None, None),
+            );
+        }
+        app.state.set_active_buffer("two/#room");
+        app.state.remove_buffer("one/#room");
+        app.confirm_web_buffer("browser", "two/#room");
+        let mut receiver = app.web_broadcaster.subscribe();
+
+        for text in ["private text", "/msg alice private text", "/me private action", "/quit"] {
+            let command = if text.starts_with('/') {
+                WebCommand::RunCommand { buffer_id: "one/#room".into(), text: text.into() }
+            } else {
+                WebCommand::SendMessage { buffer_id: "one/#room".into(), text: text.into() }
+            };
+            app.handle_web_command(command, "browser");
+            assert!(matches!(receiver.try_recv().unwrap(), WebEvent::Error { session_id, .. }
+                if session_id.as_deref() == Some("browser")));
+            assert_eq!(app.state.active_buffer_id.as_deref(), Some("two/#room"));
+            assert_eq!(app.web_active_buffers["browser"], "two/#room");
+            assert!(!app.should_quit);
+            assert!(app.irc_handles.values().all(|handle| handle.sender().captured().is_empty()));
+        }
+
+        app.handle_web_command(
+            WebCommand::RunCommand { buffer_id: "one/server".into(), text: "/quote WHOIS alice".into() },
+            "browser",
+        );
+        assert_eq!(app.irc_handles["one"].sender().captured().len(), 1);
+        assert!(app.irc_handles["two"].sender().captured().is_empty());
+        assert_eq!(app.state.active_buffer_id.as_deref(), Some("two/#room"));
     }
 }
 

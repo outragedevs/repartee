@@ -7281,6 +7281,14 @@ mod app_tests {
         );
 
         // The same for the `/`-prefixed arm, which is a separate branch.
+        app.state.add_buffer_with_focus(
+            crate::state::buffer::Buffer::for_test(
+                "test",
+                crate::state::buffer::BufferType::Channel,
+                "#other",
+            ),
+            false,
+        );
         app.web_buffer_unconfirmed.insert(session.to_string());
         app.handle_web_command(
             crate::web::protocol::WebCommand::RunCommand {
