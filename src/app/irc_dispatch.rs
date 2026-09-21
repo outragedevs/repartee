@@ -337,11 +337,21 @@ impl App {
                 if let Some(token) = dcc_msg.passive_token
                     && dcc_msg.port > 0
                 {
+                    let mapping = self.state.connections.get(conn_id)
+                        .map_or("rfc1459", |conn| conn.isupport_parsed.casemapping());
                     let matching_id = self
                         .dcc
                         .records
                         .iter()
-                        .find(|(_, r)| r.passive_token == Some(token))
+                        .find(|(_, r)| {
+                            r.passive_token == Some(token)
+                                && r.outgoing
+                                && r.conn_id == conn_id
+                                && r.port == 0
+                                && r.state == crate::dcc::types::DccState::WaitingUser
+                                && crate::irc::isupport::casefold(&r.nick, mapping)
+                                    == crate::irc::isupport::casefold(&nick, mapping)
+                        })
                         .map(|(id, _)| id.clone());
 
                     if let Some(id) = matching_id {
@@ -383,8 +393,8 @@ impl App {
                         if let Some(ref target) = endofwho_target {
                             self.handle_who_batch_complete(conn_id, target);
                         }
-                        return;
                     }
+                    return;
                 }
 
                 // Otherwise this is a fresh incoming DCC CHAT offer.
@@ -513,7 +523,9 @@ impl App {
         if let ::irc::proto::Command::NICK(ref new_nick) = msg.command
             && let Some(::irc::proto::Prefix::Nickname(ref old_nick, _, _)) = msg.prefix
         {
-            let renames = self.dcc.update_nick(old_nick, new_nick);
+            let mapping = self.state.connections.get(conn_id)
+                .map_or("rfc1459", |conn| conn.isupport_parsed.casemapping());
+            let renames = self.dcc.update_nick(conn_id, mapping, old_nick, new_nick);
             for (_old_id, _new_id, old_buf_suffix, new_buf_suffix) in renames {
                 let old_buf_id = crate::state::buffer::make_buffer_id(conn_id, &old_buf_suffix);
                 let new_buf_id = crate::state::buffer::make_buffer_id(conn_id, &new_buf_suffix);

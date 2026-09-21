@@ -169,16 +169,21 @@ impl DccManager {
     /// caller can rename DCC chat buffers in the UI.
     pub fn update_nick(
         &mut self,
+        conn_id: &str,
+        mapping: &str,
         old_nick: &str,
         new_nick: &str,
     ) -> Vec<(String, String, String, String)> {
-        let old_lower = old_nick.to_lowercase();
+        let old_lower = crate::irc::isupport::casefold(old_nick, mapping);
 
         // Collect IDs that need re-keying — cannot mutate maps while iterating.
         let old_ids: Vec<String> = self
             .records
             .iter()
-            .filter(|(_, r)| r.nick.to_lowercase() == old_lower)
+            .filter(|(_, r)| {
+                r.conn_id == conn_id
+                    && crate::irc::isupport::casefold(&r.nick, mapping) == old_lower
+            })
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -188,10 +193,10 @@ impl DccManager {
             let Some(mut record) = self.records.remove(&old_id) else {
                 continue;
             };
+            let old_buf_suffix = format!("={}", record.nick);
             new_nick.clone_into(&mut record.nick);
             let new_id = self.generate_id(new_nick);
-            let old_buf_suffix = format!("={old_id}");
-            let new_buf_suffix = format!("={new_id}");
+            let new_buf_suffix = format!("={new_nick}");
             record.id.clone_from(&new_id);
             self.records.insert(new_id.clone(), record);
 
@@ -273,6 +278,7 @@ mod tests {
             dcc_type: DccType::Chat,
             nick: nick.to_owned(),
             conn_id: "test_conn".to_owned(),
+            outgoing: false,
             addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port: 12345,
             state,
@@ -381,24 +387,24 @@ mod tests {
     fn update_nick_rekeys_records_and_senders() {
         let mut mgr = make_manager();
         mgr.records.insert(
-            "dave".to_owned(),
-            make_record("dave", "Dave", DccState::Connected),
+            "dave2".to_owned(),
+            make_record("dave2", "Dave", DccState::Connected),
         );
         // Simulate an active chat sender for the old ID.
         let (tx, _rx) = tokio::sync::mpsc::channel(256);
-        mgr.chat_senders.insert("dave".to_owned(), tx);
+        mgr.chat_senders.insert("dave2".to_owned(), tx);
 
-        let tuples = mgr.update_nick("Dave", "Dave_");
+        let tuples = mgr.update_nick("test_conn", "rfc1459", "Dave", "Dave_");
         assert_eq!(tuples.len(), 1);
         let (old_id, new_id, old_buf, new_buf) = &tuples[0];
-        assert_eq!(old_id, "dave");
+        assert_eq!(old_id, "dave2");
         assert_eq!(new_id, "dave_");
-        assert_eq!(old_buf, "=dave");
-        assert_eq!(new_buf, "=dave_");
+        assert_eq!(old_buf, "=Dave");
+        assert_eq!(new_buf, "=Dave_");
         // Old key removed, new key present.
-        assert!(!mgr.records.contains_key("dave"));
+        assert!(!mgr.records.contains_key("dave2"));
         assert_eq!(mgr.records["dave_"].nick, "Dave_");
-        assert!(!mgr.chat_senders.contains_key("dave"));
+        assert!(!mgr.chat_senders.contains_key("dave2"));
         assert!(mgr.chat_senders.contains_key("dave_"));
     }
 

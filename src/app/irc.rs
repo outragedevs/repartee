@@ -920,7 +920,7 @@ mod activity_rename_tests {
         app.state.set_activity("libera/#newer", ActivityLevel::Activity);
         app.dcc.records.insert("alice".into(), DccRecord {
             id: "alice".into(), dcc_type: DccType::Chat, nick: "alice".into(),
-            conn_id: "libera".into(), addr: "127.0.0.1".parse().unwrap(), port: 12345,
+            conn_id: "libera".into(), outgoing: false, addr: "127.0.0.1".parse().unwrap(), port: 12345,
             state: DccState::Connected, passive_token: None,
             created: std::time::Instant::now(), started: None, bytes_transferred: 0,
             mirc_ctcp: true, ident: "user".into(), host: "example.invalid".into(),

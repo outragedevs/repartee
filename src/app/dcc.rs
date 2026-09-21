@@ -75,6 +75,7 @@ impl App {
                     dcc_type: crate::dcc::types::DccType::Chat,
                     nick: nick_for_record,
                     conn_id,
+                    outgoing: false,
                     addr,
                     port,
                     state: crate::dcc::types::DccState::WaitingUser,
