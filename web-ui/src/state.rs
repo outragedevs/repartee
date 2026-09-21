@@ -1417,6 +1417,23 @@ mod tests {
     }
 
     #[test]
+    fn wizard_command_case_does_not_change_routing_or_network_id() {
+        for (command, subcommand) in [("/wizard", "server"), ("/WIZARD", "SERVER"), ("/WiZaRd", "SeRvEr")] {
+            let state = headless_state();
+            assert!(crate::components::settings::handle_wizard_command(state, command));
+            assert!(state.settings_open.get_untracked());
+            state.settings_open.set(false);
+            assert!(crate::components::settings::handle_wizard_command(state, &format!("{command} {subcommand}")));
+            assert!(state.wizard_open.get_untracked());
+            state.wizard_open.set(false);
+            assert!(crate::components::settings::handle_wizard_command(state, &format!("{command} {subcommand} MyNetwork")));
+            assert!(state.settings_open.get_untracked());
+            assert_eq!(state.settings_initial_network.get_untracked().as_deref(), Some("MyNetwork"));
+        }
+        assert!(!crate::components::settings::handle_wizard_command(headless_state(), "/whois peer"));
+    }
+
+    #[test]
     fn wizard_server_id_opens_selected_network_settings() {
         let state = headless_state();
         assert!(crate::components::settings::handle_wizard_command(state, "/wizard server libera"));
