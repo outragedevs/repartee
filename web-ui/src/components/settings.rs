@@ -25,9 +25,9 @@ pub fn open_settings(state: AppState) {
 pub fn handle_wizard_command(state: AppState, text: &str) -> bool {
     let words: Vec<_> = text.split_whitespace().collect();
     match words.as_slice() {
-        ["/wizard"] => open_settings(state),
-        ["/wizard", "server"] => state.wizard_open.set(true),
-        ["/wizard", "server", id] => {
+        [command] if command.eq_ignore_ascii_case("/wizard") => open_settings(state),
+        [command, subcommand] if command.eq_ignore_ascii_case("/wizard") && subcommand.eq_ignore_ascii_case("server") => state.wizard_open.set(true),
+        [command, subcommand, id] if command.eq_ignore_ascii_case("/wizard") && subcommand.eq_ignore_ascii_case("server") => {
             state.settings_initial_network.set(Some((*id).to_string()));
             state.settings_scope.set(SettingsScope::General);
             state.settings_fields.set(Vec::new());
