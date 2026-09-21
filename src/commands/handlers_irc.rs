@@ -250,6 +250,16 @@ pub(crate) fn cmd_join(app: &mut App, args: &[String]) {
     }
 }
 
+fn current_channel(app: &mut App) -> Option<String> {
+    let channel = app.state.active_buffer()
+        .filter(|buffer| buffer.buffer_type == crate::state::buffer::BufferType::Channel)
+        .map(|buffer| buffer.name.clone());
+    if channel.is_none() {
+        add_local_event(app, "Not in a channel; specify a channel explicitly");
+    }
+    channel
+}
+
 pub(crate) fn cmd_part(app: &mut App, args: &[String]) {
     let Some(sender) = app.active_irc_sender().cloned() else {
         add_local_event(app, "Not connected");
@@ -259,8 +269,8 @@ pub(crate) fn cmd_part(app: &mut App, args: &[String]) {
     let (channel, reason) = if args.first().is_some_and(|arg| crate::irc::formatting::is_channel(arg)) {
         (args[0].clone(), (args.len() > 1).then(|| args[1..].join(" ")))
     } else {
-        let Some(buf) = app.state.active_buffer() else { return };
-        (buf.name.clone(), (!args.is_empty()).then(|| args.join(" ")))
+        let Some(channel) = current_channel(app) else { return };
+        (channel, (!args.is_empty()).then(|| args.join(" ")))
     };
 
     let default_part = crate::constants::default_quit_message();
@@ -281,6 +291,7 @@ pub(crate) fn cmd_topic(app: &mut App, args: &[String]) {
     };
 
     if args.is_empty() {
+        if current_channel(app).is_none() { return; }
         if let Some(buf) = app.state.active_buffer() {
             match &buf.topic {
                 Some(topic) => {
@@ -304,10 +315,8 @@ pub(crate) fn cmd_topic(app: &mut App, args: &[String]) {
     let (channel, topic_args) = if crate::irc::formatting::is_channel(&args[0]) {
         (args[0].clone(), &args[1..])
     } else {
-        let Some(buf) = app.state.active_buffer() else {
-            return;
-        };
-        (buf.name.clone(), args)
+        let Some(channel) = current_channel(app) else { return };
+        (channel, args)
     };
 
     if topic_args.is_empty() {
@@ -382,13 +391,11 @@ pub(crate) fn cmd_kick(app: &mut App, args: &[String]) {
     // If first arg is a channel, peel it off; otherwise use the
     // current buffer's channel.
     let (channel, remaining): (String, &[String]) =
-        if crate::irc::formatting::is_channel(&args[0]) && args.len() >= 2 {
+        if crate::irc::formatting::is_channel(&args[0]) {
             (args[0].clone(), &args[1..])
         } else {
-            let Some(buf) = app.state.active_buffer() else {
-                return;
-            };
-            (buf.name.clone(), args)
+            let Some(channel) = current_channel(app) else { return };
+            (channel, args)
         };
 
     let (nicks, reason) = parse_kick_args(remaining);
@@ -443,10 +450,8 @@ pub(crate) fn cmd_invite(app: &mut App, args: &[String]) {
     let channel = if args.len() > 1 {
         args[1].clone()
     } else {
-        let Some(buf) = app.state.active_buffer() else {
-            return;
-        };
-        buf.name.clone()
+        let Some(channel) = current_channel(app) else { return };
+        channel
     };
 
     if let Err(e) = sender.send(irc::proto::Command::INVITE(nick.clone(), channel)) {
@@ -461,10 +466,8 @@ pub(crate) fn cmd_names(app: &mut App, args: &[String]) {
     };
 
     let channel = if args.is_empty() {
-        let Some(buf) = app.state.active_buffer() else {
-            return;
-        };
-        buf.name.clone()
+        let Some(channel) = current_channel(app) else { return };
+        channel
     } else {
         args[0].clone()
     };
@@ -1715,6 +1718,45 @@ mod reason_tail_tests {
             let first = sender.captured().len();
             app.handle_submit(input);
             assert_eq!(sender.captured()[first].to_string().trim_end(), expected);
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod implicit_channel_tests {
+    #[tokio::test]
+    async fn channel_commands_reject_query_context_but_keep_explicit_targets_and_kick_batches() {
+        use crate::irc::{IrcHandle, IrcSender};
+        use crate::state::buffer::{Buffer, BufferType};
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let config = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]\nnick='me'").unwrap();
+        app.setup_connection("fixture", &config);
+        let sender = IrcSender::capturing(0);
+        app.irc_handles.insert("fixture".into(), IrcHandle::new("fixture".into(), sender.clone(), None, None));
+        app.state.add_buffer(Buffer::for_test("fixture", BufferType::Query, "peer"));
+        for buffer in ["fixture/fixture", "fixture/peer"] {
+            app.state.set_active_buffer(buffer);
+            for input in ["/part", "/part gone for lunch", "/topic", "/topic new topic", "/kick peer reason", "/invite peer", "/names"] {
+                app.handle_submit(input);
+                assert!(sender.captured().is_empty(), "{input}");
+            }
+            assert!(app.state.buffers[buffer].messages.iter().any(|m| m.text.contains("Not in a channel")));
+        }
+        for input in ["/part #there bye", "/topic #there new topic", "/invite peer #there", "/names #there"] {
+            let before = sender.captured().len();
+            app.handle_submit(input);
+            assert_eq!(sender.captured().len(), before + 1, "{input}");
+            assert!(sender.captured().last().unwrap().to_string().contains("#there"));
+        }
+        let before = sender.captured().len();
+        app.handle_submit("/kick #there a,b,c,d,e,f reason");
+        let captured = sender.captured();
+        assert_eq!(captured.len(), before + 2);
+        for (message, nicks) in captured[before..].iter().zip(["a,b", "c,d,e,f"]) {
+            let ::irc::proto::Command::Raw(command, args) = &message.command else { panic!("expected KICK") };
+            assert_eq!(command, "KICK");
+            assert_eq!(args, &["#there", nicks, "reason"]);
         }
     }
 }
