@@ -262,7 +262,15 @@ fn build_portable(keyring: &Keyring) -> Result<Portable> {
 /// apply every row to the caller's keyring in a single pass. Validation is
 /// strict: version mismatch, wrong hex lengths, and unknown enum strings all
 /// cause `Err` before the keyring is touched.
+#[cfg(test)]
 pub fn import_from_path(keyring: &Keyring, path: &Path) -> Result<ImportSummary> {
+    import_with_identity(keyring, path).map(|(summary, _)| summary)
+}
+
+pub(super) fn import_with_identity(
+    keyring: &Keyring,
+    path: &Path,
+) -> Result<(ImportSummary, crate::e2e::crypto::identity::Identity)> {
     let mut file =
         File::open(path).map_err(|e| E2eError::Keyring(format!("open {}: {e}", path.display())))?;
     let mut raw = Zeroizing::new(Vec::new());
@@ -290,14 +298,15 @@ pub fn import_from_path(keyring: &Keyring, path: &Path) -> Result<ImportSummary>
         &validated.autotrust,
     )?;
 
-    Ok(ImportSummary {
+    let identity = crate::e2e::crypto::identity::Identity::from_secret_bytes(&validated.identity.privkey);
+    Ok((ImportSummary {
         identity: true,
         peers: validated.peers.len(),
         incoming: validated.incoming.len(),
         outgoing: validated.outgoing.len(),
         channels: validated.channels.len(),
         autotrust: validated.autotrust.len(),
-    })
+    }, identity))
 }
 
 #[cfg(unix)]
