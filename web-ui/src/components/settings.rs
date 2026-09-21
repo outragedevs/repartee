@@ -14,11 +14,30 @@ struct DraftField {
 }
 
 pub fn open_settings(state: AppState) {
+    state.settings_initial_network.set(None);
     state.settings_scope.set(SettingsScope::General);
     state.settings_fields.set(Vec::new());
     state.settings_error.set(None);
     state.settings_saving.set(false);
     state.settings_open.set(true);
+}
+
+pub fn handle_wizard_command(state: AppState, text: &str) -> bool {
+    let words: Vec<_> = text.split_whitespace().collect();
+    match words.as_slice() {
+        ["/wizard"] => open_settings(state),
+        ["/wizard", "server"] => state.wizard_open.set(true),
+        ["/wizard", "server", id] => {
+            state.settings_initial_network.set(Some((*id).to_string()));
+            state.settings_scope.set(SettingsScope::General);
+            state.settings_fields.set(Vec::new());
+            state.settings_error.set(None);
+            state.settings_saving.set(false);
+            state.settings_open.set(true);
+        }
+        _ => return false,
+    }
+    true
 }
 
 #[component]
@@ -43,7 +62,7 @@ fn SettingsDialog() -> impl IntoView {
         }
     });
     let section = RwSignal::new(0usize);
-    let network = RwSignal::new(None::<String>);
+    let network = RwSignal::new(state.settings_initial_network.get_untracked());
     let search = RwSignal::new(String::new());
     let fields = RwSignal::new(Vec::<DraftField>::new());
     let help = RwSignal::new(None::<SettingField>);
