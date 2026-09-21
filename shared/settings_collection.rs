@@ -7,6 +7,7 @@ pub enum CellKind {
     Toggle,
     List,
     OptionalText,
+    Select(&'static [&'static str]),
 }
 
 #[derive(Clone, Debug)]
@@ -58,8 +59,13 @@ impl Collection {
                 ],
                 json!({"mask":"", "levels":["ALL"]}),
             ),
-            "translate.buffers" => (
-                Some("Buffer"),
+            path if path.contains(".encryption_channels_") => (
+                Some("Channel"),
+                vec![column("/enabled", "Encryption enabled", Toggle), column("/mode", "Key-sharing mode", CellKind::Select(&["normal", "quiet", "auto-accept"]))],
+                json!({"enabled": true, "mode": "normal"}),
+            ),
+            path if path == "translate.buffers" || path.contains(".translation_channels_") => (
+                Some(if path == "translate.buffers" { "Buffer (network/target)" } else { "Channel or nickname" }),
                 vec![
                     column("/incoming", "Translate incoming", Toggle),
                     column("/outgoing", "Translate outgoing", Toggle),
@@ -216,6 +222,10 @@ impl Collection {
                 continue;
             }
             let value = match column.kind {
+                CellKind::Select(options) => {
+                    if !options.contains(&text.as_str()) { return Err(format!("Invalid {}", column.label)); }
+                    json!(text)
+                }
                 CellKind::Text => json!(text),
                 CellKind::OptionalText => {
                     if text.is_empty() {
@@ -285,6 +295,17 @@ impl Collection {
 
     pub fn summary(&self, row: &Row) -> String {
         if self.key_label.is_some() {
+            if self.columns.first().is_some_and(|c| c.path == "/enabled") {
+                return format!("{} · {} · {}", row.key,
+                    if row.value["enabled"].as_bool().unwrap_or(false) { "on" } else { "off" },
+                    row.value["mode"].as_str().unwrap_or("normal"));
+            }
+            if self.columns.first().is_some_and(|c| c.path == "/incoming") {
+                return format!("{} · in:{} out:{} · {}", row.key,
+                    if row.value["incoming"].as_bool().unwrap_or(false) { "on" } else { "off" },
+                    if row.value["outgoing"].as_bool().unwrap_or(false) { "on" } else { "off" },
+                    row.value["lang"].as_str().unwrap_or("auto"));
+            }
             return row.key.clone();
         }
         self.cells(row).first().cloned().unwrap_or_default()

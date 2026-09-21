@@ -177,6 +177,7 @@ pub struct AppState {
     /// no full server config to pre-fill an edit), so there is no edit-id here.
     pub wizard_open: RwSignal<bool>,
     pub settings_open: RwSignal<bool>,
+    pub settings_scope: RwSignal<crate::settings_model::SettingsScope>,
     pub settings_fields: RwSignal<Vec<crate::settings_model::SettingField>>,
     pub settings_error: RwSignal<Option<String>>,
     pub settings_saving: RwSignal<bool>,
@@ -281,6 +282,7 @@ impl AppState {
             emotes_enabled: RwSignal::new(true),
             wizard_open: RwSignal::new(false),
             settings_open: RwSignal::new(false),
+            settings_scope: RwSignal::new(crate::settings_model::SettingsScope::General),
             settings_fields: RwSignal::new(Vec::new()),
             settings_error: RwSignal::new(None),
             settings_saving: RwSignal::new(false),
@@ -872,8 +874,8 @@ impl AppState {
                     self.active_buffer.set(Some(buffer_id));
                 }
             }
-            WebEvent::SettingsSnapshot { fields, .. } => {
-                if self.settings_open.get_untracked() { self.settings_fields.set(fields); }
+            WebEvent::SettingsSnapshot { scope, fields, .. } => {
+                if self.settings_open.get_untracked() && scope == self.settings_scope.get_untracked() { self.settings_fields.set(fields); }
             }
             WebEvent::SettingsSaved { error, .. } => {
                 self.settings_saving.set(false);

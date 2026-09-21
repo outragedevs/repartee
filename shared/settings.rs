@@ -16,6 +16,31 @@ pub const SECTIONS: [&str; 10] = [
     "Advanced",
 ];
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SettingsScope {
+    #[default]
+    General,
+    EncryptionChannels,
+    TranslationChannels,
+}
+
+impl SettingsScope {
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::General => "Settings",
+            Self::EncryptionChannels => "Encryption channels",
+            Self::TranslationChannels => "Translation channels and queries",
+        }
+    }
+
+    pub const fn sections(self) -> &'static [&'static str] {
+        match self {
+            Self::General => &SECTIONS,
+            _ => &["Networks"],
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SettingKind {
     Text,

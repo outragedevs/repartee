@@ -46,6 +46,25 @@ outgoing translation requires the channel language. Model routing lists and the
 optional final stage are editable without writing JSON. The `stub` backend is
 only for testing and reverses word order; it does not translate.
 
+### Channel wizards
+
+Choose **Channels** in the terminal footer or **Manage channels** on the web
+from E2E Encryption or Translation. Save or cancel global settings drafts first.
+Each wizard has separate tabs for your networks. Changes remain a draft until
+Save; Cancel leaves the saved rules unchanged.
+
+In the encryption wizard, add a channel such as `#chat`, toggle encryption and
+select its key-sharing mode. Removing an entry disables encryption but keeps
+its keys and trust records; the channel is subsequently listed as disabled.
+Logging and E2E must be enabled and the main process restarted before this
+wizard is available. Private-query key management remains under `/e2e`.
+
+In the translation wizard, enter a channel or nickname without a network
+prefix. Set incoming/outgoing translation, the channel language and optionally
+your language. Outgoing translation needs an explicit channel language. Rules
+on other networks are preserved, and encrypted conversations are excluded from
+translation. Concurrent edits are rejected instead of silently overwritten.
+
 ### Terminal controls
 
 - Click categories, fields, toggles, lists, or action buttons.

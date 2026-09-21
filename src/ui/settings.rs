@@ -1,6 +1,6 @@
 mod collection;
 
-use crate::settings_model::{SECTIONS, SettingChange, SettingField, SettingKind};
+use crate::settings_model::{SettingChange, SettingField, SettingKind, SettingsScope};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     prelude::*,
@@ -16,6 +16,7 @@ pub enum Focus {
     Cancel,
     Defaults,
     Network,
+    Channels,
     Help,
 }
 
@@ -25,9 +26,11 @@ pub enum Action {
     Save,
     Cancel,
     Network,
+    Channels(SettingsScope),
 }
 
 pub struct SettingsPanel {
+    pub scope: SettingsScope,
     pub fields: Vec<SettingField>,
     editor: Option<collection::Editor>,
     help_open: bool,
@@ -49,8 +52,14 @@ pub struct SettingsPanel {
 impl SettingsPanel {
     pub fn new(config: &crate::config::AppConfig) -> Self {
         let fields = crate::config::settings::catalog::fields(config);
+        Self::from_fields(fields, SettingsScope::General)
+    }
+
+    pub fn from_fields(fields: Vec<SettingField>, scope: SettingsScope) -> Self {
+        let network = if scope == SettingsScope::General { None } else { fields.first().and_then(|f| f.network()).map(str::to_string) };
         let originals = fields.iter().map(|f| f.value.clone()).collect();
         Self {
+            scope,
             fields,
             editor: None,
             help_open: false,
@@ -58,7 +67,7 @@ impl SettingsPanel {
             originals,
             touched: HashSet::new(),
             section: 0,
-            network: None,
+            network,
             network_hits: Vec::new(),
             query: String::new(),
             focus: Focus::Search,
@@ -71,7 +80,7 @@ impl SettingsPanel {
     }
 
     fn networks(&self) -> Vec<(Option<String>, String)> {
-        let mut networks = vec![(None, "General".into())];
+        let mut networks = if self.scope == SettingsScope::General { vec![(None, "General".into())] } else { Vec::new() };
         for field in &self.fields {
             if let Some(id) = field.network()
                 && !networks
@@ -134,13 +143,12 @@ impl SettingsPanel {
     fn move_focus(&mut self, forward: bool) {
         let mut ring = vec![Focus::Search];
         ring.extend(self.visible().into_iter().map(Focus::Field));
-        ring.extend([
-            Focus::Save,
-            Focus::Cancel,
-            Focus::Defaults,
-            Focus::Network,
-            Focus::Help,
-        ]);
+        ring.extend([Focus::Save, Focus::Cancel]);
+        if self.scope == SettingsScope::General {
+            ring.push(Focus::Defaults);
+            ring.push(if matches!(self.section, 7 | 8) { Focus::Channels } else { Focus::Network });
+        }
+        ring.push(Focus::Help);
         let at = ring.iter().position(|f| *f == self.focus).unwrap_or(0);
         self.set_focus(ring[(at + if forward { 1 } else { ring.len() - 1 }) % ring.len()]);
     }
@@ -209,6 +217,7 @@ impl SettingsPanel {
             Focus::Save => Action::Save,
             Focus::Cancel => Action::Cancel,
             Focus::Network => Action::Network,
+            Focus::Channels => Action::Channels(if self.section == 7 { SettingsScope::EncryptionChannels } else { SettingsScope::TranslationChannels }),
             Focus::Defaults => {
                 if !self.query.is_empty() {
                     self.error = Some(
@@ -311,9 +320,9 @@ impl SettingsPanel {
                     + if key.code == KeyCode::Right {
                         1
                     } else {
-                        SECTIONS.len() - 1
+                        self.scope.sections().len() - 1
                     })
-                    % SECTIONS.len();
+                    % self.scope.sections().len();
                 self.query.clear();
                 self.offset = 0;
                 self.set_focus(Focus::Search);
@@ -434,7 +443,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut crate::app::App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(
-            " Settings ",
+            format!(" {} ", panel.scope.title()),
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ))
         .border_style(Style::default().fg(border))
@@ -473,27 +482,35 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut crate::app::App) {
         search,
     );
     panel.hits.push((search, Focus::Search));
-    let footer = footer_controls(Rect::new(
+    let mut footer = footer_controls(Rect::new(
         padded.x,
         padded.y,
         padded.width,
         padded.height.saturating_sub(1),
     ));
+    if panel.scope != SettingsScope::General {
+        footer.retain(|(_, focus, _)| !matches!(focus, Focus::Defaults | Focus::Network));
+    } else if matches!(panel.section, 7 | 8) {
+        for (label, focus, _) in &mut footer {
+            if *focus == Focus::Network { *label = " Channels "; *focus = Focus::Channels; }
+        }
+    }
     let footer_y = footer[0].2.y;
     let help_y = footer_y.saturating_sub(4);
     let nav = Rect::new(
         padded.x,
         padded.y + 2,
-        23,
+        if panel.scope == SettingsScope::General { 23 } else { 0 },
         help_y.saturating_sub(padded.y + 2),
     );
+    if panel.scope == SettingsScope::General {
     frame.render_widget(
         Block::default()
             .borders(Borders::RIGHT)
             .border_style(Style::default().fg(border)),
         Rect::new(nav.x, nav.y, nav.width + 1, nav.height),
     );
-    for (index, name) in SECTIONS.iter().enumerate() {
+    for (index, name) in panel.scope.sections().iter().enumerate() {
         let rect = Rect::new(
             nav.x,
             nav.y + u16::try_from(index).unwrap_or(0),
@@ -510,14 +527,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut crate::app::App) {
         );
         panel.sections.push((rect, index));
     }
+    }
+    let body_x = if panel.scope == SettingsScope::General { nav.right() + 2 } else { padded.x };
     let body = Rect::new(
-        nav.right() + 2,
+        body_x,
         nav.y,
-        padded.right().saturating_sub(nav.right() + 2),
+        padded.right().saturating_sub(body_x),
         nav.height,
     );
     let heading = if panel.query.is_empty() {
-        SECTIONS[panel.section].to_string()
+        panel.scope.sections()[panel.section].to_string()
     } else {
         "Search results".into()
     };

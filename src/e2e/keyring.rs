@@ -118,7 +118,7 @@ pub struct OutgoingSession {
 }
 
 /// Per-channel encryption config.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelConfig {
     pub channel: String,
     pub enabled: bool,
@@ -951,6 +951,26 @@ impl Keyring {
              VALUES (?1, ?2, ?3)",
             params![cfg.channel, i64::from(cfg.enabled), cfg.mode.as_str()],
         )?;
+        Ok(())
+    }
+
+    pub fn set_channel_configs_if_unchanged(&self, expected: &[ChannelConfig], updates: &[ChannelConfig]) -> Result<()> {
+        let mut conn = self.db.lock().expect("keyring mutex poisoned");
+        let transaction = conn.transaction()?;
+        let current = {
+            let mut stmt = transaction.prepare("SELECT channel, enabled, mode FROM e2e_channel_config ORDER BY channel ASC")?;
+            stmt.query_map([], |row| Ok(ChannelConfig {
+                channel: row.get(0)?, enabled: row.get::<_, i64>(1)? != 0,
+                mode: ChannelMode::parse(&row.get::<_, String>(2)?),
+            }))?.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        if current != expected {
+            return Err(crate::e2e::error::E2eError::Keyring("Encryption settings changed elsewhere. Reopen the wizard before saving.".into()));
+        }
+        for cfg in updates {
+            transaction.execute("INSERT OR REPLACE INTO e2e_channel_config (channel, enabled, mode) VALUES (?1, ?2, ?3)", params![cfg.channel, i64::from(cfg.enabled), cfg.mode.as_str()])?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 

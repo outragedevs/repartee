@@ -122,7 +122,7 @@ impl Editor {
             return;
         };
         let kind = self.column_kind(index);
-        if kind == CellKind::Toggle {
+        if matches!(kind, CellKind::Toggle | CellKind::Select(_)) {
             return;
         }
         let Some(entry) = &mut self.entry else {
@@ -145,7 +145,7 @@ impl Editor {
         let Target::Cell(index) = self.focus else {
             return;
         };
-        if self.column_kind(index) == CellKind::Toggle || backwards && self.cursor == 0 {
+        if matches!(self.column_kind(index), CellKind::Toggle | CellKind::Select(_)) || backwards && self.cursor == 0 {
             return;
         }
         if let Some(entry) = &mut self.entry {
@@ -164,10 +164,16 @@ impl Editor {
             Target::Add => self.start(None),
             Target::Row(index) => self.start(Some(index)),
             Target::Cell(index) => {
-                if self.column_kind(index) == CellKind::Toggle
-                    && let Some(entry) = &mut self.entry
-                {
-                    entry.values[index] = (entry.values[index] != "true").to_string();
+                let kind = self.column_kind(index);
+                if let Some(entry) = &mut self.entry {
+                    match kind {
+                        CellKind::Toggle => entry.values[index] = (entry.values[index] != "true").to_string(),
+                        CellKind::Select(options) => {
+                            let at = options.iter().position(|option| *option == entry.values[index]).unwrap_or(0);
+                            entry.values[index] = options[(at + 1) % options.len()].into();
+                        }
+                        _ => {}
+                    }
                 }
             }
             Target::Cancel => {
@@ -246,7 +252,7 @@ impl Editor {
             (_, KeyCode::BackTab | KeyCode::Up) => self.move_focus(false),
             (m, KeyCode::Enter) if m.contains(KeyModifiers::ALT) => self.insert("\n"),
             (_, KeyCode::Enter) => return self.activate(self.focus),
-            (_, KeyCode::Char(' ')) if matches!(self.focus, Target::Cell(i) if self.column_kind(i) == CellKind::Toggle) =>
+            (_, KeyCode::Char(' ')) if matches!(self.focus, Target::Cell(i) if matches!(self.column_kind(i), CellKind::Toggle | CellKind::Select(_))) =>
             {
                 return self.activate(self.focus);
             }
@@ -374,6 +380,8 @@ impl Editor {
                 let mut value = entry.values[index].replace('\n', "↵");
                 if self.column_kind(index) == CellKind::Toggle {
                     value = if value == "true" { "[x] On" } else { "[ ] Off" }.into();
+                } else if matches!(self.column_kind(index), CellKind::Select(_)) {
+                    value = format!("‹ {value} ›");
                 } else if self.focus == Target::Cell(index) {
                     let at = value
                         .char_indices()
