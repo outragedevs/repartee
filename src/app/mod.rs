@@ -372,43 +372,41 @@ fn expand_alias_template(
     nick: &str,
     server: &str,
 ) -> String {
-    let mut body = template.to_string();
-
-    if !body.contains('$') {
-        body.push_str(" $*");
+    if !template.contains('$') {
+        return format!("{template} {}", args.join(" ")).trim().to_string();
     }
-
-    body = body.replace("${C}", channel);
-    body = body.replace("$C", channel);
-    body = body.replace("${N}", nick);
-    body = body.replace("$N", nick);
-    body = body.replace("${S}", server);
-    body = body.replace("$S", server);
-    body = body.replace("${T}", channel);
-    body = body.replace("$T", channel);
-
-    for i in (0..=9).rev() {
-        let range_var = format!("${i}-");
-        if body.contains(&range_var) {
-            let val = if i < args.len() {
-                args[i..].join(" ")
+    let mut body = String::new();
+    let mut remaining = template;
+    while let Some(index) = remaining.find('$') {
+        body.push_str(&remaining[..index]);
+        remaining = &remaining[index + 1..];
+        if let Some((token, value)) = [
+            ("{C}", channel), ("C", channel),
+            ("{N}", nick), ("N", nick),
+            ("{S}", server), ("S", server),
+            ("{T}", channel), ("T", channel),
+        ].into_iter().find(|(token, _)| remaining.starts_with(token)) {
+            body.push_str(value);
+            remaining = &remaining[token.len()..];
+        } else if remaining.starts_with(['*', '-']) {
+            body.push_str(&args.join(" "));
+            remaining = &remaining[1..];
+        } else if let Some(digit @ b'0'..=b'9') = remaining.as_bytes().first() {
+            let index = usize::from(digit - b'0');
+            remaining = &remaining[1..];
+            if let Some(tail) = remaining.strip_prefix('-') {
+                if let Some(values) = args.get(index..) {
+                    body.push_str(&values.join(" "));
+                }
+                remaining = tail;
             } else {
-                String::new()
-            };
-            body = body.replace(&range_var, &val);
+                body.push_str(args.get(index).map_or("", String::as_str));
+            }
+        } else {
+            body.push('$');
         }
     }
-
-    let all_args = args.join(" ");
-    body = body.replace("$*", &all_args);
-    body = body.replace("$-", &all_args);
-
-    for i in (0..=9).rev() {
-        let var = format!("${i}");
-        let val = args.get(i).map_or("", String::as_str);
-        body = body.replace(&var, val);
-    }
-
+    body.push_str(remaining);
     body.trim().to_string()
 }
 

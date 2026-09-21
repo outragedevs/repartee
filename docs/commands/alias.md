@@ -26,6 +26,9 @@ template variables, context variables, and command chaining with semicolons.
 If the alias body contains no `$` references, `$*` is appended automatically.
 This means `/alias ns /msg NickServ` works the same as `/alias ns /msg NickServ $*`.
 
+Variables are expanded only in the alias template. Dollar expressions inside
+argument values are kept literal.
+
 ### Context Variables
 
 - `$C` or `${C}` — current channel/buffer name
