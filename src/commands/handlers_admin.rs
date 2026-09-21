@@ -151,6 +151,10 @@ pub(crate) fn apply_reloaded_config(app: &mut App, new_config: crate::config::Ap
 }
 
 pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
+    reload_from_paths(app, &crate::constants::config_path(), &crate::constants::env_path());
+}
+
+fn reload_from_paths(app: &mut App, config_path: &std::path::Path, env_path: &std::path::Path) {
     // Snapshot the pre-reload shrink api_key state so we can detect
     // a transition from empty → populated and tell the user that
     // the workers were not spawned at startup and a restart is
@@ -165,7 +169,7 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
     // expects. Like startup, it writes nothing — the user's comments and unknown
     // keys survive a `/reload`, and the migrated version persists on the next
     // save they actually ask for (see `config::load_and_migrate`).
-    let mut new_config = match crate::config::load_and_migrate(&crate::constants::config_path()) {
+    let mut new_config = match crate::config::load_and_migrate(config_path) {
         Ok(config) => config,
         Err(e) => {
             add_local_event(app, &format!("{C_ERR}Failed to reload config: {e}{C_RST}"));
@@ -180,35 +184,26 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
     // Existing connections keep their already-negotiated credentials;
     // new /connect attempts (and any code path that re-reads
     // app.config) pick up the new values.
-    let env_result = crate::config::load_env(&crate::constants::env_path());
-    if let Ok(env_vars) = &env_result {
-        apply_env_credentials(&mut new_config, env_vars);
-    }
+    let env_vars = match crate::config::load_env(env_path) {
+        Ok(vars) => vars,
+        Err(e) => {
+            add_local_event(app, &format!("{C_ERR}Failed to reload .env; current configuration preserved: {e}{C_RST}"));
+            return;
+        }
+    };
+    apply_env_credentials(&mut new_config, &env_vars);
     apply_reloaded_config(app, new_config);
     add_local_event(app, &format!("{C_OK}Config reloaded{C_RST}"));
+    add_local_event(app, &format!("{C_OK}.env reloaded{C_RST}"));
 
-    match env_result {
-        Ok(_) => {
-            add_local_event(app, &format!("{C_OK}.env reloaded{C_RST}"));
-
-            // Surface the shrink restart-required edge case: the API
-            // key just appeared in .env but the runtime was built
-            // empty-keyed at startup, so the workers are not running
-            // and the in-process /shrink path stays a no-op until a
-            // full restart. Explicit message beats silent failure.
-            if shrink_was_inactive && !app.config.shrink.api_key.is_empty() {
-                add_local_event(
-                    app,
-                    &format!(
-                        "{C_OK}SHRINK_API_KEY picked up from .env — \
-                         restart repartee to activate the shrink workers{C_RST}"
-                    ),
-                );
-            }
-        }
-        Err(e) => {
-            add_local_event(app, &format!("{C_ERR}Failed to reload .env: {e}{C_RST}"));
-        }
+    if shrink_was_inactive && !app.config.shrink.api_key.is_empty() {
+        add_local_event(
+            app,
+            &format!(
+                "{C_OK}SHRINK_API_KEY picked up from .env — restart {} to activate the shrink workers{C_RST}",
+                crate::constants::APP_NAME,
+            ),
+        );
     }
 
     // Reload theme
@@ -1890,6 +1885,36 @@ mod server_add_tests {
 mod translate_reload_tests {
     use crate::app::input::submit_typing_tests::test_app;
     use crate::config::{TranslateAiConfig, TranslateAiModelConfig, TranslateBufferConfig};
+
+    #[test]
+    fn reload_env_failure_preserves_credentials_and_runtime_config() {
+        let mut app = test_app();
+        app.state.add_buffer(crate::state::buffer::Buffer::for_test(
+            "net", crate::state::buffer::BufferType::Channel, "#fixture",
+        ));
+        app.state.set_active_buffer("net/#fixture");
+        app.config.web.password = "fixture-password".into();
+        app.config.web.session_secret = "fixture-session".into();
+        app.config.shrink.api_key = "fixture-api-key".into();
+        app.config.general.nick = "original".into();
+        let original_limit = app.state.scrollback_limit;
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let env_path = temp.path().join(".env");
+        let mut edited = app.config.clone();
+        edited.general.nick = "replacement".into();
+        edited.display.scrollback_lines = original_limit + 1;
+        std::fs::write(&config_path, toml::to_string(&edited).unwrap()).unwrap();
+        std::fs::write(&env_path, [0xff]).unwrap();
+        super::reload_from_paths(&mut app, &config_path, &env_path);
+        assert_eq!(app.config.general.nick, "original");
+        assert_eq!(app.config.web.password, "fixture-password");
+        assert_eq!(app.config.web.session_secret, b"fixture-session");
+        assert_eq!(app.config.shrink.api_key, "fixture-api-key");
+        assert_eq!(app.state.scrollback_limit, original_limit);
+        assert!(rows(&app).iter().any(|text| text.contains("current configuration preserved")));
+        assert!(!rows(&app).iter().any(|text| text.contains("Config reloaded")));
+    }
 
     fn ai_config(base_url: &str, api_key: &str) -> TranslateAiConfig {
         let model = TranslateAiModelConfig {
