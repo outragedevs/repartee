@@ -321,6 +321,15 @@ impl App {
                 let (nick, ident, host) =
                     crate::irc::formatting::extract_nick_userhost(msg.prefix.as_ref());
 
+                if self.state.connections.get(conn_id).is_some_and(|conn| {
+                    let mapping = conn.isupport_parsed.casemapping();
+                    !conn.nick.is_empty()
+                        && crate::irc::isupport::casefold(&nick, mapping)
+                            == crate::irc::isupport::casefold(&conn.nick, mapping)
+                }) {
+                    return;
+                }
+
                 // A passive DCC response from the peer looks like:
                 //   DCC CHAT CHAT <peer_ip> <peer_port> <our_token>
                 // where port > 0 and passive_token matches what we sent.
@@ -577,3 +586,7 @@ impl App {
 #[cfg(test)]
 #[path = "isupport_tests.rs"]
 mod isupport_tests;
+
+#[cfg(test)]
+#[path = "dcc_echo_tests.rs"]
+mod dcc_echo_tests;
