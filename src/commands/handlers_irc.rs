@@ -256,26 +256,15 @@ pub(crate) fn cmd_part(app: &mut App, args: &[String]) {
         return;
     };
 
-    let (channel, reason) = if args.is_empty() {
-        let Some(buf) = app.state.active_buffer() else {
-            return;
-        };
-        (buf.name.clone(), None)
-    } else if args.len() == 1 {
-        if crate::irc::formatting::is_channel(&args[0]) {
-            (args[0].clone(), None)
-        } else {
-            let Some(buf) = app.state.active_buffer() else {
-                return;
-            };
-            (buf.name.clone(), Some(args[0].as_str()))
-        }
+    let (channel, reason) = if args.first().is_some_and(|arg| crate::irc::formatting::is_channel(arg)) {
+        (args[0].clone(), (args.len() > 1).then(|| args[1..].join(" ")))
     } else {
-        (args[0].clone(), Some(args[1].as_str()))
+        let Some(buf) = app.state.active_buffer() else { return };
+        (buf.name.clone(), (!args.is_empty()).then(|| args.join(" ")))
     };
 
     let default_part = crate::constants::default_quit_message();
-    let part_reason = reason.unwrap_or(default_part.as_str());
+    let part_reason = reason.as_deref().unwrap_or(default_part.as_str());
     let result = sender.send(irc::proto::Command::PART(
         channel,
         Some(part_reason.to_string()),
@@ -902,7 +891,7 @@ pub(crate) fn cmd_cycle(app: &mut App, args: &[String]) {
         (buf.name.clone(), None)
     } else if crate::irc::formatting::is_channel(&args[0]) {
         let reason = if args.len() > 1 {
-            Some(args[1].as_str())
+            Some(args[1..].join(" "))
         } else {
             None
         };
@@ -916,7 +905,7 @@ pub(crate) fn cmd_cycle(app: &mut App, args: &[String]) {
             add_local_event(app, "Not in a channel");
             return;
         }
-        (buf.name.clone(), Some(args[0].as_str()))
+        (buf.name.clone(), Some(args.join(" ")))
     };
 
     // Collect the channel key if one is set (to rejoin key-protected channels)
@@ -932,7 +921,7 @@ pub(crate) fn cmd_cycle(app: &mut App, args: &[String]) {
         |reason| {
             sender.send(irc::proto::Command::PART(
                 channel.clone(),
-                Some(reason.to_string()),
+                Some(reason),
             ))
         },
     );
@@ -1361,8 +1350,9 @@ pub(crate) fn cmd_quote(app: &mut App, args: &[String]) {
 // === Away ===
 
 pub(crate) fn cmd_away(app: &mut App, args: &[String]) {
+    let reason = (!args.is_empty()).then(|| args.join(" "));
     if let Some(conn_id) = app.active_conn_id().map(str::to_string)
-        && app.set_bouncer_away(&conn_id, args.first().map(String::as_str))
+        && app.set_bouncer_away(&conn_id, reason.as_deref())
     {
         return;
     }
@@ -1371,13 +1361,7 @@ pub(crate) fn cmd_away(app: &mut App, args: &[String]) {
         return;
     };
 
-    let result = if args.is_empty() {
-        // Clear away status
-        sender.send(irc::proto::Command::AWAY(None))
-    } else {
-        // Set away with reason
-        sender.send(irc::proto::Command::AWAY(Some(args[0].clone())))
-    };
+    let result = sender.send(irc::proto::Command::AWAY(reason));
     if let Err(e) = result {
         add_local_event(app, &format!("Failed to send AWAY: {e}"));
     }
@@ -1701,5 +1685,36 @@ mod tests {
                 vec!["#chan".to_string(), "-e".to_string(), "d".to_string()],
             ]
         );
+    }
+}
+
+
+#[cfg(test)]
+mod reason_tail_tests {
+    #[tokio::test]
+    async fn multiword_reasons_reach_the_irc_wire() {
+        use crate::irc::{IrcHandle, IrcSender};
+        use crate::state::buffer::{Buffer, BufferType};
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let config = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]\nnick='me'").unwrap();
+        app.setup_connection("fixture", &config);
+        app.state.add_buffer(Buffer::for_test("fixture", BufferType::Channel, "#here"));
+        app.state.set_active_buffer("fixture/#here");
+        let sender = IrcSender::capturing(0);
+        app.irc_handles.insert("fixture".into(), IrcHandle::new("fixture".into(), sender.clone(), None, None));
+        for (input, expected) in [
+            ("/part #there gone for lunch", "PART #there :gone for lunch"),
+            ("/leave gone for lunch", "PART #here :gone for lunch"),
+            ("/cycle #there back in a moment", "PART #there :back in a moment"),
+            ("/rejoin back in a moment", "PART #here :back in a moment"),
+            ("/away gone for lunch", "AWAY :gone for lunch"),
+            ("/away", "AWAY"),
+            ("/kill peer repeated bad behavior", "KILL peer :repeated bad behavior"),
+            ("/wallops maintenance starts at midnight", "WALLOPS :maintenance starts at midnight"),
+        ] {
+            let first = sender.captured().len();
+            app.handle_submit(input);
+            assert_eq!(sender.captured()[first].to_string().trim_end(), expected);
+        }
     }
 }
