@@ -551,7 +551,10 @@ impl App {
         if let ::irc::proto::Command::Response(::irc::proto::Response::ERR_NOSUCHNICK, ref args) =
             msg.command
             && let Some(target_nick) = args.get(1)
-            && let Some(record) = self.dcc.close_by_nick(target_nick)
+            && let Some(record) = {
+                let mapping = self.dcc_casemapping(conn_id).to_owned();
+                self.dcc.close_by_nick(conn_id, &mapping, target_nick)
+            }
         {
             crate::commands::helpers::add_local_event(
                 self,

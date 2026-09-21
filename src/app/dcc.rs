@@ -9,6 +9,11 @@ use crate::state::buffer::{
 use super::App;
 
 impl App {
+    pub(crate) fn dcc_casemapping(&self, conn_id: &str) -> &str {
+        self.state.connections.get(conn_id)
+            .map_or("rfc1459", |conn| conn.isupport_parsed.casemapping())
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(crate) fn handle_dcc_event(&mut self, ev: crate::dcc::DccEvent) {
         use crate::dcc::DccEvent;
@@ -45,7 +50,9 @@ impl App {
                     .records
                     .iter()
                     .find(|(_, r)| {
-                        r.nick.eq_ignore_ascii_case(&nick)
+                        r.conn_id == conn_id
+                            && crate::irc::isupport::casefold(&r.nick, self.dcc_casemapping(&conn_id))
+                                == crate::irc::isupport::casefold(&nick, self.dcc_casemapping(&conn_id))
                             && matches!(r.state, crate::dcc::types::DccState::Listening)
                     })
                     .map(|(id, _)| id.clone());
@@ -87,10 +94,10 @@ impl App {
                     ident,
                     host,
                 };
-                self.dcc.records.insert(id, record);
+                self.dcc.records.insert(id.clone(), record);
 
                 if auto {
-                    crate::commands::handlers_dcc::cmd_dcc(self, &["chat".to_string(), nick]);
+                    crate::commands::handlers_dcc::accept_dcc_chat(self, &nick, &id);
                 } else {
                     crate::commands::helpers::add_local_event(
                         self,

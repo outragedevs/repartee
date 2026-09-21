@@ -120,3 +120,72 @@ async fn passive_reply_requires_the_outgoing_peer_network_and_pending_state() {
         .await.unwrap().unwrap();
     drop(stream);
 }
+
+
+#[tokio::test]
+async fn dcc_commands_route_identical_peers_by_network() {
+    use crate::dcc::DccEvent;
+    use crate::irc::{IrcHandle, IrcSender};
+    let mut app = crate::app::input::submit_typing_tests::test_app();
+    let config = toml::from_str(
+        "label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]\nnick='me'",
+    ).unwrap();
+    let mut sessions = Vec::new();
+    for network in ["fixture", "other"] {
+        app.setup_connection(network, &config);
+        let sender = IrcSender::capturing(0);
+        app.irc_handles.insert(network.into(), IrcHandle::new(network.into(), sender.clone(), None, None));
+        receive(&mut app, network, ":peer[!user@host PRIVMSG me :\x01DCC CHAT chat 2130706433 39807\x01");
+        let id = app.dcc.records.values().find(|r| r.conn_id == network).unwrap().id.clone();
+        app.handle_dcc_event(DccEvent::ChatConnected { id: id.clone() });
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        app.dcc.chat_senders.insert(id.clone(), tx);
+        sessions.push((id, sender, rx));
+    }
+    for (index, network) in ["fixture", "other"].into_iter().enumerate() {
+        app.state.set_active_buffer(&format!("{network}/=peer["));
+        for (input, expected) in [("/msg =PEER{ hello", "hello"), ("/me waves", "\x01ACTION waves\x01"), ("plain", "plain")] {
+            app.handle_submit(input);
+            assert_eq!(sessions[index].2.try_recv().unwrap(), expected);
+            assert!(sessions[1 - index].2.try_recv().is_err());
+        }
+    }
+    app.state.set_active_buffer("other/=peer[");
+    app.handle_submit("/dcc close chat PEER{");
+    assert!(!app.dcc.records.contains_key(&sessions[1].0));
+    assert!(app.dcc.records.contains_key(&sessions[0].0));
+    app.state.set_active_buffer("fixture/=peer[");
+    app.handle_submit("/dcc reject chat PEER{");
+    assert!(app.dcc.records.is_empty());
+    assert!(sessions[0].1.captured().iter().any(|m| m.to_string().contains("DCC REJECT")));
+    assert!(sessions[1].1.captured().is_empty());
+}
+
+#[tokio::test]
+async fn dcc_acceptance_and_missing_nick_stay_on_the_offer_network() {
+    use crate::dcc::types::DccState;
+    use crate::irc::{IrcHandle, IrcSender};
+    let mut app = crate::app::input::submit_typing_tests::test_app();
+    let config = toml::from_str(
+        "label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]\nnick='me'",
+    ).unwrap();
+    app.dcc.own_ip = Some(std::net::Ipv4Addr::LOCALHOST.into());
+    for network in ["fixture", "other"] {
+        app.setup_connection(network, &config);
+        app.irc_handles.insert(network.into(), IrcHandle::new(network.into(), IrcSender::capturing(0), None, None));
+        receive(&mut app, network, ":peer[!user@host PRIVMSG me :\x01DCC CHAT chat 2130706433 0 42\x01");
+    }
+    app.state.set_active_buffer("fixture/fixture");
+    app.handle_submit("/dcc chat");
+    assert_eq!(app.dcc.records.values().find(|r| r.conn_id == "fixture").unwrap().state, DccState::Listening);
+    assert_eq!(app.dcc.records.values().find(|r| r.conn_id == "other").unwrap().state, DccState::WaitingUser);
+    assert_eq!(app.irc_handles["fixture"].sender().captured().len(), 1);
+    assert!(app.irc_handles["other"].sender().captured().is_empty());
+    app.dcc.autochat_masks = vec!["*!*@*".into()];
+    receive(&mut app, "other", ":auto!user@host PRIVMSG me :\x01DCC CHAT chat 2130706433 0 43\x01");
+    assert_eq!(app.dcc.records.values().find(|r| r.nick == "auto").unwrap().state, DccState::Listening);
+    assert_eq!(app.irc_handles["other"].sender().captured().len(), 1);
+    receive(&mut app, "other", ":server 401 me PEER{ :No such nick");
+    assert!(app.dcc.records.values().any(|r| r.conn_id == "fixture" && r.nick == "peer["));
+    assert!(!app.dcc.records.values().any(|r| r.conn_id == "other" && r.nick == "peer["));
+}

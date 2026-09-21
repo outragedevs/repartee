@@ -1002,8 +1002,10 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
 
     // DCC CHAT routing: /msg =nick sends via DCC, not IRC.
     if let Some(dcc_nick) = target.strip_prefix('=') {
-        if let Some(record) = app.dcc.find_connected(dcc_nick) {
+        let conn_id = app.active_conn_id().unwrap_or_default();
+        if let Some(record) = app.dcc.find_connected(conn_id, app.dcc_casemapping(conn_id), dcc_nick) {
             let record_id = record.id.clone();
+            let dcc_nick = record.nick.clone();
             let conn_id = record.conn_id.clone();
             if let Err(e) = app.dcc.send_chat_line(&record_id, text) {
                 add_local_event(app, &format!("DCC send error: {e}"));
@@ -1131,7 +1133,7 @@ pub(crate) fn cmd_me(app: &mut App, args: &[String]) {
     // DCC CHAT: send ACTION via DCC channel, not IRC.
     if buf_type == crate::state::buffer::BufferType::DccChat {
         let dcc_nick = target.strip_prefix('=').unwrap_or(&target);
-        if let Some(record) = app.dcc.find_connected(dcc_nick) {
+        if let Some(record) = app.dcc.find_connected(&conn_id, app.dcc_casemapping(&conn_id), dcc_nick) {
             let record_id = record.id.clone();
             let ctcp = format!("\x01ACTION {action_text}\x01");
             if let Err(e) = app.dcc.send_chat_line(&record_id, &ctcp) {
