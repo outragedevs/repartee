@@ -556,7 +556,7 @@ pub(crate) fn stored_to_message(
         text: stored.text.clone(),
         highlight: stored.highlight,
         event_key: stored.event_key.clone(),
-        event_params: None,
+        event_params: stored.event_params.clone(),
         log_msg_id: Some(stored.id.to_string()),
         // The one identity that survives the round trip. `text` above is the
         // DISPLAY text — for a translated row, not what crossed the wire — so
@@ -596,6 +596,7 @@ mod tests {
             ref_id: None,
             tags: None,
             event_key: None,
+            event_params: None,
         }
     }
 
@@ -634,6 +635,121 @@ mod tests {
         assert_eq!(msg.translation_suffix_at, Some("cześć".len()));
         assert!(msg.wire_origin.is_none());
     }
+    #[tokio::test]
+    async fn every_themed_event_survives_encrypted_and_plain_sqlite_roundtrips() {
+        use crate::state::buffer::MessageType;
+        use crate::storage::crypto::{generate_key_hex, import_key};
+        use crate::storage::db::{open_database_at, open_readonly_at};
+        use crate::storage::query::get_messages;
+        use crate::storage::writer::LogWriterHandle;
+        use crate::ui::message_line::render_message;
+        use std::sync::{Arc, Mutex};
+
+        for source in [
+            include_str!("../../themes/default.theme"),
+            include_str!("../../themes/spring.theme"),
+        ] {
+            let theme: crate::theme::ThemeFile = toml::from_str(source).unwrap();
+            assert!(theme.formats.events.len() > 20);
+            for required in ["whois", "join", "part", "quit", "kick"] {
+                assert!(theme.formats.events.contains_key(required), "{required}");
+            }
+            let config = crate::config::default_config();
+            for encrypted in [false, true] {
+                let key = encrypted.then(|| import_key(&generate_key_hex()).unwrap());
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("events.db");
+                let path = path.to_str().unwrap();
+                let db = Arc::new(Mutex::new(open_database_at(path, encrypted).unwrap()));
+                let mut state = crate::state::events::tests::make_test_state();
+                for event_key in theme.formats.events.keys() {
+                    let mut row = crate::storage::LogRow {
+                        msg_id: uuid::Uuid::new_v4().to_string(),
+                        network: "testnet".into(),
+                        buffer: String::new(),
+                        timestamp: 1_700_000_000,
+                        ts_ms: 1_700_000_000_000,
+                        msg_type: MessageType::Event,
+                        nick: None,
+                        text: "fallback text".into(),
+                        translation_suffix_at: None,
+                        highlight: false,
+                        ref_id: None,
+                        tags: None,
+                        event_key: None,
+                        event_params: None,
+                    };
+                    row.msg_type = MessageType::Event;
+                    row.nick = None;
+                    row.event_key = Some(event_key.clone());
+                    row.event_params = Some(
+                        (0..10)
+                            .map(|index| format!("value{index} 100% %N %Zabcdef $0 ❤"))
+                            .collect(),
+                    );
+                    row.buffer.clone_from(event_key);
+                    let expected_params = row.event_params.clone();
+                    let (writer, tx) = LogWriterHandle::spawn(Arc::clone(&db), key);
+                    tx.send(row).await.unwrap();
+                    writer.shutdown().await;
+                    let connection = open_readonly_at(path).unwrap();
+                    let stored = get_messages(
+                        &connection,
+                        "testnet",
+                        event_key,
+                        None,
+                        10,
+                        encrypted,
+                        key.as_ref(),
+                    )
+                    .unwrap();
+                    assert_eq!(stored.len(), 1);
+                    assert_eq!(stored[0].event_params, expected_params, "{event_key}");
+                    let loaded = stored_to_message(&mut state, &stored[0]);
+                    let mut live = loaded.clone();
+                    live.event_params = expected_params;
+                    live.log_msg_id = None;
+                    let loaded_line = render_message(&loaded, false, &theme, &config, None, None);
+                    let live_line = render_message(&live, false, &theme, &config, None, None);
+                    assert_eq!(loaded_line, live_line, "{event_key}");
+                    let live_wire = crate::web::snapshot::message_to_wire(&live, None);
+                    let stored_wire = crate::web::snapshot::stored_to_wire(&stored[0], None);
+                    assert_eq!(live_wire.text, stored_wire.text, "{event_key}");
+                    let spans = crate::theme::parse_format_string(&stored_wire.text, &[]);
+                    let visible: String = spans.iter().map(|span| span.text.as_str()).collect();
+                    if event_key == "whois" {
+                        assert!(visible.contains("100% %N %Zabcdef $0 ❤"), "{visible}");
+                    }
+                    if encrypted {
+                        let (params, iv, text_iv): (String, Vec<u8>, Vec<u8>) = connection.query_row(
+                        "SELECT event_params, event_params_iv, iv FROM messages WHERE buffer = ?1",
+                        [event_key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    ).unwrap();
+                        assert!(!params.contains("value0"));
+                        assert_ne!(iv, text_iv);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_whois_history_interprets_its_stored_colors() {
+        let mut state = crate::state::events::tests::make_test_state();
+        let mut stored = stored_row();
+        stored.msg_type = "event".into();
+        stored.event_key = Some("whois".into());
+        stored.text = "%Zc0caf5saint%Z565f89 (user@host)%N %Za9b1d6real name%N".into();
+        let loaded = stored_to_message(&mut state, &stored);
+        let line = crate::ui::message_line::render_message(&loaded, false, &crate::theme::loader::default_theme(), &crate::config::default_config(), None, None);
+        let visible: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+        assert!(visible.ends_with("saint (user@host) real name"), "{visible}");
+        assert!(!visible.contains("%Z"));
+        assert!(line.spans.iter().any(|span| span.style.fg == Some(ratatui::style::Color::Rgb(192, 202, 245))));
+        assert_eq!(crate::web::snapshot::stored_to_wire(&stored, None).text, stored.text);
+        assert_eq!(crate::web::snapshot::message_to_wire(&loaded, None).text, stored.text);
+    }
+
     #[test]
     fn themed_event_percents_match_live_and_both_history_paths() {
         let mut state = crate::state::events::tests::make_test_state();

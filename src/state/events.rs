@@ -2165,6 +2165,7 @@ impl AppState {
             ref_id: message.log_ref_id.clone(),
             tags: tags_json,
             event_key: message.event_key.clone(),
+            event_params: message.event_params.clone(),
         };
 
         if let Err(e) = tx.try_send(row) {
@@ -3589,8 +3590,8 @@ pub mod tests {
             nick_mode: None,
             text: "alice has quit (Quit: bye)".to_string(),
             highlight: false,
-            event_key: None,
-            event_params: None,
+            event_key: Some("quit".into()),
+            event_params: Some(vec!["alice".into(), "ident".into(), "host".into(), "bye 100% %N".into()]),
             log_msg_id: Some(primary_id.clone()),
             log_ref_id: None,
             tags: None,
@@ -3611,8 +3612,8 @@ pub mod tests {
             nick_mode: None,
             text: "alice has quit (Quit: bye)".to_string(),
             highlight: false,
-            event_key: None,
-            event_params: None,
+            event_key: Some("quit".into()),
+            event_params: Some(vec!["alice".into(), "ident".into(), "host".into(), "bye 100% %N".into()]),
             log_msg_id: None,
             log_ref_id: Some(primary_id.clone()),
             tags: None,
@@ -3631,6 +3632,8 @@ pub mod tests {
         let row2 = rx.try_recv().unwrap();
         assert!(row2.text.is_empty(), "reference row should have empty text");
         assert_eq!(row2.ref_id, Some(primary_id));
+        assert_eq!(row1.event_params, row2.event_params);
+        assert_eq!(row2.event_params.as_ref().unwrap()[3], "bye 100% %N");
     }
 
     #[test]

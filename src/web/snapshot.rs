@@ -135,7 +135,7 @@ pub fn message_to_wire(
         msg_type: msg.message_type.as_str().to_string(),
         nick: msg.nick.clone(),
         nick_mode: msg.nick_mode.clone(),
-        text: if msg.message_type == crate::state::buffer::MessageType::Event && msg.event_key.is_some() { msg.text.replace('%', "%%") } else { msg.text.clone() },
+        text: if msg.message_type == crate::state::buffer::MessageType::Event && msg.event_key.is_some() { crate::theme::parser::event_fallback_text(&msg.text, msg.event_key.as_deref(), msg.event_params.as_deref()) } else { msg.text.clone() },
         highlight: msg.highlight,
         // Only set when this in-memory message was itself loaded from the log DB
         // (backlog); live messages have no rowid yet.
@@ -162,7 +162,7 @@ pub fn stored_to_wire(
         msg_type: msg.msg_type.clone(),
         nick: msg.nick.clone(),
         nick_mode: None,
-        text: if msg.msg_type == "event" && msg.event_key.is_some() { msg.text.replace('%', "%%") } else { msg.text.clone() },
+        text: if msg.msg_type == "event" && msg.event_key.is_some() { crate::theme::parser::event_fallback_text(&msg.text, msg.event_key.as_deref(), msg.event_params.as_deref()) } else { msg.text.clone() },
         highlight: msg.highlight,
         // The SQLite rowid — the lossless scroll-back cursor key.
         log_id: Some(msg.id),
@@ -540,6 +540,7 @@ mod tests {
             ref_id: None,
             tags: None,
             event_key: Some("kicked".to_string()),
+            event_params: None,
         };
         let wire = stored_to_wire(&stored, None);
         assert_eq!(wire.event_key.as_deref(), Some("kicked"));
@@ -567,6 +568,7 @@ mod tests {
             ref_id: None,
             tags: None,
             event_key: None,
+            event_params: None,
         };
         assert_eq!(
             stored_to_wire(&stored, None).orig_offset,

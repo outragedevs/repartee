@@ -267,6 +267,8 @@ fn migrate_schema(db: &Connection) {
         "ref_id TEXT",
         "tags TEXT",
         "event_key TEXT",
+        "event_params TEXT",
+        "event_params_iv BLOB",
         "ts_ms INTEGER",
         "translation_suffix_at INTEGER",
     ] {

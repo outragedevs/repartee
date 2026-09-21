@@ -82,11 +82,8 @@ fn render_event(msg: &Message, theme: &crate::theme::ThemeFile) -> Vec<StyledSpa
         let params: Vec<&str> = params.iter().map(String::as_str).collect();
         return parse_literal_params(&resolved, &params);
     }
-    if msg.event_key.is_some() {
-        parse_irc_text(&msg.text)
-    } else {
-        parse_format_string(&msg.text, &[])
-    }
+    let text = crate::theme::parser::event_fallback_text(&msg.text, msg.event_key.as_deref(), msg.event_params.as_deref());
+    parse_format_string(&text, &[])
 }
 
 fn render_chat_message(
