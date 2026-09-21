@@ -11,7 +11,7 @@ use super::types::{C_CMD, C_DIM, C_ERR, C_HEADER, C_OK, C_RST, divider};
 use crate::config::settings::server_password_env_key;
 #[cfg(test)]
 use crate::config::settings::{BASE_PATHS, set_config_value};
-use crate::config::settings::{SERVER_FIELDS, get_config_value};
+use crate::config::settings::get_config_value;
 pub use crate::config::settings::{get_setting_paths, parse_sasl_mechanism};
 
 // === Command handler ===
@@ -383,187 +383,28 @@ fn list_all_settings(app: &mut App) {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "flat section listing — one block per config section"
-)]
 fn build_settings_lines(config: &AppConfig) -> Vec<String> {
-    let mut lines = Vec::new();
-
-    lines.push(divider("Settings"));
-
-    let sections: &[(&str, &[&str])] = &[
-        (
-            "general",
-            &[
-                "nick",
-                "username",
-                "realname",
-                "theme",
-                "timestamp_format",
-                "flood_protection",
-                "flood_exemptions",
-                "ctcp_version",
-            ],
-        ),
-        (
-            "display",
-            &[
-                "nick_column_width",
-                "nick_max_length",
-                "nick_alignment",
-                "nick_truncation",
-                "show_timestamps",
-                "scrollback_lines",
-                "backlog_lines",
-                "nick_colors",
-                "nick_colors_in_nicklist",
-                "nick_color_saturation",
-                "nick_color_lightness",
-            ],
-        ),
-        ("emotes", &["enabled", "render", "lang"]),
-        ("typing", &["show", "send_channels", "send_queries"]),
-        (
-            "translate",
-            &[
-                "enabled",
-                "backend",
-                "my_lang",
-                "show_original_in",
-                "show_original_out",
-                "timeout_ms",
-                "max_in_flight",
-                "max_queue",
-                "ai.preferred_attempt_ms",
-            ],
-        ),
-    ];
-
-    for &(section, fields) in sections {
-        lines.push(format!("  {C_DIM}[{section}]{C_RST}"));
-        for field in fields {
-            let path = format!("{section}.{field}");
-            if let Some(resolved) = get_config_value(config, &path) {
-                let val = if resolved.is_credential && !resolved.value.is_empty() {
-                    "***".to_string()
-                } else {
-                    resolved.value
-                };
-                lines.push(format!(
-                    "    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}",
-                    val.replace('%', "%%")
-                ));
-            }
+    let mut lines = vec![divider("Settings")];
+    let mut previous_section = String::new();
+    for path in get_setting_paths(config) {
+        let Some(resolved) = get_config_value(config, &path) else { continue };
+        let section = if path.starts_with("servers.") {
+            path.rsplit_once('.').map_or(path.as_str(), |(section, _)| section)
+        } else {
+            path.split('.').next().unwrap_or(&path)
+        };
+        if section != previous_section {
+            lines.push(format!("  {C_DIM}[{}]{C_RST}", section.replace('%', "%%")));
+            previous_section = section.to_string();
         }
+        let value = if resolved.is_credential && !resolved.value.is_empty() {
+            "***".to_string()
+        } else {
+            resolved.value
+        };
+        lines.push(format!("    {C_HEADER}{}{C_RST} = {C_CMD}{}{C_RST}",
+            path.replace('%', "%%"), value.replace('%', "%%")));
     }
-
-    // Sidepanel
-    lines.push(format!("  {C_DIM}[sidepanel]{C_RST}"));
-    for side in &["left", "right"] {
-        for field in &["width", "visible"] {
-            let path = format!("sidepanel.{side}.{field}");
-            if let Some(resolved) = get_config_value(config, &path) {
-                lines.push(format!(
-                    "    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}",
-                    resolved.value
-                ));
-            }
-        }
-    }
-
-    // Statusbar
-    lines.push(format!("  {C_DIM}[statusbar]{C_RST}"));
-    for field in &[
-        "enabled",
-        "separator",
-        "prompt",
-        "background",
-        "text_color",
-        "accent_color",
-        "muted_color",
-        "dim_color",
-        "prompt_color",
-        "input_color",
-        "cursor_color",
-    ] {
-        let path = format!("statusbar.{field}");
-        if let Some(resolved) = get_config_value(config, &path) {
-            lines.push(format!(
-                "    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}",
-                resolved.value
-            ));
-        }
-    }
-
-    // DCC
-    lines.push(format!("  {C_DIM}[dcc]{C_RST}"));
-    for field in &[
-        "timeout",
-        "own_ip",
-        "port_range",
-        "autoaccept_lowports",
-        "autochat_masks",
-        "max_connections",
-    ] {
-        let path = format!("dcc.{field}");
-        if let Some(resolved) = get_config_value(config, &path) {
-            lines.push(format!(
-                "    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}",
-                resolved.value
-            ));
-        }
-    }
-
-    // Logging
-    lines.push(format!("  {C_DIM}[logging]{C_RST}"));
-    for field in &["event_retention_hours", "retention_days"] {
-        let path = format!("logging.{field}");
-        if let Some(resolved) = get_config_value(config, &path) {
-            lines.push(format!(
-                "    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}",
-                resolved.value
-            ));
-        }
-    }
-
-    // Spellcheck
-    lines.push(format!("  {C_DIM}[spellcheck]{C_RST}"));
-    for field in &[
-        "enabled",
-        "computing",
-        "mode",
-        "languages",
-        "dictionary_dir",
-    ] {
-        let path = format!("spellcheck.{field}");
-        if let Some(resolved) = get_config_value(config, &path) {
-            lines.push(format!(
-                "    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}",
-                resolved.value
-            ));
-        }
-    }
-
-    // Servers
-    for server_id in config.servers.keys() {
-        lines.push(format!("  {C_DIM}[servers.{server_id}]{C_RST}"));
-        for field in SERVER_FIELDS {
-            let path = format!("servers.{server_id}.{field}");
-            if let Some(resolved) = get_config_value(config, &path) {
-                let val = if resolved.is_credential && !resolved.value.is_empty() {
-                    "***".to_string()
-                } else {
-                    resolved.value
-                };
-                lines.push(format!(
-                    "    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}",
-                    val.replace('%', "%%")
-                ));
-            }
-        }
-    }
-
     lines.push(divider(""));
     lines
 }
@@ -1110,5 +951,25 @@ mod tests {
         );
         set_config_value(&mut config, path, "").unwrap();
         assert!(config.servers["fixture"].bouncer_network_id.is_none());
+    }
+}
+
+#[cfg(test)]
+mod listing_tests {
+    #[test]
+    fn settings_listing_includes_missing_groups_and_masks_secrets() {
+        let mut config = crate::config::AppConfig::default();
+        config.web.password = "fixture-web-password".into();
+        config.shrink.api_key = "fixture-api-key".into();
+        config.statusbar.prompt = "%M literal %N".into();
+        let lines: Vec<String> = super::build_settings_lines(&config).iter()
+            .map(|line| crate::theme::parse_format_string(line, &[]).iter().map(|span| span.text.as_str()).collect()).collect();
+        for path in ["web.enabled", "shrink.enabled", "e2e.enabled", "image_preview.enabled", "scripts.autoload", "display.mentions_buffer"] {
+            assert!(lines.iter().any(|line| line.contains(&format!("{path} = "))), "missing {path}");
+        }
+        assert!(lines.iter().any(|line| line.contains("web.password = ***")));
+        assert!(lines.iter().any(|line| line.contains("shrink.api_key = ***")));
+        assert!(!lines.iter().any(|line| line.contains("fixture-")));
+        assert!(lines.iter().any(|line| line.contains("statusbar.prompt = %M literal %N")));
     }
 }
