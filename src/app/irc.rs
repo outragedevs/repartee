@@ -105,7 +105,9 @@ impl App {
             joined_channels: if server_config.bouncer_network_id.is_some() || server_config.bouncer_control {
                 Vec::new()
             } else {
-                server_config.channels.clone()
+                server_config.channels.iter()
+                    .map(|entry| entry.split_once(' ').map_or(entry.as_str(), |(channel, _)| channel).to_string())
+                    .collect()
             },
             origin_config: {
                 let mut origin = server_config.clone();
@@ -352,6 +354,12 @@ impl App {
     ///
     /// WAIT delays are currently skipped (commands execute immediately).
     pub(crate) fn execute_autosendcmd(&mut self, conn_id: &str, cmds: &str) {
+        let Some(buffer_id) = self.state.buffers.values()
+            .find(|buffer| buffer.connection_id == conn_id && buffer.buffer_type == BufferType::Server)
+            .map(|buffer| buffer.id.clone())
+        else {
+            return;
+        };
         let nick = self
             .state
             .connections
@@ -378,7 +386,12 @@ impl App {
             };
             // Parse and execute as if user typed it
             if let Some(parsed) = crate::commands::parser::parse_command(&line) {
+                if !self.state.buffers.contains_key(&buffer_id) {
+                    break;
+                }
+                let previous = self.state.active_buffer_id.replace(buffer_id.clone());
                 self.execute_command(&parsed);
+                self.state.active_buffer_id = previous.filter(|id| self.state.buffers.contains_key(id));
             }
         }
     }
@@ -386,6 +399,9 @@ impl App {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn handle_irc_event(&mut self, event: IrcEvent) {
         match event {
+            IrcEvent::StartupBarrier(ready) => {
+                let _ = ready.send(());
+            }
             IrcEvent::Attempt(id, generation, event) => {
                 if self.connection_attempts.get(&id) == Some(&generation) {
                     self.handle_irc_event(*event);
@@ -501,10 +517,10 @@ impl App {
                 let config_channels: Vec<String> = self
                     .config
                     .servers
-                    .iter()
-                    .find(|(id, cfg)| *id == &conn_id || cfg.label == conn_id)
+                    .get(&conn_id)
+                    .or_else(|| self.state.connections.get(&conn_id).map(|conn| &conn.origin_config))
                     .filter(|_| !explicit_binding)
-                    .map(|(_, cfg)| cfg.channels.clone())
+                    .map(|cfg| cfg.channels.clone())
                     .unwrap_or_default();
 
                 // Merge config + rejoin for buffer creation
@@ -519,15 +535,14 @@ impl App {
                 let autosendcmd = self
                     .config
                     .servers
-                    .iter()
-                    .find(|(id, cfg)| *id == &conn_id || cfg.label == conn_id)
-                    .and_then(|(_, cfg)| cfg.autosendcmd.clone())
+                    .get(&conn_id)
                     .or_else(|| {
                         self.state
                             .connections
                             .get(&conn_id)
-                            .and_then(|c| c.origin_config.autosendcmd.clone())
-                    });
+                            .map(|c| &c.origin_config)
+                    })
+                    .and_then(|cfg| cfg.autosendcmd.clone());
                 if let Some(cmds) = autosendcmd {
                     self.execute_autosendcmd(&conn_id, &cmds);
                 }

@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod autostart_tests;
 #[allow(
     clippy::redundant_pub_crate,
     reason = "log_browser reuses format_date_separator"

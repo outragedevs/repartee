@@ -49,6 +49,7 @@ const IRC_PING_TIMEOUT_SECS: u32 = 60;
 #[derive(Debug)]
 pub enum IrcEvent {
     Attempt(String, u64, Box<Self>),
+    StartupBarrier(tokio::sync::oneshot::Sender<()>),
     /// A raw IRC protocol message from the server.
     Message(String, Box<irc::proto::Message>),
     /// Registration complete (`RPL_WELCOME` received). Carries the negotiated
@@ -647,6 +648,11 @@ pub fn resolve_bind_ip(
 
 struct RegistrationOutgoing(Option<tokio::task::JoinHandle<()>>);
 
+async fn wait_for_startup_commands(tx: &mpsc::Sender<IrcEvent>) -> bool {
+    let (ready, completed) = tokio::sync::oneshot::channel();
+    tx.send(IrcEvent::StartupBarrier(ready)).await.is_ok() && completed.await.is_ok()
+}
+
 impl Drop for RegistrationOutgoing {
     fn drop(&mut self) {
         if let Some(task) = self.0.take() {
@@ -862,6 +868,8 @@ pub async fn connect_server_with_selector(
     }
     let mut echo = crate::irc::handle::CrateEcho::new(echo_config);
 
+    let startup_commands = server_config.autosendcmd.as_deref().is_some_and(|cmd| !cmd.trim().is_empty());
+
     // Spawn reader task
     let reader = tokio::spawn(async move {
         // Send negotiation diagnostics immediately so they're visible even if
@@ -899,6 +907,9 @@ pub async fn connect_server_with_selector(
                         neg.multiline_limits,
                     ))
                     .await;
+                if startup_commands && !wait_for_startup_commands(&tx).await {
+                    return;
+                }
             }
             if tx
                 .send(IrcEvent::Message(id.clone(), Box::new(message)))
@@ -941,6 +952,9 @@ pub async fn connect_server_with_selector(
                         neg.multiline_limits,
                     ))
                             .await;
+                        if startup_commands && !wait_for_startup_commands(&tx).await {
+                            return;
+                        }
                     }
                     if tx
                         .send(IrcEvent::Message(id.clone(), Box::new(message)))
