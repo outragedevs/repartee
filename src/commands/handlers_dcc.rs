@@ -83,6 +83,7 @@ fn cmd_dcc_chat(app: &mut App, args: &[String]) {
 }
 
 /// Accept a pending DCC CHAT request.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
     let Some(record) = app.dcc.records.get(id)
         .filter(|record| !record.outgoing && record.state == DccState::WaitingUser).cloned() else {
@@ -102,6 +103,10 @@ pub(crate) fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
     // Passive DCC (port == 0, has token): we become the listener and the
     // remote peer connects to us once we reply with our address + token.
     if record.port == 0 && record.passive_token.is_some() {
+        let Some(sender) = app.irc_handles.get(&record.conn_id).map(|handle| handle.sender().clone()) else {
+            add_local_event(app, "Not connected — DCC response not sent");
+            return;
+        };
         let own_ip = resolve_own_ip(app, &record.conn_id);
         let bind_port = pick_bind_port(app.dcc.port_range);
         let bind_addr = listener_address(own_ip, bind_port);
@@ -136,23 +141,21 @@ pub(crate) fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
             }
         };
 
-        // Update record state
-        if let Some(rec) = app.dcc.records.get_mut(id) {
-            rec.state = crate::dcc::types::DccState::Listening;
-        }
-
         // Send CTCP response with our address + token
         let advertise_ip = own_ip.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
         let token = record.passive_token;
         let ctcp = crate::dcc::protocol::build_dcc_chat_ctcp(&advertise_ip, local_port, token);
-        if let Some(sender) = app.irc_handles.get(&record.conn_id).map(crate::irc::IrcHandle::sender)
-            && let Err(e) = sender.send_privmsg(nick, &ctcp)
-        {
+        if let Err(e) = sender.send_privmsg(nick, &ctcp) {
             add_local_event(
                 app,
                 &format!("{C_ERR}Failed to send DCC response: {e}{C_RST}"),
             );
             return;
+        }
+
+        // Update record state
+        if let Some(rec) = app.dcc.records.get_mut(id) {
+            rec.state = crate::dcc::types::DccState::Listening;
         }
 
         // Create line sender channel and spawn listener task
@@ -217,6 +220,11 @@ fn initiate_dcc_chat(app: &mut App, nick: &str, passive: bool) {
         return;
     };
 
+    let Some(sender) = app.irc_handles.get(&conn_id).map(|handle| handle.sender().clone()) else {
+        add_local_event(app, "Not connected — DCC offer not sent");
+        return;
+    };
+
     // See accept_dcc_chat: DCC CHAT bypasses RPE2E entirely — advise when
     // the peer's IRC conversation is E2E-enabled.
     app.warn_cleartext_to_e2e_target(&conn_id, nick, "DCC CHAT");
@@ -250,19 +258,17 @@ fn initiate_dcc_chat(app: &mut App, nick: &str, passive: bool) {
             ident: String::new(),
             host: String::new(),
         };
-        app.dcc.records.insert(id, record);
 
         let ctcp = crate::dcc::protocol::build_dcc_chat_ctcp(
             &crate::dcc::protocol::PASSIVE_FAKE_IP,
             0,
             Some(token),
         );
-        if let Some(sender) = app.active_irc_sender()
-            && let Err(e) = sender.send_privmsg(nick, &ctcp)
-        {
+        if let Err(e) = sender.send_privmsg(nick, &ctcp) {
             add_local_event(app, &format!("{C_ERR}Failed to send DCC offer: {e}{C_RST}"));
             return;
         }
+        app.dcc.records.insert(id, record);
         add_local_event(
             app,
             &format!("DCC CHAT: sent passive offer to {nick} (token {token})"),
@@ -321,16 +327,15 @@ fn initiate_dcc_chat(app: &mut App, nick: &str, passive: bool) {
             ident: String::new(),
             host: String::new(),
         };
-        app.dcc.records.insert(id.clone(), record);
 
         // Send CTCP DCC CHAT offer
         let ctcp = crate::dcc::protocol::build_dcc_chat_ctcp(&advertise_ip, local_port, None);
-        if let Some(sender) = app.active_irc_sender()
-            && let Err(e) = sender.send_privmsg(nick, &ctcp)
-        {
+        if let Err(e) = sender.send_privmsg(nick, &ctcp) {
             add_local_event(app, &format!("{C_ERR}Failed to send DCC offer: {e}{C_RST}"));
             return;
         }
+
+        app.dcc.records.insert(id.clone(), record);
 
         // Create line sender channel and spawn listener task
         let (line_tx, line_rx) = tokio::sync::mpsc::channel(256);
