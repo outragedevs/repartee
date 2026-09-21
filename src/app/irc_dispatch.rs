@@ -375,7 +375,7 @@ impl App {
                              connecting to {peer_addr} (token={token})"
                         );
 
-                        tokio::spawn(async move {
+                        let task = tokio::spawn(async move {
                             crate::dcc::chat::connect_for_chat(
                                 task_id,
                                 peer_addr,
@@ -385,6 +385,7 @@ impl App {
                             )
                             .await;
                         });
+                        self.dcc.chat_tasks.insert(id, task.abort_handle());
 
                         // Don't fall through to normal IRC handling.
                         if let Some(channel) = endofnames_channel {

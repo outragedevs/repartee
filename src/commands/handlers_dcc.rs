@@ -165,7 +165,7 @@ pub(crate) fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
         let task_id = id.to_string();
         let event_tx = app.dcc.dcc_tx.clone();
         let timeout_dur = std::time::Duration::from_secs(app.dcc.timeout_secs);
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             crate::dcc::chat::listen_for_chat(
                 task_id,
                 tokio_listener,
@@ -175,6 +175,7 @@ pub(crate) fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
             )
             .await;
         });
+        app.dcc.chat_tasks.insert(id.to_string(), task.abort_handle());
 
         add_local_event(
             app,
@@ -193,9 +194,10 @@ pub(crate) fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
         let event_tx = app.dcc.dcc_tx.clone();
         let timeout_dur = std::time::Duration::from_secs(app.dcc.timeout_secs);
         let addr = std::net::SocketAddr::new(record.addr, record.port);
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             crate::dcc::chat::connect_for_chat(task_id, addr, timeout_dur, event_tx, line_rx).await;
         });
+        app.dcc.chat_tasks.insert(id.to_string(), task.abort_handle());
 
         add_local_event(
             app,
@@ -343,10 +345,12 @@ fn initiate_dcc_chat(app: &mut App, nick: &str, passive: bool) {
 
         let event_tx = app.dcc.dcc_tx.clone();
         let timeout_dur = std::time::Duration::from_secs(app.dcc.timeout_secs);
-        tokio::spawn(async move {
-            crate::dcc::chat::listen_for_chat(id, tokio_listener, timeout_dur, event_tx, line_rx)
+        let task_id = id.clone();
+        let task = tokio::spawn(async move {
+            crate::dcc::chat::listen_for_chat(task_id, tokio_listener, timeout_dur, event_tx, line_rx)
                 .await;
         });
+        app.dcc.chat_tasks.insert(id, task.abort_handle());
 
         add_local_event(
             app,

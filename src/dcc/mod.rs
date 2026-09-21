@@ -52,6 +52,7 @@ pub struct DccManager {
     pub dcc_tx: mpsc::Sender<DccEvent>,
     /// Per-session senders for outgoing chat lines (keyed by record ID).
     pub chat_senders: HashMap<String, mpsc::Sender<String>>,
+    pub chat_tasks: HashMap<String, tokio::task::AbortHandle>,
 
     // ── Configuration ────────────────────────────────────────────────────────
     /// How long a pending/listening session waits before timing out (seconds).
@@ -78,6 +79,7 @@ impl DccManager {
             records: HashMap::new(),
             dcc_tx,
             chat_senders: HashMap::new(),
+            chat_tasks: HashMap::new(),
             timeout_secs: 300,
             port_range: (0, 0),
             own_ip: None,
@@ -156,8 +158,7 @@ impl DccManager {
         expired
             .into_iter()
             .filter_map(|id| {
-                self.chat_senders.remove(&id);
-                self.records.remove(&id).map(|r| (id, r.nick))
+                self.close_by_id(&id).map(|r| (id, r.nick))
             })
             .collect()
     }
@@ -205,6 +206,9 @@ impl DccManager {
                 self.chat_senders.insert(new_id.clone(), sender);
             }
 
+            if let Some(task) = self.chat_tasks.remove(&old_id) {
+                self.chat_tasks.insert(new_id.clone(), task);
+            }
             renamed.push((old_id, new_id, old_buf_suffix, new_buf_suffix));
         }
 
@@ -219,11 +223,13 @@ impl DccManager {
             .iter()
             .find(|(_, r)| r.conn_id == conn_id && crate::irc::isupport::casefold(&r.nick, mapping) == nick_lower)
             .map(|(id, _)| id.clone())?;
-        self.records.remove(&id)
+        self.close_by_id(&id)
     }
 
     /// Remove and return the record with the given ID.
     pub fn close_by_id(&mut self, id: &str) -> Option<DccRecord> {
+        self.chat_senders.remove(id);
+        if let Some(task) = self.chat_tasks.remove(id) { task.abort(); }
         self.records.remove(id)
     }
 
@@ -409,6 +415,36 @@ mod tests {
     }
 
     // ── close_by_nick ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn closing_chat_releases_listener_and_connected_socket() {
+        use tokio::io::AsyncReadExt;
+        for connected in [false, true] {
+            let (mut manager, mut events) = DccManager::new();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (sender, receiver) = mpsc::channel(8);
+            manager.records.insert("peer".into(), make_record("peer", "peer", DccState::Listening));
+            manager.chat_senders.insert("peer".into(), sender);
+            let task = tokio::spawn(chat::listen_for_chat("peer".into(), listener, Duration::from_secs(301), manager.dcc_tx.clone(), receiver));
+            manager.chat_tasks.insert("peer".into(), task.abort_handle());
+            let mut peer = if connected {
+                let peer = tokio::net::TcpStream::connect(address).await.unwrap();
+                assert!(matches!(tokio::time::timeout(Duration::from_secs(1), events.recv()).await.unwrap(), Some(DccEvent::ChatConnected { .. })));
+                Some(peer)
+            } else { None };
+            assert!(manager.close_by_nick("test_conn", "rfc1459", "peer").is_some());
+            assert!(manager.chat_senders.is_empty());
+            assert!(manager.chat_tasks.is_empty());
+            assert!(tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap_err().is_cancelled());
+            if let Some(peer) = &mut peer {
+                let mut byte = [0];
+                assert_eq!(tokio::time::timeout(Duration::from_secs(1), peer.read(&mut byte)).await.unwrap().unwrap(), 0);
+            } else {
+                assert!(tokio::net::TcpListener::bind(address).await.is_ok());
+            }
+        }
+    }
 
     #[test]
     fn close_by_nick_removes() {

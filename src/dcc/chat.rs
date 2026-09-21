@@ -96,10 +96,8 @@ pub async fn connect_for_chat(
 
 /// Drive a live DCC CHAT session over an established TCP stream.
 ///
-/// Spawns two sub-tasks: one reads lines from the peer and converts them to
-/// [`DccEvent`]s; the other drains `line_rx` and writes those lines to the
-/// peer.  When either sub-task finishes (EOF, write error, or channel close)
-/// the other is aborted.
+/// Drives read and write futures together. Dropping the session drops both
+/// socket halves, including when the owning task is cancelled.
 async fn run_chat_session(
     id: String,
     stream: TcpStream,
@@ -112,7 +110,7 @@ async fn run_chat_session(
     // ── Reader task ───────────────────────────────────────────────────────────
     let reader_id = id.clone();
     let reader_tx = event_tx.clone();
-    let mut reader_handle = tokio::spawn(async move {
+    let reader = async move {
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
 
@@ -170,12 +168,12 @@ async fn run_chat_session(
                 }
             }
         }
-    });
+    };
 
     // ── Writer task ───────────────────────────────────────────────────────────
     let writer_id = id.clone();
     let writer_tx = event_tx.clone();
-    let mut writer_handle = tokio::spawn(async move {
+    let writer = async move {
         let mut write_half = write_half;
 
         while let Some(line) = line_rx.recv().await {
@@ -205,21 +203,12 @@ async fn run_chat_session(
         }
         // line_rx was dropped/closed: the user closed this DCC window.
         // No event needed; the reader will observe EOF shortly.
-    });
+    };
 
-    // ── Wait for the first task to finish, then cancel the other ─────────────
-    //
-    // Pinning + biased ensures each arm sees the same handle binding after
-    // the select completes.  We abort the still-running sibling so we do not
-    // leak tasks when one side terminates early.
     tokio::select! {
         biased;
-        _ = &mut reader_handle => {
-            writer_handle.abort();
-        }
-        _ = &mut writer_handle => {
-            reader_handle.abort();
-        }
+        () = reader => {},
+        () = writer => {},
     }
 }
 
