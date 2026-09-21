@@ -249,7 +249,7 @@ pub(crate) fn cmd_flood(app: &mut App, args: &[String]) {
     if subcmd.eq_ignore_ascii_case("on") || subcmd.eq_ignore_ascii_case("enable") {
         app.config.general.flood_protection = true;
         app.state.flood_protection = true;
-        save_flood_settings(app);
+        if !save_flood_settings(app) { return; }
         add_local_event(app, &format!("{C_OK}Flood protection enabled{C_RST}"));
         return;
     }
@@ -262,7 +262,7 @@ pub(crate) fn cmd_flood(app: &mut App, args: &[String]) {
         // reconfig, so a live connection keeps throttling — and keeps the
         // matching threshold on its own `IrcSender` budget — until it is
         // reopened.
-        save_flood_settings(app);
+        if !save_flood_settings(app) { return; }
         add_local_event(app, &format!("{C_OK}Flood protection disabled{C_RST}"));
         return;
     }
@@ -289,7 +289,7 @@ pub(crate) fn cmd_flood(app: &mut App, args: &[String]) {
         app.state
             .flood_exemptions
             .clone_from(&app.config.general.flood_exemptions);
-        save_flood_settings(app);
+        if !save_flood_settings(app) { return; }
         add_local_event(app, &format!("{C_OK}Added flood exemption: {mask}{C_RST}"));
         return;
     }
@@ -352,7 +352,7 @@ fn remove_flood_exemption(app: &mut App, target: &str) {
         app.state
             .flood_exemptions
             .clone_from(&app.config.general.flood_exemptions);
-        save_flood_settings(app);
+        if !save_flood_settings(app) { return; }
         add_local_event(
             app,
             &format!("{C_OK}Removed flood exemption: {mask}{C_RST}"),
@@ -365,9 +365,8 @@ fn remove_flood_exemption(app: &mut App, target: &str) {
     }
 }
 
-fn save_flood_settings(app: &mut App) {
-    app.cached_config_toml = None;
-    let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+fn save_flood_settings(app: &mut App) -> bool {
+    super::helpers::persist_session_config(app, &crate::constants::config_path())
 }
 
 fn subcmd_is(subcmd: &str, choices: &[&str]) -> bool {
@@ -451,7 +450,7 @@ fn ignore_with_path(app: &mut App, args: &[String], path: &std::path::Path) {
     });
 
     // Save config
-    persist_ignores(app, path);
+    if !persist_ignores(app, path) { return; }
     add_local_event(app, &format!("{C_OK}Added ignore rule: {mask}{C_RST}"));
 }
 
@@ -473,7 +472,7 @@ fn unignore_with_path(app: &mut App, args: &[String], path: &std::path::Path) {
         && n <= app.config.ignores.len()
     {
         let removed = app.config.ignores.remove(n - 1);
-        persist_ignores(app, path);
+        if !persist_ignores(app, path) { return; }
         add_local_event(
             app,
             &format!("{C_OK}Removed ignore rule: {}{C_RST}", removed.mask),
@@ -484,7 +483,7 @@ fn unignore_with_path(app: &mut App, args: &[String], path: &std::path::Path) {
     // Try as mask
     if let Some(pos) = app.config.ignores.iter().position(|e| e.mask == *target) {
         let removed = app.config.ignores.remove(pos);
-        persist_ignores(app, path);
+        if !persist_ignores(app, path) { return; }
         add_local_event(
             app,
             &format!("{C_OK}Removed ignore rule: {}{C_RST}", removed.mask),
@@ -497,10 +496,9 @@ fn unignore_with_path(app: &mut App, args: &[String], path: &std::path::Path) {
     }
 }
 
-fn persist_ignores(app: &mut App, path: &std::path::Path) {
+fn persist_ignores(app: &mut App, path: &std::path::Path) -> bool {
     app.state.ignores.clone_from(&app.config.ignores);
-    app.cached_config_toml = None;
-    let _ = crate::config::save_config(path, &app.config);
+    super::helpers::persist_session_config(app, path)
 }
 
 const fn parse_ignore_level(s: &str) -> Option<crate::config::IgnoreLevel> {
@@ -873,7 +871,7 @@ pub(crate) fn cmd_autoconnect(app: &mut App, args: &[String]) {
     let status = if server.autoconnect { "on" } else { "off" };
     let label = server.label.clone();
     app.cached_config_toml = None;
-    let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+    if !super::helpers::persist_session_config(app, &crate::constants::config_path()) { return; }
     add_local_event(
         app,
         &format!("{C_OK}Autoconnect for {label}: {status}{C_RST}"),
@@ -2262,6 +2260,27 @@ mod ignore_runtime_tests {
     use crate::app::input::submit_typing_tests::test_app;
     use crate::config::IgnoreLevel;
     use crate::irc::ignore::should_ignore;
+
+    #[test]
+    fn ignore_save_failures_keep_runtime_rules_without_success_confirmation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::create_dir(&path).unwrap();
+        let mut app = test_app();
+        app.state.add_buffer(crate::state::buffer::Buffer::for_test("test", crate::state::buffer::BufferType::Server, "status"));
+        app.state.set_active_buffer("test/status");
+        ignore_with_path(&mut app, &["alice".into()], &path);
+        assert!(should_ignore(&app.state.ignores, "alice", None, None, &IgnoreLevel::Msgs, None));
+        let messages = &app.state.active_buffer().unwrap().messages;
+        assert!(messages.back().unwrap().text.contains("could not be saved"));
+        assert!(!messages.iter().any(|message| message.text.contains("Added ignore rule")));
+        unignore_with_path(&mut app, &["alice".into()], &path);
+        assert!(app.state.ignores.is_empty());
+        assert!(app.config.ignores.is_empty());
+        let messages = &app.state.active_buffer().unwrap().messages;
+        assert!(messages.back().unwrap().text.contains("could not be saved"));
+        assert!(!messages.iter().any(|message| message.text.contains("Removed ignore rule")));
+    }
 
     #[test]
     fn ignore_and_both_unignore_forms_take_effect_without_reload() {
