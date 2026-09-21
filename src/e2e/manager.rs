@@ -566,7 +566,11 @@ impl E2eManager {
             keyring.save_identity(&pk, &sk, &fp, now)?;
             id
         };
-        Ok(Self {
+        Ok(Self::with_identity(keyring, identity, ts_tolerance_secs))
+    }
+
+    fn with_identity(keyring: Keyring, identity: Identity, ts_tolerance_secs: i64) -> Self {
+        Self {
             identity,
             keyring,
             rate_limiter: Mutex::new(RateLimiter::new()),
@@ -578,7 +582,16 @@ impl E2eManager {
             pending_outbound_keyreqs: Mutex::new(Vec::new()),
             pending_inbound: Mutex::new(HashMap::new()),
             pending_accept_requests: Mutex::new(Vec::new()),
-        })
+        }
+    }
+
+    pub(crate) fn import_from_path(
+        &self,
+        path: &std::path::Path,
+        config: &crate::config::E2eConfig,
+    ) -> Result<(Self, crate::e2e::portable::ImportSummary)> {
+        let (summary, identity) = crate::e2e::portable::import_with_identity(&self.keyring, path)?;
+        Ok((Self::with_identity(self.keyring.clone(), identity, config.ts_tolerance_secs), summary))
     }
 
     /// Classify an incoming `(fingerprint, handle)` against the keyring.

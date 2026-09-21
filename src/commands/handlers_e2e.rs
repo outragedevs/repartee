@@ -1450,8 +1450,12 @@ fn e2e_import(app: &mut App, path: Option<&str>) {
         }
     };
     let Some(mgr) = require_mgr(app) else { return };
-    match crate::e2e::portable::import_from_path(mgr.keyring(), &resolved) {
-        Ok(summary) => {
+    match mgr.import_from_path(&resolved, &app.config.e2e) {
+        Ok((manager, summary)) => {
+            app.state.e2e_manager = Some(std::sync::Arc::new(manager));
+            app.state.pending_e2e_sends.clear();
+            app.state.pending_e2e_gapfills.clear();
+            app.state.pending_userhost_requests.clear();
             app.state.push_all_buffer_e2e_statuses();
             ok(
                 app,
@@ -1828,7 +1832,30 @@ mod tests {
         let path = temp.path().join("keyring.json");
         crate::e2e::portable::export_to_path(donor.keyring(), &path).unwrap();
 
+        let previous = app.state.e2e_manager.clone().unwrap();
+        previous.build_keyreq("#old-session").unwrap();
+        app.state.pending_e2e_sends.push(crate::state::PendingE2eSend {
+            connection_id: "test".into(), target: "old-peer".into(), notice_text: "old-notice".into(),
+        });
+        app.state.pending_e2e_gapfills.push(crate::state::PendingE2eGapfill {
+            connection_id: "test".into(), target: "old-peer".into(),
+        });
+        e2e_import(&mut app, temp.path().join("missing.json").to_str());
+        assert!(std::sync::Arc::ptr_eq(app.state.e2e_manager.as_ref().unwrap(), &previous));
+        assert_eq!(app.state.pending_e2e_sends.len(), 1);
+        assert_eq!(app.state.pending_e2e_gapfills.len(), 1);
+        assert!(previous.has_pending_keyreq("#old-session"));
         e2e_import(&mut app, path.to_str());
+        let current = app.state.e2e_manager.as_ref().unwrap();
+        assert_eq!(current.identity_pub(), donor.identity_pub());
+        assert_eq!(current.fingerprint(), donor.fingerprint());
+        assert!(!current.has_pending_keyreq("#old-session"));
+        assert!(app.state.pending_e2e_sends.is_empty());
+        assert!(app.state.pending_e2e_gapfills.is_empty());
+        let request = current.build_keyreq("#new-session").unwrap();
+        assert_eq!(request.pubkey, donor.identity_pub());
+        let payload = crate::e2e::handshake::signed_keyreq_payload("#new-session", &request.pubkey, &request.eph_x25519, &request.nonce);
+        crate::e2e::crypto::sig::verify(&donor.identity_pub(), &payload, &request.sig).unwrap();
 
         let status = app.state.pending_web_events.iter().find_map(|event| match event {
             crate::web::protocol::WebEvent::BufferE2eChanged { buffer_id, enabled } => {
