@@ -1563,8 +1563,11 @@ pub(crate) fn cmd_links(app: &mut App, args: &[String]) {
         return;
     };
 
-    let remote = args.first().cloned();
-    let mask = args.get(1).cloned();
+    let (remote, mask) = match args {
+        [] => (None, None),
+        [mask] => (None, Some(mask.clone())),
+        [remote, mask, ..] => (Some(remote.clone()), Some(mask.clone())),
+    };
     if let Err(e) = sender.send(irc::proto::Command::LINKS(remote, mask)) {
         add_local_event(app, &format!("Failed to send LINKS: {e}"));
     }
@@ -2042,5 +2045,29 @@ mod adhoc_endpoint_tests {
         let count = app.state.connections.len();
         super::cmd_connect(&mut app, &["one.two.example:6667".into()]);
         assert_eq!(app.state.connections.len(), count);
+    }
+}
+
+#[cfg(test)]
+mod links_wire_tests {
+    #[tokio::test]
+    async fn links_preserves_optional_mask_and_remote_on_wire() {
+        use crate::irc::{IrcHandle, IrcSender};
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let config = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]").unwrap();
+        app.setup_connection("fixture", &config);
+        let sender = IrcSender::capturing(0);
+        app.irc_handles.insert("fixture".into(), IrcHandle::new("fixture".into(), sender.clone(), None, None));
+        app.state.set_active_buffer("fixture");
+        for (input, expected) in [
+            ("/links", "LINKS"),
+            ("/links *.example", "LINKS *.example"),
+            ("/links remote.example *.example", "LINKS remote.example *.example"),
+        ] {
+            app.handle_submit(input);
+            let captured = sender.captured();
+            assert_eq!(captured.last().unwrap().to_string().trim_end(), expected);
+        }
+        assert_eq!(sender.captured().len(), 3);
     }
 }
