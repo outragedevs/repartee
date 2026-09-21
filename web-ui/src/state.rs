@@ -201,6 +201,7 @@ pub struct AppState {
     /// Buffers with an in-flight `FetchMessages`. Guards initial loads and
     /// scroll-back requests against duplicate viewport/resize fetches.
     pub backlog_fetching: RwSignal<HashSet<String>>,
+    cleared_history_pending: RwSignal<HashSet<String>>,
     /// buffer_id -> nicks currently typing (IRCv3 `+typing`).
     pub typing: RwSignal<HashMap<String, Vec<String>>>,
     /// The status line's items, in the server's `statusbar.items` order, under
@@ -294,6 +295,7 @@ impl AppState {
             pending_mention: RwSignal::new(None),
             backlog_has_more: RwSignal::new(HashMap::new()),
             backlog_fetching: RwSignal::new(HashSet::new()),
+            cleared_history_pending: RwSignal::new(HashSet::new()),
             typing: RwSignal::new(HashMap::new()),
             // Empty until SyncInit lands: the server owns this list, and
             // guessing a default here would resurrect the very hardcoding this
@@ -377,6 +379,7 @@ impl AppState {
                 self.backlog_loaded.set(HashSet::new());
                 self.backlog_has_more.set(HashMap::new());
                 self.backlog_fetching.set(HashSet::new());
+                self.cleared_history_pending.set(HashSet::new());
                 // REPLACE the typing map with the snapshot's — never blank it.
                 // Whatever we were showing is stale across a resync, but the
                 // server's set is not: the live `Typing` push only fires when the
@@ -515,6 +518,17 @@ impl AppState {
                     }
                 });
             }
+            WebEvent::BufferCleared { buffer_id } => {
+                if self.backlog_fetching.get_untracked().contains(&buffer_id) {
+                    self.cleared_history_pending.update(|pending| { pending.insert(buffer_id.clone()); });
+                }
+                self.messages.update(|messages| { messages.remove(&buffer_id); });
+                self.backlog_loaded.update(|loaded| { loaded.insert(buffer_id.clone()); });
+                self.backlog_has_more.update(|more| { more.insert(buffer_id.clone(), false); });
+                if self.active_buffer.get_untracked().as_deref() == Some(&buffer_id) {
+                    self.scroll_mode.set(ScrollMode::FollowingTail);
+                }
+            }
             WebEvent::DeleteMessages {
                 buffer_id,
                 message_ids,
@@ -578,6 +592,7 @@ impl AppState {
                 });
             }
             WebEvent::BufferClosed { buffer_id } => {
+                self.cleared_history_pending.update(|pending| { pending.remove(&buffer_id); });
                 // If the closed buffer was active, switch to first available.
                 if self.active_buffer.get_untracked().as_deref() == Some(&buffer_id) {
                     let bufs = self.buffers.get_untracked();
@@ -629,7 +644,7 @@ impl AppState {
                 self.nick_lists.update(|values| { if let Some(value) = values.remove(&old_id) { values.insert(new_id.clone(), value); } });
                 self.backlog_has_more.update(|values| { if let Some(value) = values.remove(&old_id) { values.insert(new_id.clone(), value); } });
                 self.typing.update(|values| { if let Some(value) = values.remove(&old_id) { values.insert(new_id.clone(), value); } });
-                for set in [self.nick_lists_loaded, self.backlog_loaded, self.backlog_fetching] {
+                for set in [self.nick_lists_loaded, self.backlog_loaded, self.backlog_fetching, self.cleared_history_pending] {
                     set.update(|values| { if values.remove(&old_id) { values.insert(new_id.clone()); } });
                 }
                 if self.active_buffer.get_untracked().as_deref() == Some(&old_id) {
@@ -676,6 +691,12 @@ impl AppState {
                 has_more,
                 ..
             } => {
+                let mut discard = false;
+                self.cleared_history_pending.update(|pending| { discard = pending.remove(&buffer_id); });
+                if discard {
+                    self.backlog_fetching.update(|fetching| { fetching.remove(&buffer_id); });
+                    return;
+                }
                 // A scroll-back response arrives while the user is reading
                 // backlog (not at bottom): keep a larger window so the just-
                 // prepended older page isn't immediately trimmed away. An
@@ -1365,6 +1386,26 @@ mod tests {
     /// off-wasm — build the storage-free half instead.
     fn headless_state() -> AppState {
         AppState::with_persisted("nightfall".to_string(), None, None, HashSet::new())
+    }
+
+    #[test]
+    fn clear_discards_all_cached_rows_only_in_the_target_buffer() {
+        let state = headless_state();
+        state.active_buffer.set(Some("net/#test".into()));
+        state.scroll_mode.set(ScrollMode::ReadingHistory);
+        state.messages.update(|messages| {
+            messages.insert("net/#test".into(), vec![msg(1, 1), msg(999, 2)]);
+            messages.insert("net/#other".into(), vec![msg(2, 1)]);
+        });
+        state.backlog_fetching.update(|fetching| { fetching.insert("net/#test".into()); });
+        state.handle_event(WebEvent::BufferCleared { buffer_id: "net/#test".into() });
+        state.handle_event(WebEvent::Messages { buffer_id: "net/#test".into(), messages: vec![msg(777, 1)], has_more: false, session_id: None });
+        assert!(!state.backlog_fetching.get_untracked().contains("net/#test"));
+        assert!(!state.messages.get_untracked().contains_key("net/#test"));
+        assert_eq!(state.messages.get_untracked()["net/#other"].len(), 1);
+        assert!(state.backlog_loaded.get_untracked().contains("net/#test"));
+        assert_eq!(state.backlog_has_more.get_untracked().get("net/#test"), Some(&false));
+        assert!(state.scroll_mode.get_untracked().is_following_tail());
     }
 
     #[test]

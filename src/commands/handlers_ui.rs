@@ -225,6 +225,13 @@ pub(crate) fn cmd_clear(app: &mut App, _args: &[String]) {
     if let Some(buf) = app.state.active_buffer_mut() {
         buf.messages.clear();
         buf.messages.shrink_to(0);
+        let buffer_id = buf.id.clone();
+        let conn_id = buf.connection_id.clone();
+        let target = buf.name.clone();
+        if let Some(conn) = app.state.connections.get_mut(&conn_id) {
+            conn.chathistory.suppress_pending_display(&target);
+        }
+        app.state.pending_web_events.push(crate::web::protocol::WebEvent::BufferCleared { buffer_id });
     }
     if is_mentions {
         app.volatile_mentions.clear();
@@ -1584,5 +1591,19 @@ mod close_tests {
         let state = AppState::new();
         let err = resolve_range(&state, 1, 5, true).expect_err("no windows at all");
         assert!(err.contains("highest window is 0"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod clear_sync_tests {
+    #[test]
+    fn clear_broadcasts_even_when_daemon_buffer_is_empty() {
+        use crate::state::buffer::{Buffer, BufferType};
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        app.state.add_buffer(Buffer::for_test("net", BufferType::Channel, "#test"));
+        app.state.set_active_buffer("net/#test");
+        app.state.pending_web_events.clear();
+        super::cmd_clear(&mut app, &[]);
+        assert!(matches!(&app.state.pending_web_events[..], [crate::web::protocol::WebEvent::BufferCleared { buffer_id }] if buffer_id == "net/#test"));
     }
 }

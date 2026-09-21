@@ -408,12 +408,15 @@ pub fn process_completed_batch(
             let request_started = batch.params.first().and_then(|target| {
                 state.connections.get(conn_id).and_then(|conn| conn.chathistory.request_started_at(target))
             });
+            let display_suppressed = batch.params.first().is_some_and(|target| {
+                state.connections.get(conn_id).is_some_and(|conn| conn.chathistory.display_suppressed(target))
+            });
             let is_gapfill = matches!(direction, Some(Direction::After | Direction::Latest));
             let is_after = matches!(direction, Some(Direction::After));
             // Capture the requested AFTER page size BEFORE complete_target clears
             // the in-flight entry, so we can tell a full page (more gap to fill)
             // from a short one.
-            let after_limit = if is_after {
+            let after_limit = if is_after && !display_suppressed {
                 batch.params.first().and_then(|target| {
                     state
                         .connections
@@ -424,7 +427,7 @@ pub fn process_completed_batch(
                 None
             };
             let is_before = matches!(direction, Some(Direction::Before));
-            let collect_display = (is_gapfill || server_owned) && !(server_owned && is_before && !clean_end);
+            let collect_display = !display_suppressed && (is_gapfill || server_owned) && !(server_owned && is_before && !clean_end);
             let history_rows = batch.messages.iter()
                 .filter(|message| !crate::irc::redaction::is_redaction(message))
                 .count();

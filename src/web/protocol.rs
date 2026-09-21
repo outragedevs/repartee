@@ -94,6 +94,7 @@ pub enum WebEvent {
         msgid: String,
         text: String,
     },
+    BufferCleared { buffer_id: String },
     DeleteMessages {
         buffer_id: String,
         message_ids: Vec<u64>,
