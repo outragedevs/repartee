@@ -862,6 +862,10 @@ fn list_mode_unset_smart(app: &mut App, args: &[String], mode_char: char, cmd_na
         }
     }
 
+    if masks.is_empty() {
+        return;
+    }
+
     for args in list_mode_command_args(&channel, '-', mode_char, &masks, max_modes_per_command(app))
     {
         let _ = sender.send(irc::proto::Command::Raw("MODE".to_string(), args));
@@ -1839,6 +1843,40 @@ mod kickban_target_tests {
             let ::irc::proto::Command::Raw(command, args) = &captured[first + 1].command else { panic!("expected MODE") };
             assert_eq!(command, "MODE");
             assert_eq!(args, &[channel, "+b", mask]);
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod empty_list_removal_tests {
+    #[tokio::test]
+    async fn unmatched_list_removals_send_nothing_but_valid_selections_still_send() {
+        use crate::irc::{IrcHandle, IrcSender};
+        use crate::state::buffer::{Buffer, BufferType, ListEntry};
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let config = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]\nnick='me'").unwrap();
+        app.setup_connection("fixture", &config);
+        let sender = IrcSender::capturing(0);
+        app.irc_handles.insert("fixture".into(), IrcHandle::new("fixture".into(), sender.clone(), None, None));
+        let mut buffer = Buffer::for_test("fixture", BufferType::Channel, "#here");
+        for mode in ["b", "e", "I", "R"] {
+            buffer.list_modes.insert(mode.into(), vec![ListEntry {
+                mask: "*!*@fixture.example".into(), set_by: "oper".into(), set_at: 0,
+            }]);
+        }
+        app.state.add_buffer(buffer);
+        app.state.set_active_buffer("fixture/#here");
+        for (command, mode) in [("unban", "b"), ("unexcept", "e"), ("uninvex", "I"), ("unreop", "R")] {
+            let first = sender.captured().len();
+            app.handle_submit(&format!("/{command} 99 *absent*"));
+            assert_eq!(sender.captured().len(), first);
+            app.handle_submit(&format!("/{command} 99 1"));
+            let captured = sender.captured();
+            assert_eq!(captured.len(), first + 1);
+            let ::irc::proto::Command::Raw(name, args) = &captured[first].command else { panic!("expected MODE") };
+            assert_eq!(name, "MODE");
+            assert_eq!(args, &["#here", &format!("-{mode}"), "*!*@fixture.example"]);
         }
     }
 }
