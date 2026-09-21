@@ -189,3 +189,40 @@ async fn dcc_acceptance_and_missing_nick_stay_on_the_offer_network() {
     assert!(app.dcc.records.values().any(|r| r.conn_id == "fixture" && r.nick == "peer["));
     assert!(!app.dcc.records.values().any(|r| r.conn_id == "other" && r.nick == "peer["));
 }
+
+
+#[tokio::test]
+async fn repeated_dcc_chat_never_accepts_our_own_offer() {
+    use crate::dcc::types::DccState;
+    use crate::irc::{IrcHandle, IrcSender};
+    for passive in [false, true] {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let config = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]\nnick='me'").unwrap();
+        app.setup_connection("fixture", &config);
+        app.state.set_active_buffer("fixture/fixture");
+        app.dcc.own_ip = Some(std::net::Ipv4Addr::LOCALHOST.into());
+        let sender = IrcSender::capturing(0);
+        app.irc_handles.insert("fixture".into(), IrcHandle::new("fixture".into(), sender.clone(), None, None));
+        app.handle_submit(if passive { "/dcc chat -passive peer[" } else { "/dcc chat peer[" });
+        let original = app.dcc.records.values().next().unwrap().clone();
+        for command in ["/dcc chat", "/dcc chat PEER{", "/dcc chat -passive PEER{"] {
+            app.handle_submit(command);
+            assert_eq!(app.dcc.records.len(), 1);
+            assert_eq!(app.dcc.records[&original.id].state, original.state);
+            assert_eq!(sender.captured().len(), 1);
+        }
+        let mut incoming = original.clone();
+        incoming.id = "incoming".into();
+        incoming.nick = "incoming".into();
+        incoming.outgoing = false;
+        incoming.state = DccState::WaitingUser;
+        incoming.port = 0;
+        incoming.passive_token = Some(62);
+        incoming.created = original.created.checked_sub(std::time::Duration::from_secs(1)).unwrap();
+        app.dcc.records.insert(incoming.id.clone(), incoming);
+        app.handle_submit("/dcc chat");
+        assert_eq!(app.dcc.records["incoming"].state, DccState::Listening);
+        assert_eq!(app.dcc.records[&original.id].state, original.state);
+        assert_eq!(sender.captured().len(), 2);
+    }
+}

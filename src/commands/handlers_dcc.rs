@@ -67,6 +67,16 @@ fn cmd_dcc_chat(app: &mut App, args: &[String]) {
         }
     }
 
+    let mapping = app.dcc_casemapping(&conn_id);
+    if app.dcc.records.values().any(|record| {
+        record.conn_id == conn_id
+            && crate::irc::isupport::casefold(&record.nick, mapping) == crate::irc::isupport::casefold(nick, mapping)
+            && matches!(record.state, DccState::WaitingUser | DccState::Listening | DccState::Connecting)
+    }) {
+        add_local_event(app, &format!("DCC CHAT with {nick} is already pending"));
+        return;
+    }
+
     // No pending request found (or passive was requested) — initiate outgoing.
     let nick = nick.clone();
     initiate_dcc_chat(app, &nick, passive);
@@ -74,7 +84,8 @@ fn cmd_dcc_chat(app: &mut App, args: &[String]) {
 
 /// Accept a pending DCC CHAT request.
 pub(crate) fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
-    let Some(record) = app.dcc.records.get(id).cloned() else {
+    let Some(record) = app.dcc.records.get(id)
+        .filter(|record| !record.outgoing && record.state == DccState::WaitingUser).cloned() else {
         add_local_event(
             app,
             &format!("{C_ERR}No pending DCC CHAT for {nick}{C_RST}"),
