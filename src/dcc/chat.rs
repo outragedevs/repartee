@@ -234,28 +234,22 @@ async fn run_chat_session(
 ///
 /// Any value that cannot be parsed returns `(0, 0)`.
 pub fn parse_port_range(s: &str) -> (u16, u16) {
+    checked_port_range(s).unwrap_or((0, 0))
+}
+
+pub fn checked_port_range(s: &str) -> Option<(u16, u16)> {
     let s = s.trim();
-
-    if s.is_empty() || s == "0" {
-        return (0, 0);
-    }
-
-    // Try separator: space first, then hyphen.
-    let maybe_pair = if let Some((lo, hi)) = s.split_once(' ') {
-        Some((lo.trim(), hi.trim()))
+    if s.is_empty() { return Some((0, 0)); }
+    let (low, high) = if let Some((low, high)) = s.split_once('-') {
+        (low.trim().parse::<u16>().ok()?, high.trim().parse::<u16>().ok()?)
     } else {
-        s.split_once('-').map(|(lo, hi)| (lo.trim(), hi.trim()))
+        let mut ports = s.split_whitespace();
+        let low = ports.next()?.parse::<u16>().ok()?;
+        let high = ports.next().map_or(Some(low), |port| port.parse::<u16>().ok())?;
+        if ports.next().is_some() { return None; }
+        (low, high)
     };
-
-    if let Some((lo_str, hi_str)) = maybe_pair {
-        match (lo_str.parse::<u16>(), hi_str.parse::<u16>()) {
-            (Ok(lo), Ok(hi)) => return (lo, hi),
-            _ => return (0, 0),
-        }
-    }
-
-    // Single port number.
-    s.parse::<u16>().map_or((0, 0), |p| (p, p))
+    ((low > 0 && low <= high) || (low == 0 && high == 0)).then_some((low, high))
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
