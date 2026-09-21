@@ -668,7 +668,12 @@ fn e2e_accept(app: &mut App, nick: &str) {
         }
     }
 
-    match mgr.keyring().get_incoming_session(&handle, &chan) {
+    let Some(incoming_context) = current_e2e_own_context(app) else {
+        err(app, "/e2e accept: no active channel, or own handle not yet known");
+        return;
+    };
+
+    match mgr.keyring().get_incoming_session(&handle, &incoming_context) {
         Ok(Some(sess)) => {
             if sess.status == TrustStatus::Pending && *sess.sk == [0u8; 32] {
                 err(
@@ -699,7 +704,7 @@ fn e2e_accept(app: &mut App, nick: &str) {
 
     if let Err(e) = mgr
         .keyring()
-        .update_incoming_status(&handle, &chan, TrustStatus::Trusted)
+        .update_incoming_status(&handle, &incoming_context, TrustStatus::Trusted)
     {
         err(app, &format!("/e2e accept: {e}"));
         return;
@@ -2490,5 +2495,42 @@ mod tests {
             assert!(!name.is_empty(), "help entry name empty");
             assert!(!desc.is_empty(), "help entry desc empty");
         }
+    }
+}
+
+#[cfg(test)]
+mod accept_context_tests {
+    #[test]
+    fn accept_retrusts_the_incoming_dm_context_without_touching_peer_context() {
+        use crate::e2e::keyring::{IncomingSession, TrustStatus};
+        use crate::state::buffer::{Buffer, BufferType};
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let config = toml::from_str("label='fixture'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]\nnick='me'").unwrap();
+        app.setup_connection("net", &config);
+        app.state.connections.get_mut("net").unwrap().own_handle = Some("me@host".into());
+        let network = app.state.connections["net"].network_key().to_string();
+        let mut buffer = Buffer::for_test("net", BufferType::Query, "peer");
+        buffer.peer_handle = Some("peer@host".into());
+        app.state.add_buffer(buffer);
+        app.state.set_active_buffer("net/peer");
+        let manager = app.state.e2e_manager.as_ref().unwrap().clone();
+        manager.keyring().cache_dm_handle(&network, "peer", "peer@host").unwrap();
+        let own = crate::e2e::scoped_context(&network, "@me@host");
+        let peer = crate::e2e::scoped_context(&network, "@peer@host");
+        for channel in [&own, &peer] {
+            manager.keyring().set_incoming_session(&IncomingSession {
+                handle: "peer@host".into(), channel: channel.clone(), fingerprint: [4; 16],
+                sk: [7; 32].into(), status: TrustStatus::Revoked, created_at: 1,
+            }).unwrap();
+        }
+        super::e2e_accept(&mut app, "peer");
+        assert_eq!(manager.keyring().get_incoming_session("peer@host", &own).unwrap().unwrap().status, TrustStatus::Trusted);
+        assert_eq!(manager.keyring().get_incoming_session("peer@host", &peer).unwrap().unwrap().status, TrustStatus::Revoked);
+        manager.keyring().set_incoming_session(&IncomingSession {
+            handle: "peer@host".into(), channel: own.clone(), fingerprint: [4; 16],
+            sk: [0; 32].into(), status: TrustStatus::Pending, created_at: 1,
+        }).unwrap();
+        super::e2e_accept(&mut app, "peer");
+        assert_eq!(manager.keyring().get_incoming_session("peer@host", &own).unwrap().unwrap().status, TrustStatus::Pending);
     }
 }
