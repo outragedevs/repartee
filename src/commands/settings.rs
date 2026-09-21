@@ -203,15 +203,12 @@ pub fn apply_setting_runtime(app: &mut App, path: &str, raw: &str) {
         // boot). Without this, /set replies with success but
         // shrink stays inert and the user has no diagnostic.
         if (path == "shrink.enabled" && app.config.shrink.enabled) && app.shrink_client.is_none() {
-            crate::commands::helpers::add_local_event(
-                app,
-                &format!(
-                    "{warn}shrink: enabled but no API client — set \
-                 SHRINK_API_KEY in .env and restart{rst}",
-                    warn = crate::commands::types::C_ERR,
-                    rst = crate::commands::types::C_RST,
-                ),
-            );
+            let action = if app.config.shrink.api_key.is_empty() {
+                "set SHRINK_API_KEY in .env and restart"
+            } else {
+                "restart to activate the shrink workers"
+            };
+            ev(app, &format!("{C_ERR}shrink: enabled but no API client — {action}{C_RST}"));
         }
     }
     if path == "shrink.min_url_length" {
