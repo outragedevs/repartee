@@ -3812,3 +3812,40 @@ fn adoption_skips_bare_nick_dm_rows() {
         "bare-nick rows must not appear in the startup-warning listing"
     );
 }
+
+
+#[test]
+fn import_rejects_inconsistent_keys_without_replacing_the_keyring() {
+    let original = make_manager();
+    enable_channel(&original, "#original", ChannelMode::Normal);
+    let donor = make_manager();
+    let temp = tempfile::tempdir().unwrap();
+    let before_path = temp.path().join("before.json");
+    let donor_path = temp.path().join("donor.json");
+    crate::e2e::portable::export_to_path(original.keyring(), &before_path).unwrap();
+    crate::e2e::portable::export_to_path(donor.keyring(), &donor_path).unwrap();
+    let mut before: serde_json::Value = serde_json::from_slice(&std::fs::read(&before_path).unwrap()).unwrap();
+    before.as_object_mut().unwrap().remove("exportedAt");
+    let mut document: serde_json::Value = serde_json::from_slice(&std::fs::read(&donor_path).unwrap()).unwrap();
+    document["peers"] = serde_json::json!([{
+        "pubkey": document["identity"]["pubkey"],
+        "fingerprint": document["identity"]["fingerprint"],
+        "lastHandle": null, "lastNick": null, "firstSeen": 0,
+        "lastSeen": 0, "globalStatus": "trusted"
+    }]);
+    for (pointer, bytes) in [("/identity/privkey", 32), ("/identity/pubkey", 32), ("/identity/fingerprint", 16), ("/peers/0/pubkey", 32), ("/peers/0/fingerprint", 16)] {
+        let mut invalid = document.clone();
+        *invalid.pointer_mut(pointer).unwrap() = serde_json::Value::String("00".repeat(bytes));
+        std::fs::write(&donor_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(crate::e2e::portable::import_from_path(original.keyring(), &donor_path).is_err());
+        crate::e2e::portable::export_to_path(original.keyring(), &before_path).unwrap();
+        let mut after: serde_json::Value = serde_json::from_slice(&std::fs::read(&before_path).unwrap()).unwrap();
+        after.as_object_mut().unwrap().remove("exportedAt");
+        let keyring_unchanged = before == after;
+        assert!(keyring_unchanged);
+    }
+    std::fs::write(&donor_path, serde_json::to_vec(&document).unwrap()).unwrap();
+    crate::e2e::portable::import_from_path(original.keyring(), &donor_path).unwrap();
+    let reloaded = E2eManager::load_or_init(original.keyring().clone()).unwrap();
+    assert_eq!(reloaded.identity_pub(), donor.identity_pub());
+}

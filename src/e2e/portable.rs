@@ -452,6 +452,19 @@ fn validate(doc: &Portable) -> Result<Validated> {
         autotrust.push((a.scope.clone(), a.handle_pattern.clone(), doc.exported_at));
     }
 
+    let derived = crate::e2e::crypto::identity::Identity::from_secret_bytes(&identity.privkey);
+    if derived.public_bytes() != identity.pubkey {
+        return Err(E2eError::Keyring("identity.pubkey does not match identity.privkey".into()));
+    }
+    if crate::e2e::crypto::fingerprint::fingerprint(&identity.pubkey) != identity.fingerprint {
+        return Err(E2eError::Keyring("identity.fingerprint does not match identity.pubkey".into()));
+    }
+    for (idx, peer) in peers.iter().enumerate() {
+        if crate::e2e::crypto::fingerprint::fingerprint(&peer.pubkey) != peer.fingerprint {
+            return Err(E2eError::Keyring(format!("peers[{idx}].fingerprint does not match pubkey")));
+        }
+    }
+
     Ok(Validated {
         identity,
         peers,
