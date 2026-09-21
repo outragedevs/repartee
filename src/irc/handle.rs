@@ -388,6 +388,7 @@ const CRATE_DEFAULT_USER_INFO: &str = "";
 /// budget under-reads.
 #[derive(Debug, Clone)]
 pub struct CrateEchoConfig {
+    pub nickname: String,
     pub ctcp_version: String,
     pub username: String,
     pub realname: String,
@@ -410,15 +411,17 @@ pub struct CrateEchoConfig {
 #[derive(Debug)]
 pub struct CrateEcho {
     config: CrateEchoConfig,
+    isupport: super::isupport::Isupport,
     /// Mirrors `ClientState::alt_nick_index` — the crate walks the alt-nick list
     /// once and then gives up, so retry N costs nothing after the list runs out.
     alt_nick_index: usize,
 }
 
 impl CrateEcho {
-    pub(crate) const fn new(config: CrateEchoConfig) -> Self {
+    pub(crate) fn new(config: CrateEchoConfig) -> Self {
         Self {
             config,
+            isupport: super::isupport::Isupport::new(),
             alt_nick_index: 0,
         }
     }
@@ -438,6 +441,22 @@ impl CrateEcho {
     }
 
     pub(crate) fn handle_inbound(&mut self, inbound: &Message, sender: &IrcSender, now: Instant) -> irc::error::Result<()> {
+        match &inbound.command {
+            Command::Response(Response::RPL_WELCOME, args) => {
+                if let Some(nick) = args.first() {
+                    self.config.nickname.clone_from(nick);
+                }
+            }
+            Command::Response(Response::RPL_ISUPPORT, args) => {
+                if let Some(tokens) = super::isupport::response_tokens(args) {
+                    self.isupport.parse_tokens(&tokens);
+                }
+            }
+            Command::NICK(nick) if self.is_own_message(inbound) => {
+                self.config.nickname.clone_from(nick);
+            }
+            _ => {}
+        }
         for frame in self.frames_for(inbound) {
             sender.charge(&frame, now);
         }
@@ -451,7 +470,18 @@ impl CrateEcho {
         self.ctcp_reply(inbound).into_iter().collect()
     }
 
+    fn is_own_message(&self, inbound: &Message) -> bool {
+        inbound.source_nickname().is_some_and(|nick| {
+            let mapping = self.isupport.casemapping();
+            super::isupport::casefold(nick, mapping)
+                == super::isupport::casefold(&self.config.nickname, mapping)
+        })
+    }
+
     fn ctcp_reply(&self, inbound: &Message) -> Option<Message> {
+        if self.is_own_message(inbound) {
+            return None;
+        }
         let Command::PRIVMSG(_, body) = &inbound.command else { return None; };
         if !body.starts_with('\u{001}') {
             return None;
@@ -932,6 +962,7 @@ mod tests {
 
     fn echo_config() -> CrateEchoConfig {
         CrateEchoConfig {
+            nickname: "bob".to_string(),
             ctcp_version: "repartee 1.2.3".to_string(),
             username: "bob".to_string(),
             realname: "Bob Bobson".to_string(),
@@ -1032,6 +1063,29 @@ mod tests {
         let frames = echo.ctcp_frames(&inbound_ctcp("bob", &format!("PING {}", "x".repeat(400))));
         assert_eq!(frames.len(), 1);
         assert_eq!(message_cost(&frames[0]), 2000 + 5000);
+    }
+
+    #[test]
+    fn ctcp_own_echo_follows_registered_nick_changes_and_casemapping() {
+        let sender = IrcSender::capturing(u64::from(FLOOD_PENALTY_THRESHOLD_MS));
+        let mut echo = CrateEcho::new(echo_config());
+        let messages = [
+            ":server 001 bob_ :Welcome",
+            ":bob_!u@host PRIVMSG carol :\x01VERSION\x01",
+            ":bob_!u@host NICK :[bob]",
+            ":{BOB}!u@host PRIVMSG carol :\x01VERSION\x01",
+            ":carol!u@host NICK :other",
+            ":[bob]!u@host PRIVMSG carol :\x01PING token\x01",
+        ];
+        for line in messages {
+            echo.handle_inbound(&line.parse().unwrap(), &sender, Instant::now()).unwrap();
+        }
+        assert!(sender.captured().is_empty());
+        assert_eq!(sender.penalty_ms(), 0);
+        echo.handle_inbound(&":server 005 [bob] CASEMAPPING=ascii :are supported".parse().unwrap(), &sender, Instant::now()).unwrap();
+        echo.handle_inbound(&":{bob}!u@host PRIVMSG [bob] :\x01VERSION\x01".parse().unwrap(), &sender, Instant::now()).unwrap();
+        assert_eq!(sender.captured().len(), 1);
+        assert!(sender.captured()[0].to_string().starts_with("NOTICE {bob} :"));
     }
 
     #[test]
@@ -1198,6 +1252,9 @@ mod tests {
                 write!(requests, ":carol!u@host PRIVMSG {target} :\x01{query}\x01\r\n").unwrap();
             }
         }
+        for query in queries {
+            write!(requests, ":BoB!u@host PRIVMSG carol :\x01{query}\x01\r\n").unwrap();
+        }
         requests.push_str(":carol!u@host NOTICE bob :\x01VERSION\x01\r\n");
         requests.push_str(":server.example PRIVMSG #channel :\x01VERSION\x01\r\n");
         requests.push_str(":carol!u@host PRIVMSG #channel :\x01ACTION waves\x01\r\n");
@@ -1228,7 +1285,7 @@ mod tests {
         let sender = IrcSender::new(client.sender(), 0);
         let mut stream = client.stream().unwrap();
         let mut replies = CrateEcho::new(echo_config());
-        for _ in 0..targets.len() * queries.len() + 3 {
+        for _ in 0..targets.len() * queries.len() + queries.len() + 3 {
             let message = timeout(Duration::from_secs(2), stream.next()).await.unwrap().unwrap().unwrap();
             replies.handle_inbound(&message, &sender, Instant::now()).unwrap();
         }

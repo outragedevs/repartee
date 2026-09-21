@@ -766,6 +766,7 @@ pub async fn connect_server_with_selector(
     // Everything the crate will auto-send from, mirrored so the flood budget can
     // charge frames that never pass through `IrcSender`.
     let mut echo_config = crate::irc::handle::CrateEchoConfig {
+        nickname: nick.to_string(),
         ctcp_version: general.ctcp_version.clone(),
         username: username.to_string(),
         realname: realname.to_string(),
