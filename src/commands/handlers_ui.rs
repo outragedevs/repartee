@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use super::helpers::add_local_event;
+use super::helpers::{add_local_event, escape_format};
 use super::types::{C_CMD, C_DIM, C_ERR, C_HEADER, C_OK, C_RST, C_TEXT, CATEGORY_ORDER, divider};
 use crate::app::App;
 use crate::state::buffer::{ActivityLevel, Buffer, BufferType, make_buffer_id};
@@ -53,13 +53,13 @@ fn show_command_list(app: &mut App) {
             let aliases = if def.aliases.is_empty() {
                 String::new()
             } else {
-                format!(" {C_DIM}({}){C_RST}", def.aliases.join(", "))
+                format!(" {C_DIM}({}){C_RST}", escape_format(&def.aliases.join(", ")))
             };
             add_local_event(
                 app,
                 &format!(
                     "    {C_CMD}/{name}{C_RST}{aliases} {C_DIM}{}{C_RST}",
-                    def.description
+                    escape_format(def.description)
                 ),
             );
         }
@@ -103,7 +103,7 @@ fn show_command_help(app: &mut App, name: &str, subcommand: Option<&str>) {
 
     // Description — prefer doc, fall back to registry
     let description = doc.map_or(def.description, |d| d.description.as_str());
-    add_local_event(app, &format!("  {C_TEXT}{description}{C_RST}"));
+    add_local_event(app, &format!("  {C_TEXT}{}{C_RST}", escape_format(description)));
     add_local_event(app, "");
 
     // Syntax from doc
@@ -111,7 +111,7 @@ fn show_command_help(app: &mut App, name: &str, subcommand: Option<&str>) {
         && !d.syntax.is_empty()
     {
         for line in d.syntax.lines() {
-            add_local_event(app, &format!("  {C_CMD}{line}{C_RST}"));
+            add_local_event(app, &format!("  {C_CMD}{}{C_RST}", escape_format(line)));
         }
     }
 
@@ -119,7 +119,7 @@ fn show_command_help(app: &mut App, name: &str, subcommand: Option<&str>) {
         let alias_list: Vec<String> = def.aliases.iter().map(|a| format!("/{a}")).collect();
         add_local_event(
             app,
-            &format!("  {C_DIM}Aliases: {}{C_RST}", alias_list.join(", ")),
+            &format!("  {C_DIM}Aliases: {}{C_RST}", escape_format(&alias_list.join(", "))),
         );
     }
 
@@ -130,7 +130,7 @@ fn show_command_help(app: &mut App, name: &str, subcommand: Option<&str>) {
             if line.is_empty() {
                 add_local_event(app, "");
             } else {
-                add_local_event(app, &format!("  {C_TEXT}{line}{C_RST}"));
+                add_local_event(app, &format!("  {C_TEXT}{}{C_RST}", escape_format(line)));
             }
         }
 
@@ -139,12 +139,12 @@ fn show_command_help(app: &mut App, name: &str, subcommand: Option<&str>) {
             add_local_event(app, "");
             add_local_event(app, &format!("  {C_HEADER}Subcommands:{C_RST}"));
             for sub in &d.subcommands {
-                add_local_event(app, &format!("    {C_CMD}{}{C_RST}", sub.name));
+                add_local_event(app, &format!("    {C_CMD}{}{C_RST}", escape_format(&sub.name)));
                 if !sub.description.is_empty() {
-                    add_local_event(app, &format!("      {C_DIM}{}{C_RST}", sub.description));
+                    add_local_event(app, &format!("      {C_DIM}{}{C_RST}", escape_format(&sub.description)));
                 }
                 if !sub.syntax.is_empty() {
-                    add_local_event(app, &format!("      {C_CMD}{}{C_RST}", sub.syntax));
+                    add_local_event(app, &format!("      {C_CMD}{}{C_RST}", escape_format(&sub.syntax)));
                 }
             }
         }
@@ -154,7 +154,7 @@ fn show_command_help(app: &mut App, name: &str, subcommand: Option<&str>) {
             add_local_event(app, "");
             add_local_event(app, &format!("  {C_HEADER}Examples:{C_RST}"));
             for example in &d.examples {
-                add_local_event(app, &format!("    {C_CMD}{example}{C_RST}"));
+                add_local_event(app, &format!("    {C_CMD}{}{C_RST}", escape_format(example)));
             }
         }
 
@@ -163,7 +163,7 @@ fn show_command_help(app: &mut App, name: &str, subcommand: Option<&str>) {
             add_local_event(app, "");
             add_local_event(
                 app,
-                &format!("  {C_DIM}See also: {}{C_RST}", d.see_also.join(", ")),
+                &format!("  {C_DIM}See also: {}{C_RST}", escape_format(&d.see_also.join(", "))),
             );
         }
     }
@@ -204,14 +204,14 @@ fn show_subcommand_help(
         return;
     };
 
-    add_local_event(app, &divider(&format!("/{command} {}", sub.name)));
+    add_local_event(app, &divider(&format!("/{command} {}", escape_format(&sub.name))));
     if !sub.description.is_empty() {
-        add_local_event(app, &format!("  {C_TEXT}{}{C_RST}", sub.description));
+        add_local_event(app, &format!("  {C_TEXT}{}{C_RST}", escape_format(&sub.description)));
     }
     if !sub.syntax.is_empty() {
         add_local_event(app, "");
         for line in sub.syntax.lines() {
-            add_local_event(app, &format!("  {C_CMD}{line}{C_RST}"));
+            add_local_event(app, &format!("  {C_CMD}{}{C_RST}", escape_format(line)));
         }
     }
     add_local_event(app, &divider(""));
@@ -1605,5 +1605,19 @@ mod clear_sync_tests {
         app.state.pending_web_events.clear();
         super::cmd_clear(&mut app, &[]);
         assert!(matches!(&app.state.pending_web_events[..], [crate::web::protocol::WebEvent::BufferCleared { buffer_id }] if buffer_id == "net/#test"));
+    }
+}
+
+#[cfg(test)]
+mod help_literal_tests {
+    #[test]
+    fn items_help_preserves_literal_time_format_example() {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        app.state.add_buffer(crate::state::buffer::Buffer::for_test("net", crate::state::buffer::BufferType::Server, "status"));
+        app.state.set_active_buffer("net/status");
+        super::cmd_help(&mut app, &["items".into()]);
+        let rendered: Vec<String> = app.state.active_buffer().unwrap().messages.iter()
+            .map(|message| crate::theme::parse_format_string(&message.text, &[]).iter().map(|span| span.text.as_str()).collect()).collect();
+        assert!(rendered.iter().any(|line| line.contains("/items format time %H:%M")));
     }
 }
