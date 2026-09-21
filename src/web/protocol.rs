@@ -34,6 +34,8 @@ pub enum WebEvent {
         /// for a `SettingsChanged`).
         #[serde(default = "default_true")]
         emotes_enabled: bool,
+        #[serde(default = "default_true")]
+        emotes_input_enabled: bool,
         /// Who is typing right now, per buffer: `buffer_id -> nicks`, same full
         /// set (and same order) [`WebEvent::Typing`] carries. Only buffers with
         /// at least one typer appear; the field itself is always sent, so `{}`
@@ -199,7 +201,10 @@ pub enum WebEvent {
         /// UI (`[emotes] enabled` AND `render = graphical`).
         #[serde(default = "default_true")]
         emotes_enabled: bool,
+        #[serde(default = "default_true")]
+        emotes_input_enabled: bool,
     },
+    PreviewImage { url: String, source: String, session_id: String },
     /// Hand a refused message back to the client that submitted it.
     ///
     /// Sent when an outgoing message is refused (translation could not run,
@@ -611,6 +616,7 @@ mod tests {
             active_buffer_id: None,
             timestamp_format: "%H:%M".to_string(),
             emotes_enabled: true,
+            emotes_input_enabled: true,
             typing: HashMap::new(),
             statusbar_items: Vec::new(),
             statusbar_enabled: true,
@@ -641,6 +647,7 @@ mod tests {
             active_buffer_id,
             timestamp_format,
             emotes_enabled,
+            emotes_input_enabled,
             ..
         } = empty_sync_init()
         else {
@@ -653,6 +660,7 @@ mod tests {
             active_buffer_id,
             timestamp_format,
             emotes_enabled,
+            emotes_input_enabled,
             typing,
             statusbar_items: Vec::new(),
             statusbar_enabled: true,

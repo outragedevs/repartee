@@ -355,6 +355,7 @@ async fn pinned_bouncer_network_management() {
             0,
             "%H:%M",
             false,
+            false,
             &app.config.statusbar,
         );
         let crate::web::protocol::WebEvent::SyncInit { connections, .. } = snapshot else {

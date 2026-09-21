@@ -17,17 +17,44 @@ pub fn filter_emotes(needle: &str) -> Vec<usize> {
         .collect()
 }
 
+pub fn handle_emote_command(state: AppState, text: &str) -> bool {
+    if text.contains(['\n', '\r']) { return false; }
+    let mut words = text.split_whitespace();
+    let Some(command) = words.next() else { return false };
+    if !["/emoji", "/emote", "/emotes"].iter().any(|name| command.eq_ignore_ascii_case(name)) {
+        return false;
+    }
+    if !state.emotes_input_enabled.get_untracked() {
+        state.error.set(Some("Emotes are disabled in the web interface.".into()));
+        return true;
+    }
+    let query = words.next().unwrap_or("").trim_matches(':').to_ascii_lowercase();
+    if crate::emotes::is_emote(&query) {
+        state.pending_insert.update(|pending| {
+            pending.get_or_insert_with(String::new).push_str(&format!(":{query}: "));
+        });
+    } else {
+        state.emote_filter.set(query);
+        state.emote_picker_open.set(true);
+    }
+    true
+}
+
 #[component]
 pub fn EmotePicker() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
     let open = state.emote_picker_open;
-    let filter = RwSignal::new(String::new());
+    let filter = state.emote_filter;
+    Effect::new(move |_| {
+        if !state.emotes_input_enabled.get() { open.set(false); }
+    });
 
     let close = move || {
         open.set(false);
         filter.set(String::new());
     };
     let pick = move |idx: usize| {
+        if !state.emotes_input_enabled.get_untracked() { close(); return; }
         if let Some(name) = crate::emotes::EMOTE_NAMES.get(idx) {
             state.pending_insert.set(Some(format!(":{name}: ")));
         }

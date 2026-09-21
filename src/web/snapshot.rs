@@ -14,6 +14,7 @@ pub fn build_sync_init(
     mention_count: u32,
     timestamp_format: &str,
     emotes_enabled: bool,
+    emotes_input_enabled: bool,
     statusbar: &crate::config::StatusbarConfig,
 ) -> WebEvent {
     // Sort buffers in the same order as the terminal sidebar.
@@ -80,6 +81,7 @@ pub fn build_sync_init(
         active_buffer_id: state.active_buffer_id.clone(),
         timestamp_format: timestamp_format.to_string(),
         emotes_enabled,
+        emotes_input_enabled,
         typing,
         statusbar_items: statusbar_item_names(statusbar),
         statusbar_enabled: statusbar.enabled,
@@ -231,7 +233,7 @@ mod tests {
         // `statusbar.enabled = false` are no-ops in the tab, and the two UIs
         // disagree the moment either is touched.
         let state = make_test_state();
-        let event = build_sync_init(&state, 0, "%H:%M", false, &statusbar());
+        let event = build_sync_init(&state, 0, "%H:%M", false, false, &statusbar());
         let (items, enabled) = sync_init_statusbar(&event);
         assert!(enabled);
         assert_eq!(
@@ -245,7 +247,7 @@ mod tests {
         // The wire names are the ones `/items` speaks. A second naming scheme
         // would drift silently.
         let state = make_test_state();
-        let event = build_sync_init(&state, 0, "%H:%M", false, &statusbar());
+        let event = build_sync_init(&state, 0, "%H:%M", false, false, &statusbar());
         let (items, _) = sync_init_statusbar(&event);
         let parsed: Vec<StatusbarItem> = items
             .iter()
@@ -265,7 +267,7 @@ mod tests {
             items: vec![StatusbarItem::Lag, StatusbarItem::Time],
             ..StatusbarConfig::default()
         };
-        let event = build_sync_init(&state, 0, "%H:%M", false, &custom);
+        let event = build_sync_init(&state, 0, "%H:%M", false, false, &custom);
         let (items, enabled) = sync_init_statusbar(&event);
         assert!(!enabled, "statusbar.enabled = false must reach the browser");
         assert_eq!(items, ["lag", "time"]);
@@ -307,7 +309,7 @@ mod tests {
     #[test]
     fn sync_init_includes_buffers() {
         let state = make_test_state();
-        let event = build_sync_init(&state, 5, "%H:%M", false, &statusbar());
+        let event = build_sync_init(&state, 5, "%H:%M", false, false, &statusbar());
         match event {
             WebEvent::SyncInit {
                 buffers,
@@ -359,7 +361,7 @@ mod tests {
             Instant::now(),
         );
 
-        let event = build_sync_init(&state, 0, "%H:%M", false, &statusbar());
+        let event = build_sync_init(&state, 0, "%H:%M", false, false, &statusbar());
         let typing = sync_init_typing(&event);
         assert_eq!(typing.len(), 1, "#tokio has no typers, so it has no entry");
         assert_eq!(typing["libera/#rust"], vec!["alice"]);
@@ -385,7 +387,7 @@ mod tests {
             now,
         );
 
-        let event = build_sync_init(&state, 0, "%H:%M", false, &statusbar());
+        let event = build_sync_init(&state, 0, "%H:%M", false, false, &statusbar());
         let seeded = sync_init_typing(&event)["libera/#rust"].clone();
 
         crate::irc::events::push_typing_web_event(&mut state, "libera/#rust");
@@ -412,7 +414,7 @@ mod tests {
             Instant::now(),
         );
 
-        let event = build_sync_init(&state, 0, "%H:%M", false, &statusbar());
+        let event = build_sync_init(&state, 0, "%H:%M", false, false, &statusbar());
         assert!(sync_init_typing(&event).is_empty());
     }
 
@@ -421,7 +423,7 @@ mod tests {
         // Pinned: the field is always emitted (`"typing":{}`), never omitted —
         // see the JSON test in `protocol.rs`.
         let state = make_test_state();
-        let event = build_sync_init(&state, 0, "%H:%M", false, &statusbar());
+        let event = build_sync_init(&state, 0, "%H:%M", false, false, &statusbar());
         assert!(sync_init_typing(&event).is_empty());
     }
 

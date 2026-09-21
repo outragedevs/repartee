@@ -298,6 +298,7 @@ pub fn apply_setting_runtime(app: &mut App, path: &str, raw: &str) {
                 nick_color_saturation: app.config.display.nick_color_saturation,
                 nick_color_lightness: app.config.display.nick_color_lightness,
                 emotes_enabled: app.config.emotes.web_enabled(),
+                emotes_input_enabled: app.emotes_input_enabled(),
             });
     }
 

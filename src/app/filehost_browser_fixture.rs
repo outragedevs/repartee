@@ -12,7 +12,7 @@ pub async fn run_with_tick(app: &mut App, script: &str, tick: fn(&mut App)) {
     let cookie = sessions.lock().await.create("disposable browser fixture");
     let snapshot = Arc::new(parking_lot::RwLock::new(WebStateSnapshot {
         buffers: Vec::new(), connections: Vec::new(), mention_count: 0,
-        active_buffer_id: None, timestamp_format: "%H:%M".into(), emotes_enabled: false,
+        active_buffer_id: None, timestamp_format: "%H:%M".into(), emotes_enabled: false, emotes_input_enabled: false,
         typing: std::collections::HashMap::new(), statusbar_items: Vec::new(), statusbar_enabled: false,
     }));
     app.web_state_snapshot = Some(Arc::clone(&snapshot));

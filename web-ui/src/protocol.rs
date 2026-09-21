@@ -17,6 +17,8 @@ pub enum WebEvent {
         timestamp_format: Option<String>,
         #[serde(default = "default_true")]
         emotes_enabled: bool,
+        #[serde(default = "default_true")]
+        emotes_input_enabled: bool,
         /// Who is typing right now, per buffer: `buffer_id -> nicks` — the same
         /// full sets (same order) `Typing` carries, for every buffer that has
         /// one. The client REPLACES its typing map with this; `{}` means nobody.
@@ -164,9 +166,12 @@ pub enum WebEvent {
         nick_color_lightness: f32,
         #[serde(default = "default_true")]
         emotes_enabled: bool,
+        #[serde(default = "default_true")]
+        emotes_input_enabled: bool,
     },
     /// A message this client submitted was refused; put the text back in the
     /// composer. Targeted, so only its author receives it.
+    PreviewImage { url: String, source: String, session_id: String },
     RestoreInput {
         text: String,
         #[serde(default)]

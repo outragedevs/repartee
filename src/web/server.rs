@@ -28,6 +28,7 @@ pub struct WebStateSnapshot {
     pub timestamp_format: String,
     /// Whether `:name:` renders as inline emote images (derived from `[emotes]`).
     pub emotes_enabled: bool,
+    pub emotes_input_enabled: bool,
     /// Who is typing right now: `buffer_id -> nicks`. Seeds a connecting (or
     /// lag-resyncing) client's typing map — the live `Typing` push only fires on
     /// a *change*, so it never tells a fresh client what is already on screen.

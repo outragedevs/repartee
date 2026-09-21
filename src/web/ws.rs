@@ -191,6 +191,7 @@ fn build_sync_init_from_snapshot(state: &AppHandle, active_buffer_id: Option<Str
             active_buffer_id: valid_buffer_selection(active_buffer_id, snap.active_buffer_id.clone(), &snap.buffers),
             timestamp_format: snap.timestamp_format.clone(),
             emotes_enabled: snap.emotes_enabled,
+            emotes_input_enabled: snap.emotes_input_enabled,
             typing: snap.typing.clone(),
             statusbar_items: snap.statusbar_items.clone(),
             statusbar_enabled: snap.statusbar_enabled,
@@ -205,6 +206,7 @@ fn build_sync_init_from_snapshot(state: &AppHandle, active_buffer_id: Option<Str
         active_buffer_id,
         timestamp_format: crate::config::WebConfig::default().timestamp_format,
         emotes_enabled: true,
+        emotes_input_enabled: true,
         typing: std::collections::HashMap::new(),
         statusbar_items: crate::web::snapshot::statusbar_item_names(&statusbar),
         statusbar_enabled: statusbar.enabled,
@@ -217,6 +219,7 @@ fn build_sync_init_from_snapshot(state: &AppHandle, active_buffer_id: Option<Str
 /// the current session — meaning this client should NOT receive it.
 fn is_targeted_to_other(event: &WebEvent, session_id: &str) -> bool {
     if let WebEvent::WebPush { session_id: target, .. }
+        | WebEvent::PreviewImage { session_id: target, .. }
         | WebEvent::SettingsSnapshot { session_id: target, .. }
         | WebEvent::SettingsSaved { session_id: target, .. } = event { return target != session_id; }
     let target = match event {
@@ -293,6 +296,13 @@ mod tests {
         };
         assert!(is_targeted_to_other(&event, "session-b"));
         assert!(!is_targeted_to_other(&event, "session-a"));
+    }
+
+    #[test]
+    fn manual_preview_reaches_only_its_requesting_session() {
+        let event = WebEvent::PreviewImage { url: "/api/preview?h=test".into(), source: "https://example.org/a.png".into(), session_id: "one".into() };
+        assert!(!is_targeted_to_other(&event, "one"));
+        assert!(is_targeted_to_other(&event, "two"));
     }
 
     #[test]

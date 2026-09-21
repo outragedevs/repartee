@@ -173,6 +173,7 @@ pub struct AppState {
     /// Whether `:name:` tokens render as inline emote images (mirrors the
     /// server's `[emotes]` config; pushed via `SettingsChanged`).
     pub emotes_enabled: RwSignal<bool>,
+    pub emotes_input_enabled: RwSignal<bool>,
     /// Server wizard modal open flag. The web wizard is add-only (the client has
     /// no full server config to pre-fill an edit), so there is no edit-id here.
     pub wizard_open: RwSignal<bool>,
@@ -186,6 +187,8 @@ pub struct AppState {
     pub browser_preferences_revision: RwSignal<u64>,
     /// GG emote (`:name:` GIF) picker modal open flag.
     pub emote_picker_open: RwSignal<bool>,
+    pub emote_filter: RwSignal<String>,
+    pub manual_preview: RwSignal<Option<(String, String)>>,
     /// UTF-8 Unicode emoji picker modal open flag (desktop only).
     pub emoji_picker_open: RwSignal<bool>,
     /// A token to splice into the input at the caret (`:name:` or a Unicode
@@ -282,6 +285,7 @@ impl AppState {
             scroll_debug: RwSignal::new(Vec::new()),
             dismissed_previews: RwSignal::new(dismissed_previews),
             emotes_enabled: RwSignal::new(true),
+            emotes_input_enabled: RwSignal::new(true),
             wizard_open: RwSignal::new(false),
             settings_open: RwSignal::new(false),
             settings_initial_network: RwSignal::new(None),
@@ -292,6 +296,8 @@ impl AppState {
             settings_saved: RwSignal::new(0),
             browser_preferences_revision: RwSignal::new(0),
             emote_picker_open: RwSignal::new(false),
+            emote_filter: RwSignal::new(String::new()),
+            manual_preview: RwSignal::new(None),
             emoji_picker_open: RwSignal::new(false),
             pending_insert: RwSignal::new(None),
             pending_mention: RwSignal::new(None),
@@ -322,7 +328,7 @@ impl AppState {
         let Some(document) = web_sys::window().and_then(|window| window.document()) else { return };
         if document.hidden() || !document.has_focus().unwrap_or(false)
             || !self.scroll_mode.get_untracked().is_following_tail()
-            || self.settings_open.get_untracked() || self.wizard_open.get_untracked() || self.emote_picker_open.get_untracked()
+            || self.settings_open.get_untracked() || self.wizard_open.get_untracked() || self.emote_picker_open.get_untracked() || self.manual_preview.get_untracked().is_some()
             || self.emoji_picker_open.get_untracked() || self.appearance_open.get_untracked() { return; }
         let Some(buffer_id) = self.active_buffer.get_untracked() else { return };
         let tail = self.messages.with_untracked(|messages| messages.get(&buffer_id)
@@ -369,6 +375,7 @@ impl AppState {
                 active_buffer_id,
                 timestamp_format,
                 emotes_enabled,
+                emotes_input_enabled,
                 typing,
                 statusbar_items,
                 statusbar_enabled,
@@ -399,6 +406,7 @@ impl AppState {
                 self.mention_read_through.set(0);
                 self.unread_mention_ids.update(HashSet::clear);
                 self.emotes_enabled.set(emotes_enabled);
+                self.emotes_input_enabled.set(emotes_input_enabled);
                 self.authenticated.set(true);
                 self.connected.set(true);
                 if let Some(fmt) = timestamp_format
@@ -922,6 +930,7 @@ impl AppState {
                 nick_color_saturation,
                 nick_color_lightness,
                 emotes_enabled,
+                emotes_input_enabled,
             } => {
                 self.timestamp_format.set(timestamp_format);
                 self.line_height.set(line_height);
@@ -937,6 +946,7 @@ impl AppState {
                 self.nick_color_saturation.set(nick_color_saturation);
                 self.nick_color_lightness.set(nick_color_lightness);
                 self.emotes_enabled.set(emotes_enabled);
+                self.emotes_input_enabled.set(emotes_input_enabled);
             }
             WebEvent::StatusbarConfig { items, enabled } => {
                 self.statusbar_items.set(items);
@@ -944,6 +954,9 @@ impl AppState {
             }
             WebEvent::Error { message, .. } => {
                 self.error.set(Some(message));
+            }
+            WebEvent::PreviewImage { url, source, .. } => {
+                self.manual_preview.set(Some((url, source)));
             }
             WebEvent::RestoreInput { text, buffer_id, .. } => {
                 // Only while the composer still belongs to the conversation
@@ -1417,6 +1430,26 @@ mod tests {
     }
 
     #[test]
+    fn emote_commands_target_the_web_composer_and_picker() {
+        let state = headless_state();
+        state.emotes_enabled.set(false);
+        assert!(!crate::components::emote_picker::handle_emote_command(state, "/emote smile\nhello"));
+        assert!(state.pending_insert.get_untracked().is_none());
+        assert!(crate::components::emote_picker::handle_emote_command(state, "/EMOTE :SMILE:"));
+        assert_eq!(state.pending_insert.get_untracked().as_deref(), Some(":smile: "));
+        assert!(crate::components::emote_picker::handle_emote_command(state, "/emote smile"));
+        assert_eq!(state.pending_insert.get_untracked().as_deref(), Some(":smile: :smile: "));
+        assert!(crate::components::emote_picker::handle_emote_command(state, "/emotes usm"));
+        assert!(state.emote_picker_open.get_untracked());
+        assert_eq!(state.emote_filter.get_untracked(), "usm");
+        state.pending_insert.set(None);
+        state.emotes_input_enabled.set(false);
+        assert!(crate::components::emote_picker::handle_emote_command(state, "/emote smile"));
+        assert!(state.pending_insert.get_untracked().is_none());
+        assert!(state.error.get_untracked().is_some());
+    }
+
+    #[test]
     fn wizard_command_case_does_not_change_routing_or_network_id() {
         for (command, subcommand) in [("/wizard", "server"), ("/WIZARD", "SERVER"), ("/WiZaRd", "SeRvEr")] {
             let state = headless_state();
@@ -1617,6 +1650,7 @@ mod tests {
             active_buffer_id: None,
             timestamp_format: None,
             emotes_enabled: true,
+            emotes_input_enabled: true,
             typing: HashMap::new(),
             statusbar_items: Vec::new(),
             statusbar_enabled: true,

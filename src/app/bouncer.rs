@@ -219,6 +219,7 @@ mod tests {
             0,
             "%H:%M",
             false,
+            false,
             &app.config.statusbar,
         );
         let encoded = serde_json::to_string(&snapshot).unwrap();
