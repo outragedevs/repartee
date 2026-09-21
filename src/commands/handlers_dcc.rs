@@ -32,6 +32,8 @@ fn cmd_dcc_chat(app: &mut App, args: &[String]) {
     let passive = args.first().is_some_and(|a| a == "-passive");
     let nick_args = if passive { &args[1..] } else { args };
 
+    let conn_id = app.active_conn_id().unwrap_or_default().to_owned();
+
     if nick_args.is_empty() {
         if passive {
             add_local_event(app, "Usage: /dcc chat -passive <nick>");
@@ -40,7 +42,7 @@ fn cmd_dcc_chat(app: &mut App, args: &[String]) {
         // No nick given — accept the most recent pending request.
         let pending = app
             .dcc
-            .find_latest_pending()
+            .find_latest_pending(&conn_id)
             .map(|r| (r.nick.clone(), r.id.clone()));
         if let Some((nick, id)) = pending {
             accept_dcc_chat(app, &nick, &id);
@@ -57,7 +59,7 @@ fn cmd_dcc_chat(app: &mut App, args: &[String]) {
         // if so, accept it rather than initiating a duplicate outgoing offer.
         let pending = app
             .dcc
-            .find_pending(nick)
+            .find_pending(&conn_id, app.dcc_casemapping(&conn_id), nick)
             .map(|r| (r.nick.clone(), r.id.clone()));
         if let Some((pending_nick, id)) = pending {
             accept_dcc_chat(app, &pending_nick, &id);
@@ -71,7 +73,7 @@ fn cmd_dcc_chat(app: &mut App, args: &[String]) {
 }
 
 /// Accept a pending DCC CHAT request.
-fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
+pub(crate) fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
     let Some(record) = app.dcc.records.get(id).cloned() else {
         add_local_event(
             app,
@@ -135,7 +137,7 @@ fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
         let advertise_ip = own_ip.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
         let token = record.passive_token;
         let ctcp = crate::dcc::protocol::build_dcc_chat_ctcp(&advertise_ip, local_port, token);
-        if let Some(sender) = app.active_irc_sender()
+        if let Some(sender) = app.irc_handles.get(&record.conn_id).map(crate::irc::IrcHandle::sender)
             && let Err(e) = sender.send_privmsg(nick, &ctcp)
         {
             add_local_event(
@@ -403,7 +405,9 @@ fn cmd_dcc_close(app: &mut App, args: &[String]) {
         return;
     }
     let nick = &args[1];
-    match app.dcc.close_by_nick(nick) {
+    let conn_id = app.active_conn_id().unwrap_or_default().to_owned();
+    let mapping = app.dcc_casemapping(&conn_id).to_owned();
+    match app.dcc.close_by_nick(&conn_id, &mapping, nick) {
         Some(record) => {
             add_local_event(
                 app,
@@ -500,7 +504,9 @@ fn cmd_dcc_reject(app: &mut App, args: &[String]) {
     let nick = args[1].clone();
 
     // Remove the record first; even if the IRC send fails the offer is rejected.
-    let record = app.dcc.close_by_nick(&nick);
+    let conn_id = app.active_conn_id().unwrap_or_default().to_owned();
+    let mapping = app.dcc_casemapping(&conn_id).to_owned();
+    let record = app.dcc.close_by_nick(&conn_id, &mapping, &nick);
     let nick_str = record.as_ref().map_or(nick.as_str(), |r| r.nick.as_str());
 
     let reject_ctcp = crate::dcc::protocol::build_dcc_reject();

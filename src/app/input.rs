@@ -1388,7 +1388,7 @@ impl App {
         if buf_type == BufferType::DccChat {
             let mut sent_any = false;
             let dcc_nick = buffer_name.strip_prefix('=').unwrap_or(&buffer_name);
-            if let Some(record) = self.dcc.find_connected(dcc_nick) {
+            if let Some(record) = self.dcc.find_connected(&conn_id, self.dcc_casemapping(&conn_id), dcc_nick) {
                 let record_id = record.id.clone();
                 // DCC CHAT is a line-based protocol (`send_chat_line` appends LF),
                 // so a multi-line message (from paste coalescing or Alt+Enter)

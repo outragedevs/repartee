@@ -109,29 +109,29 @@ impl DccManager {
 
     /// Find the first record in `WaitingUser` or `Listening` state for `nick`
     /// (case-insensitive).
-    pub fn find_pending(&self, nick: &str) -> Option<&DccRecord> {
-        let nick_lower = nick.to_lowercase();
+    pub fn find_pending(&self, conn_id: &str, mapping: &str, nick: &str) -> Option<&DccRecord> {
+        let nick_lower = crate::irc::isupport::casefold(nick, mapping);
         self.records.values().find(|r| {
-            r.nick.to_lowercase() == nick_lower
+            r.conn_id == conn_id && crate::irc::isupport::casefold(&r.nick, mapping) == nick_lower
                 && matches!(r.state, DccState::WaitingUser | DccState::Listening)
         })
     }
 
     /// Return the most recently created record in `WaitingUser` state.
-    pub fn find_latest_pending(&self) -> Option<&DccRecord> {
+    pub fn find_latest_pending(&self, conn_id: &str) -> Option<&DccRecord> {
         self.records
             .values()
-            .filter(|r| matches!(r.state, DccState::WaitingUser))
+            .filter(|r| r.conn_id == conn_id && matches!(r.state, DccState::WaitingUser))
             // Most recently created = largest Instant value (latest point in time)
             .max_by_key(|r| r.created)
     }
 
     /// Find the first record in `Connected` state for `nick` (case-insensitive).
-    pub fn find_connected(&self, nick: &str) -> Option<&DccRecord> {
-        let nick_lower = nick.to_lowercase();
+    pub fn find_connected(&self, conn_id: &str, mapping: &str, nick: &str) -> Option<&DccRecord> {
+        let nick_lower = crate::irc::isupport::casefold(nick, mapping);
         self.records
             .values()
-            .find(|r| r.nick.to_lowercase() == nick_lower && matches!(r.state, DccState::Connected))
+            .find(|r| r.conn_id == conn_id && crate::irc::isupport::casefold(&r.nick, mapping) == nick_lower && matches!(r.state, DccState::Connected))
     }
 
     /// Remove all `WaitingUser`/`Listening` records older than `timeout_secs`.
@@ -212,12 +212,12 @@ impl DccManager {
     }
 
     /// Remove and return the first record matching `nick` (case-insensitive).
-    pub fn close_by_nick(&mut self, nick: &str) -> Option<DccRecord> {
-        let nick_lower = nick.to_lowercase();
+    pub fn close_by_nick(&mut self, conn_id: &str, mapping: &str, nick: &str) -> Option<DccRecord> {
+        let nick_lower = crate::irc::isupport::casefold(nick, mapping);
         let id = self
             .records
             .iter()
-            .find(|(_, r)| r.nick.to_lowercase() == nick_lower)
+            .find(|(_, r)| r.conn_id == conn_id && crate::irc::isupport::casefold(&r.nick, mapping) == nick_lower)
             .map(|(id, _)| id.clone())?;
         self.records.remove(&id)
     }
@@ -330,7 +330,7 @@ mod tests {
             make_record("bob", "Bob", DccState::WaitingUser),
         );
 
-        let found = mgr.find_pending("BOB");
+        let found = mgr.find_pending("test_conn", "rfc1459", "BOB");
         assert!(found.is_some());
     }
 
@@ -342,7 +342,7 @@ mod tests {
             make_record("bob", "Bob", DccState::Connected),
         );
 
-        let found = mgr.find_pending("bob");
+        let found = mgr.find_pending("test_conn", "rfc1459", "bob");
         assert!(found.is_none());
     }
 
@@ -362,7 +362,7 @@ mod tests {
         mgr.records.insert("bob".to_owned(), new_rec);
 
         let latest = mgr
-            .find_latest_pending()
+            .find_latest_pending("test_conn")
             .expect("should find a pending record");
         assert_eq!(latest.nick, "Bob");
     }
@@ -377,7 +377,7 @@ mod tests {
             make_record("carol", "Carol", DccState::Connected),
         );
 
-        let found = mgr.find_connected("carol");
+        let found = mgr.find_connected("test_conn", "rfc1459", "carol");
         assert!(found.is_some());
     }
 
@@ -418,7 +418,7 @@ mod tests {
             make_record("eve", "Eve", DccState::Connected),
         );
 
-        let removed = mgr.close_by_nick("Eve");
+        let removed = mgr.close_by_nick("test_conn", "rfc1459", "Eve");
         assert!(removed.is_some());
         assert!(mgr.records.is_empty());
     }
