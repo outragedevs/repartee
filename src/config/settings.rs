@@ -997,7 +997,7 @@ pub fn save_changes(
         .map(|c| (c.path.as_str(), c.value.as_str()))
         .collect();
     let draft = prepare_changes(config, &values)?;
-    let secrets: Vec<_> = changes
+    let mut env_changes: Vec<_> = changes
         .iter()
         .filter_map(|c| {
             let key = match c.path.as_str() {
@@ -1008,7 +1008,29 @@ pub fn save_changes(
             Some((key, c.value.as_str()))
         })
         .collect();
-    let old_env = if secrets.is_empty() {
+    let usernames: Vec<_> = changes
+        .iter()
+        .filter_map(|change| {
+            let id = change
+                .path
+                .strip_prefix("servers.")?
+                .strip_suffix(".sasl_user")?;
+            Some((
+                format!("{}_SASL_USER", id.to_uppercase()),
+                change.value.as_str(),
+            ))
+        })
+        .collect();
+    if !usernames.is_empty() {
+        let existing = crate::config::load_env(env_path)
+            .map_err(|error| format!("Cannot read credential file: {error}"))?;
+        env_changes.extend(
+            usernames
+                .into_iter()
+                .filter(|(key, _)| existing.contains_key(key)),
+        );
+    }
+    let old_env = if env_changes.is_empty() {
         None
     } else {
         match std::fs::read(env_path) {
@@ -1018,7 +1040,7 @@ pub fn save_changes(
         }
     };
     let result = (|| {
-        for (key, value) in &secrets {
+        for (key, value) in &env_changes {
             crate::config::set_env_value(env_path, key, value)
                 .map_err(|e| format!("Cannot save credentials: {e}"))?;
         }
@@ -1026,7 +1048,7 @@ pub fn save_changes(
             .map_err(|e| format!("Cannot save settings: {e}"))
     })();
     if let Err(error) = result {
-        if !secrets.is_empty() {
+        if !env_changes.is_empty() {
             let restored = old_env.map_or_else(
                 || match std::fs::remove_file(env_path) {
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1141,11 +1163,26 @@ mod persistence_tests {
             Some("test-secret")
         );
         assert!(
-            save_changes(&saved, &[change], &path, &env)
+            save_changes(&saved, std::slice::from_ref(&change), &path, &env)
                 .unwrap_err()
                 .contains("changed elsewhere")
         );
         assert!(!env.exists());
+        std::fs::write(&env, "TEST_SASL_USER=first\nTEST_SASL_PASS=test-secret\n").unwrap();
+        save_changes(&config, std::slice::from_ref(&change), &path, &env).unwrap();
+        let mut reloaded = crate::config::load_config(&path).unwrap();
+        crate::config::apply_credentials(
+            &mut reloaded.servers,
+            &crate::config::load_env(&env).unwrap(),
+        );
+        assert_eq!(
+            reloaded.servers["test"].sasl_user.as_deref(),
+            Some("second")
+        );
+        assert_eq!(
+            reloaded.servers["test"].sasl_pass.as_deref(),
+            Some("test-secret")
+        );
     }
 
     #[test]

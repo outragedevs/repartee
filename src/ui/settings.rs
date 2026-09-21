@@ -362,6 +362,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut crate::app::App) {
                     "[ ]".into()
                 }
             }
+            SettingKind::Select(_) if field.value.is_empty() => "(inherit default)".into(),
             SettingKind::Secret if field.value.is_empty() => {
                 if field.configured {
                     "(configured; unchanged)".into()

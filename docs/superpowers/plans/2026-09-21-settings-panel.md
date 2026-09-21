@@ -63,3 +63,7 @@ Temporary evidence: `/tmp/repartee-settings-audit/browser.log`, `desktop.png`, `
 The first pinned Sol medium review of `a7e5b06` returned no actionable findings. A subsequent UI audit tightened two interaction guards: fields are disabled while a web save is in flight, and section defaults require clearing cross-section search first. These final changes require a fresh review before merge. Restarting the isolated daemon also preserved the tested settings.
 
 The second review identified stale SASL username writes and a wrapped footer control outside very narrow TUI panels. The fixes preserve SASL username conflict checks and calculate footer height from its actual wrapped controls. Dedicated regressions cover both. Runtime-effect labels also distinguish CTCP reconnects, manual image cleanup, and reserved configuration fields.
+
+The third review identified the missing inherited choice for optional auto-reconnect and a browser-only draft bypass of the add-network guard. Both controls now preserve those states. SASL username edits also update an existing legacy `.env` override so restarting cannot restore the old username.
+
+After the inheritance and legacy-credential fixes, the complete suite passes with 2,712 native tests and 146 web tests (33 existing ignored fixtures). Absent `auto_reconnect` values retain `None` through TOML reload; effective reconnect behavior remains enabled through the existing `unwrap_or(true)` runtime policy.

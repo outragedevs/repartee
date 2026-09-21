@@ -37,8 +37,10 @@ fn SettingsDialog() -> impl IntoView {
     let search = RwSignal::new(String::new());
     let fields = RwSignal::new(Vec::<DraftField>::new());
     let committed = StoredValue::new(false);
-    let local_previews = RwSignal::new(super::chat_view::previews_enabled_in_browser());
-    let local_follow = RwSignal::new(crate::state::follow_tui_active_buffer());
+    let previews_original = super::chat_view::previews_enabled_in_browser();
+    let follow_original = crate::state::follow_tui_active_buffer();
+    let local_previews = RwSignal::new(previews_original);
+    let local_follow = RwSignal::new(follow_original);
     let font_original = state.font_size_override.get_untracked();
     let line_original = state.line_height_override.get_untracked();
     let saved_at_open = state.settings_saved.get_untracked();
@@ -64,8 +66,22 @@ fn SettingsDialog() -> impl IntoView {
     });
     Effect::new(move || {
         if state.settings_saved.get() > saved_at_open {
-            crate::state::store_or_remove(super::chat_view::IMAGE_PREVIEWS_TOGGLE_KEY, Some(if local_previews.get_untracked() { "true" } else { "false" }));
-            crate::state::store_or_remove(crate::state::FOLLOW_TUI_BUFFER_KEY, Some(if local_follow.get_untracked() { "true" } else { "false" }));
+            crate::state::store_or_remove(
+                super::chat_view::IMAGE_PREVIEWS_TOGGLE_KEY,
+                Some(if local_previews.get_untracked() {
+                    "true"
+                } else {
+                    "false"
+                }),
+            );
+            crate::state::store_or_remove(
+                crate::state::FOLLOW_TUI_BUFFER_KEY,
+                Some(if local_follow.get_untracked() {
+                    "true"
+                } else {
+                    "false"
+                }),
+            );
             state.browser_preferences_revision.update(|v| *v += 1);
             committed.set_value(true);
             state.settings_open.set(false);
@@ -109,15 +125,24 @@ fn SettingsDialog() -> impl IntoView {
                 }
             }
         });
-        if current == 2 { local_previews.set(true); }
-        if current == 7 { local_follow.set(true); }
+        if current == 2 {
+            local_previews.set(true);
+        }
+        if current == 7 {
+            local_follow.set(true);
+        }
         if current == 1 {
             state.font_size_override.set(None);
             state.line_height_override.set(None);
         }
     };
     let add_network = move |_| {
-        if !changes().is_empty() {
+        if !changes().is_empty()
+            || state.font_size_override.get_untracked() != font_original
+            || state.line_height_override.get_untracked() != line_original
+            || local_previews.get_untracked() != previews_original
+            || local_follow.get_untracked() != follow_original
+        {
             state.settings_error.set(Some(
                 "Save or cancel your changes before adding a network.".into(),
             ));
@@ -181,7 +206,7 @@ fn SettingsField(field: DraftField) -> impl IntoView {
     let input_id = id.clone();
     let input = match field.spec.kind {
         SettingKind::Toggle => view! { <input id=input_id type="checkbox" prop:checked=move || value.get() == "true" on:change=move |ev| { value.set(event_target_checked(&ev).to_string()); touched.set(true); } /> }.into_any(),
-        SettingKind::Select(options) => view! { <select id=input_id prop:value=move || value.get() on:change=move |ev| { value.set(event_target_value(&ev)); touched.set(true); }>{options.into_iter().map(|option| { let label = option.clone(); view! { <option value=option>{label}</option> } }).collect_view()}</select> }.into_any(),
+        SettingKind::Select(options) => view! { <select id=input_id prop:value=move || value.get() on:change=move |ev| { value.set(event_target_value(&ev)); touched.set(true); }>{options.into_iter().map(|option| { let label = if option.is_empty() { "Inherit default".to_string() } else { option.clone() }; view! { <option value=option>{label}</option> } }).collect_view()}</select> }.into_any(),
         SettingKind::Json => view! { <textarea id=input_id rows="3" spellcheck="false" prop:value=move || value.get() on:input=move |ev| { value.set(event_target_value(&ev)); touched.set(true); } /> }.into_any(),
         kind => {
             let input_type = if kind == SettingKind::Secret { "password" } else { "text" };

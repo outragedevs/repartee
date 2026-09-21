@@ -348,6 +348,9 @@ fn effect(path: &str) -> &'static str {
 
 fn choices(path: &str) -> Option<&'static [&'static str]> {
     match path {
+        path if path.starts_with("servers.") && path.ends_with(".auto_reconnect") => {
+            Some(&["", "true", "false"])
+        }
         "display.nick_alignment" => Some(&["left", "right", "center"]),
         "spellcheck.mode" => Some(&["replace", "highlight"]),
         "emotes.render" => Some(&["graphical", "text", "off"]),
@@ -463,7 +466,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_redacts_credentials_including_nested_models() {
+    fn catalog_redacts_credentials_and_preserves_inherited_connection_values() {
         let mut config = AppConfig::default();
         config.web.password = "fixture-web-secret".into();
         config.shrink.api_key = "fixture-shrink-secret".into();
@@ -477,9 +480,21 @@ mod tests {
             });
         config.servers.insert("test".into(), serde_json::from_value(serde_json::json!({
             "label": "Test", "address": "localhost", "port": 6697, "tls": true,
-            "channels": [], "password": "fixture-server-secret", "sasl_pass": "fixture-sasl-secret"
+            "channels": [], "password": "fixture-server-secret", "sasl_pass": "fixture-sasl-secret", "auto_reconnect": true
         })).unwrap());
         let fields = fields(&config);
+        let reconnect = fields
+            .iter()
+            .find(|f| f.path == "servers.test.auto_reconnect")
+            .unwrap();
+        assert!(
+            matches!(&reconnect.kind, SettingKind::Select(options) if options.contains(&String::new()))
+        );
+        let inherited =
+            super::super::prepare_changes(&config, &[("servers.test.auto_reconnect", "")]).unwrap();
+        let reloaded: AppConfig = toml::from_str(&toml::to_string(&inherited).unwrap()).unwrap();
+        assert_eq!(reloaded.servers["test"].auto_reconnect, None);
+        assert!(reloaded.servers["test"].auto_reconnect.unwrap_or(true));
         let wire = serde_json::to_string(&fields).unwrap();
         assert!(!wire.contains("fixture-"));
         for path in [
