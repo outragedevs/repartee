@@ -264,7 +264,7 @@ fn parse_autotrust_op(rest: &[String]) -> AutotrustOp {
 /// Parse a channel-mode token. Unlike [`ChannelMode::parse`] (which silently
 /// collapses unknown values to `Normal`), this returns an `Err` so the
 /// command layer can emit a proper themed error line to the user.
-pub(crate) fn parse_mode(s: &str) -> std::result::Result<ChannelMode, String> {
+pub fn parse_mode(s: &str) -> std::result::Result<ChannelMode, String> {
     match s.to_lowercase().as_str() {
         "auto-accept" | "auto" => Ok(ChannelMode::AutoAccept),
         "normal" => Ok(ChannelMode::Normal),
@@ -506,14 +506,14 @@ fn e2e_on(app: &mut App) {
     let cfg = ChannelConfig {
         channel: chan.clone(),
         enabled: true,
-        mode: ChannelMode::Normal,
+        mode: ChannelMode::parse(&app.config.e2e.default_mode),
     };
     if let Err(e) = mgr.keyring().set_channel_config(&cfg) {
         err(app, &format!("/e2e on: {e}"));
         return;
     }
     push_active_e2e_status(app);
-    ok(app, &format!("enabled on {} (mode=normal)", crate::e2e::display_context(&chan)));
+    ok(app, &format!("enabled on {} (mode={})", crate::e2e::display_context(&chan), cfg.mode.as_str()));
     // The user just made this a conversation translation must never touch.
     // The exclusion itself is enforced at the gate, from the next line, with
     // no state to keep in sync — but silently: without this row both
@@ -1769,6 +1769,17 @@ mod tests {
             "the user is told which feature won: {:?}",
             rows(&app)
         );
+    }
+
+    #[test]
+    fn e2e_on_uses_the_configured_default_mode() {
+        let mut app = app_on_a_channel();
+        app.config.e2e.default_mode = "quiet".into();
+        e2e_on(&mut app);
+        let context = current_e2e_context(&app).unwrap();
+        let config = app.state.e2e_manager.as_ref().unwrap().keyring().get_channel_config(&context).unwrap().unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.mode, ChannelMode::Quiet);
     }
 
     #[test]

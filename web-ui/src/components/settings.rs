@@ -2,7 +2,7 @@
 mod collection;
 
 use crate::protocol::WebCommand;
-use crate::settings_model::{SECTIONS, SettingChange, SettingField, SettingKind};
+use crate::settings_model::{SettingChange, SettingField, SettingKind, SettingsScope};
 use crate::state::AppState;
 use leptos::prelude::*;
 
@@ -14,6 +14,7 @@ struct DraftField {
 }
 
 pub fn open_settings(state: AppState) {
+    state.settings_scope.set(SettingsScope::General);
     state.settings_fields.set(Vec::new());
     state.settings_error.set(None);
     state.settings_saving.set(false);
@@ -29,15 +30,16 @@ pub fn SettingsButton() -> impl IntoView {
 #[component]
 pub fn SettingsPanel() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
-    view! { <Show when=move || state.settings_open.get()><SettingsDialog /></Show> }
+    view! { <Show when=move || state.settings_open.get()><For each=move || vec![state.settings_scope.get()] key=|scope| *scope children=move |_| view! { <SettingsDialog /> } /></Show> }
 }
 
 #[component]
 fn SettingsDialog() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
+    let scope = state.settings_scope.get_untracked();
     Effect::new(move || {
         if state.connected.get() && state.settings_fields.get_untracked().is_empty() {
-            crate::ws::send_command(&WebCommand::GetSettings);
+            crate::ws::send_command(&WebCommand::GetSettings { scope });
         }
     });
     let section = RwSignal::new(0usize);
@@ -60,22 +62,28 @@ fn SettingsDialog() -> impl IntoView {
             state.line_height_override.set(line_original);
         }
     });
+    let draft_owner = Owner::current().expect("settings dialog owner");
     Effect::new(move || {
+        collection_open.set(false);
+        if scope != SettingsScope::General && network.get_untracked().is_none() {
+            network.set(state.settings_fields.get().first().and_then(|f| f.network()).map(str::to_string));
+        }
         fields.set(
             state
                 .settings_fields
                 .get()
                 .into_iter()
-                .map(|spec| DraftField {
+                .map(|spec| draft_owner.with(|| DraftField {
                     value: RwSignal::new(spec.value.clone()),
                     touched: RwSignal::new(false),
                     spec,
-                })
+                }))
                 .collect(),
         );
     });
     Effect::new(move || {
         if state.settings_saved.get() > saved_at_open {
+            if scope == SettingsScope::General {
             crate::state::store_or_remove(
                 super::chat_view::IMAGE_PREVIEWS_TOGGLE_KEY,
                 Some(if local_previews.get_untracked() {
@@ -93,6 +101,7 @@ fn SettingsDialog() -> impl IntoView {
                 }),
             );
             state.browser_preferences_revision.update(|v| *v += 1);
+            }
             committed.set_value(true);
             state.settings_open.set(false);
         }
@@ -123,7 +132,7 @@ fn SettingsDialog() -> impl IntoView {
         }
         state.settings_error.set(None);
         state.settings_saving.set(true);
-        crate::ws::send_command(&WebCommand::SaveSettings { changes: changes() });
+        crate::ws::send_command(&WebCommand::SaveSettings { scope, changes: changes() });
     };
     let defaults = move |_| {
         let current = section.get_untracked();
@@ -161,19 +170,32 @@ fn SettingsDialog() -> impl IntoView {
         state.settings_open.set(false);
         state.wizard_open.set(true);
     };
+    let manage_channels = move |_| {
+        if !changes().is_empty() || collection_open.get_untracked()
+            || local_previews.get_untracked() != previews_original
+            || local_follow.get_untracked() != follow_original
+            || state.font_size_override.get_untracked() != font_original
+            || state.line_height_override.get_untracked() != line_original {
+            state.settings_error.set(Some("Save or cancel your changes before managing channels.".into()));
+            return;
+        }
+        state.settings_fields.set(Vec::new());
+        state.settings_error.set(None);
+        state.settings_scope.set(if section.get_untracked() == 7 { SettingsScope::EncryptionChannels } else { SettingsScope::TranslationChannels });
+    };
     view! {
         <div class="settings-overlay">
             <section class="wizard-modal settings-dialog" role="dialog" aria-modal="true" aria-label="Settings">
-                <header class="wizard-head"><h3>"Settings"</h3><button class="wizard-x" type="button" disabled=move || state.settings_saving.get() on:click=move |_| state.settings_open.set(false) aria-label="Close settings">"×"</button></header>
+                <header class="wizard-head"><h3>{scope.title()}</h3><button class="wizard-x" type="button" disabled=move || state.settings_saving.get() on:click=move |_| state.settings_open.set(false) aria-label="Close settings">"×"</button></header>
                 <input class="settings-search" type="search" disabled=move || collection_open.get() placeholder="Search settings" aria-label="Search settings" prop:value=move || search.get() on:input=move |ev| search.set(event_target_value(&ev)) />
                 <div class="settings-body">
-                    <nav aria-label="Settings categories">
-                        {SECTIONS.iter().enumerate().map(|(i, label)| view! { <button type="button" disabled=move || collection_open.get() class:active=move || section.get() == i on:click=move |_| { section.set(i); search.set(String::new()); help.set(None); }>{*label}</button> }).collect_view()}
-                    </nav>
+                    <Show when=move || scope == SettingsScope::General><nav aria-label="Settings categories">
+                        {scope.sections().iter().enumerate().map(|(i, label)| view! { <button type="button" disabled=move || collection_open.get() class:active=move || section.get() == i on:click=move |_| { section.set(i); search.set(String::new()); help.set(None); }>{*label}</button> }).collect_view()}
+                    </nav></Show>
                     <div class="settings-content">
                     <Show when=move || section.get() == 0 && search.get().is_empty()>
                         <nav class="settings-network-tabs" aria-label="Networks">
-                            <button type="button" disabled=move || collection_open.get() class:active=move || network.get().is_none() on:click=move |_| { network.set(None); help.set(None); }>"General"</button>
+                            <Show when=move || scope == SettingsScope::General><button type="button" disabled=move || collection_open.get() class:active=move || network.get().is_none() on:click=move |_| { network.set(None); help.set(None); }>"General"</button></Show>
                             <For each=move || {
                                 let mut networks = Vec::new();
                                 for f in fields.get() {
@@ -187,11 +209,12 @@ fn SettingsDialog() -> impl IntoView {
                                 let active_id = id.clone();
                                 view! { <button type="button" disabled=move || collection_open.get() class:active=move || network.get().as_ref() == Some(&active_id) on:click=move |_| { network.set(Some(id.clone())); help.set(None); }>{label}</button> }
                             } />
-                            <button type="button" disabled=move || collection_open.get() on:click=add_network>"+ Add network"</button>
+                            <Show when=move || scope == SettingsScope::General><button type="button" disabled=move || collection_open.get() on:click=add_network>"+ Add network"</button></Show>
                         </nav>
                     </Show>
                     <fieldset class="settings-fields" disabled=move || state.settings_saving.get()>
-                        <div class="settings-section-heading"><h3>{move || if search.get().is_empty() { SECTIONS[section.get()].to_string() } else { "Search results".into() }}</h3><span>"* Unsaved change"</span></div>
+                        <Show when=move || scope == SettingsScope::General && matches!(section.get(), 7 | 8) && search.get().is_empty()><button class="wizard-btn s" type="button" disabled=move || collection_open.get() on:click=manage_channels>"Manage channels"</button></Show>
+                        <div class="settings-section-heading"><h3>{move || if search.get().is_empty() { scope.sections()[section.get()].to_string() } else { "Search results".into() }}</h3><span>"* Unsaved change"</span></div>
                         <Show when=move || fields.get().is_empty()><p>"Loading settings…"</p></Show>
 
                         <Show when=move || section.get() == 1 && search.get().is_empty()>
@@ -242,7 +265,7 @@ fn SettingsDialog() -> impl IntoView {
                 <footer class="wizard-foot">
                     <button class="wizard-btn p" type="button" disabled=move || state.settings_saving.get() || fields.get().is_empty() || collection_open.get() on:click=save>{move || if state.settings_saving.get() { "Saving…" } else { "Save" }}</button>
                     <button class="wizard-btn s" type="button" disabled=move || state.settings_saving.get() on:click=move |_| state.settings_open.set(false)>"Cancel"</button>
-                    <button class="wizard-btn s settings-defaults" type="button" disabled=move || state.settings_saving.get() || !search.get().is_empty() || collection_open.get() title="Choose a category without an active search to restore its defaults" on:click=defaults>"Section defaults"</button>
+                    <Show when=move || scope == SettingsScope::General><button class="wizard-btn s settings-defaults" type="button" disabled=move || scope != SettingsScope::General || state.settings_saving.get() || !search.get().is_empty() || collection_open.get() title="Choose a category without an active search to restore its defaults" on:click=defaults>"Section defaults"</button></Show>
                 </footer>
             </section>
         </div>

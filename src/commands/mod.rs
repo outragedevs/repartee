@@ -2,6 +2,7 @@ pub mod docs;
 pub(crate) mod handlers_admin;
 pub(crate) mod handlers_dcc;
 mod handlers_e2e;
+pub use handlers_e2e::parse_mode as parse_e2e_mode;
 mod handlers_irc;
 pub(crate) mod handlers_logs;
 mod handlers_shrink;

@@ -8,11 +8,6 @@ pub(super) fn CollectionControl(
     collection_open: RwSignal<bool>,
 ) -> impl IntoView {
     let open = RwSignal::new(false);
-    on_cleanup(move || {
-        if open.get_untracked() {
-            collection_open.set(false);
-        }
-    });
     Effect::new(move || {
         if !open.get() {
             collection_open.set(false);
@@ -91,6 +86,7 @@ fn CollectionEditor(field: DraftField, open: RwSignal<bool>) -> impl IntoView {
                 {move || collection.get().map(|c| c.columns.into_iter().zip(cells.get()).map(|(column, value)| {
                     let control = match column.kind {
                         CellKind::Toggle => view! { <input type="checkbox" prop:checked=move || value.get() == "true" on:change=move |ev| value.set(event_target_checked(&ev).to_string()) /> }.into_any(),
+                        CellKind::Select(options) => view! { <select on:change=move |ev| value.set(event_target_value(&ev))>{options.iter().map(|option| { let option = *option; view! { <option value=option prop:selected=move || value.get() == option>{option}</option> } }).collect_view()}</select> }.into_any(),
                         CellKind::List => view! { <textarea rows="3" prop:value=move || value.get() on:input=move |ev| value.set(event_target_value(&ev)) /> }.into_any(),
                         kind => view! { <input type=if kind == CellKind::Number { "number" } else { "text" } min="0" prop:value=move || value.get() on:input=move |ev| value.set(event_target_value(&ev)) /> }.into_any(),
                     };
