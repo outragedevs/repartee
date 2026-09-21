@@ -4051,6 +4051,11 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
                 let channel = &args[2];
                 let buffer_id = make_buffer_id(conn_id, channel);
                 let nicks_str = &args[3];
+                if !state.buffers.contains_key(&buffer_id) {
+                    let target = server_buffer(state, conn_id);
+                    emit_event(state, &target, "names_reply", format!("Names for {channel}: {nicks_str}"), vec![channel.clone(), nicks_str.clone()]);
+                    return;
+                }
 
                 // Get prefix map and userhost-in-names state from connection
                 let (prefix_map, has_userhost) = state
@@ -4077,7 +4082,12 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
                 let channel = &args[1];
                 let topic = &args[2];
                 let buffer_id = make_buffer_id(conn_id, channel);
-                state.set_topic(&buffer_id, topic.clone(), None);
+                if state.buffers.contains_key(&buffer_id) {
+                    state.set_topic(&buffer_id, topic.clone(), None);
+                } else {
+                    let target = server_buffer(state, conn_id);
+                    emit_event(state, &target, "topic_reply", format!("Topic for {channel}: {topic}"), vec![channel.clone(), topic.clone()]);
+                }
             }
         }
         // RPL_TOPICWHOTIME: args = [our_nick, channel, set_by, timestamp]
@@ -4088,6 +4098,9 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
                 let buffer_id = make_buffer_id(conn_id, channel);
                 if let Some(buf) = state.buffers.get_mut(&buffer_id) {
                     buf.topic_set_by = Some(set_by.clone());
+                } else {
+                    let target = server_buffer(state, conn_id);
+                    emit_event(state, &target, "topic_info_reply", format!("Topic for {channel} set by {set_by}"), vec![channel.clone(), set_by.clone()]);
                 }
             }
         }
@@ -4594,8 +4607,14 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
             emit(state, &target_buf, "%Z565f89End of WHOWAS%N");
         }
 
-        // Silently consume RPL_ENDOFNAMES — we already have the nick list
-        Response::RPL_ENDOFNAMES => {}
+        Response::RPL_ENDOFNAMES => {
+            if let Some(channel) = args.get(1)
+                && !state.buffers.contains_key(&make_buffer_id(conn_id, channel))
+            {
+                let target = server_buffer(state, conn_id);
+                emit_event(state, &target, "names_end", format!("End of names for {channel}"), vec![channel.clone()]);
+            }
+        }
 
         // 401/402/263 can answer a WHOIS but are not WHOIS-specific: 401 also
         // answers PRIVMSG/NOTICE/INVITE/KICK aimed at a missing nick, 402 any
@@ -7246,6 +7265,37 @@ mod tests {
         assert_eq!(bob.modes, "");
         assert_eq!(bob.ident.as_deref(), Some("buser"));
         assert_eq!(bob.host.as_deref(), Some("bhost.org"));
+    }
+
+    #[test]
+    fn unopened_channel_replies_remain_visible_without_creating_a_channel() {
+        for reply_buffer in [None, Some("test/#test".to_string())] {
+            let mut state = make_test_state();
+            state.irc_reply_buffer = reply_buffer.clone();
+            let destination = reply_buffer.unwrap_or_else(|| server_buffer(&state, "test"));
+            let start = state.buffers[&destination].messages.len();
+            for (response, args) in [
+                (Response::RPL_NAMREPLY, vec!["me", "=", "#unopened", "@alice +bob"]),
+                (Response::RPL_TOPIC, vec!["me", "#unopened", "100% literal %N"]),
+                (Response::RPL_TOPICWHOTIME, vec!["me", "#unopened", "alice", "123"]),
+                (Response::RPL_ENDOFNAMES, vec!["me", "#unopened", "End of names"]),
+            ] {
+                let msg = make_irc_msg(None, Command::Response(response, args.into_iter().map(str::to_string).collect()));
+                handle_irc_message(&mut state, "test", &msg);
+            }
+            let messages: Vec<_> = state.buffers[&destination].messages.iter().skip(start).map(|message| message.text.as_str()).collect();
+            assert_eq!(messages, vec![
+                "Names for #unopened: @alice +bob",
+                "Topic for #unopened: 100% literal %N",
+                "Topic for #unopened set by alice",
+                "End of names for #unopened",
+            ]);
+            let topic = &state.buffers[&destination].messages[start + 1];
+            let fallback = crate::theme::parser::event_fallback_text(&topic.text, topic.event_key.as_deref(), topic.event_params.as_deref());
+            let rendered: String = crate::theme::parse_format_string(&fallback, &[]).iter().map(|span| span.text.as_str()).collect();
+            assert_eq!(rendered, topic.text);
+            assert!(!state.buffers.contains_key("test/#unopened"));
+        }
     }
 
     #[test]
