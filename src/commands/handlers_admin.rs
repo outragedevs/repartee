@@ -1014,12 +1014,14 @@ pub(crate) fn cmd_log(app: &mut App, args: &[String]) {
 fn log_status(app: &mut App) {
     // Collect all output lines first to avoid borrow conflicts
     let lines: Vec<String> = if let Some(ref storage) = app.storage {
-        let count = storage
-            .db
-            .lock()
-            .ok()
-            .and_then(|db| storage::query::get_message_count(&db).ok())
-            .unwrap_or(0);
+        let count = match storage.db.lock() {
+            Ok(db) => storage::query::get_message_count(&db).map_err(|error| error.to_string()),
+            Err(_) => Err("Log DB lock poisoned".to_string()),
+        };
+        let count = match count {
+            Ok(count) => count.to_string(),
+            Err(error) => format!("unavailable ({})", super::helpers::escape_format(&error)),
+        };
         let encrypt_str = if storage.encrypt { "on" } else { "off" };
         let fts_str = if storage.encrypt {
             "unavailable (encrypted)"
@@ -2530,5 +2532,28 @@ mod web_preview_command_tests {
         assert_eq!(source, "https://example.org/image.png");
         assert!(url.starts_with("/api/preview?"));
         assert!(matches!(app.image_preview, crate::image_preview::PreviewStatus::Hidden));
+    }
+}
+
+#[cfg(test)]
+mod log_status_tests {
+    #[tokio::test]
+    async fn log_status_distinguishes_an_empty_database_from_a_query_failure() {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        app.state.add_buffer(crate::state::buffer::Buffer::for_test("net", crate::state::buffer::BufferType::Server, "status"));
+        app.state.set_active_buffer("net/status");
+        app.storage = Some(crate::storage::Storage::in_memory());
+        super::log_status(&mut app);
+        let rendered = |app: &crate::app::App| -> Vec<String> {
+            app.state.active_buffer().unwrap().messages.iter().map(|message|
+                crate::theme::parse_format_string(&message.text, &[]).iter().map(|span| span.text.as_str()).collect()).collect()
+        };
+        assert!(rendered(&app).iter().any(|line| line.contains("Messages:") && line.trim_end().ends_with('0')));
+        app.state.active_buffer_mut().unwrap().messages.clear();
+        app.storage.as_ref().unwrap().db.lock().unwrap().execute("DROP TABLE messages", []).unwrap();
+        super::log_status(&mut app);
+        let lines = rendered(&app);
+        assert!(lines.iter().any(|line| line.contains("Messages:") && line.contains("unavailable") && line.contains("no such table")));
+        assert!(!lines.iter().any(|line| line.contains("Messages:") && line.trim_end().ends_with('0')));
     }
 }
