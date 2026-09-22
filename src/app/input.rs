@@ -1813,9 +1813,13 @@ impl App {
             return;
         };
         let buf_id = buf.id.clone();
+        self.forward_key_to_shell_buffer(&buf_id, key);
+    }
+
+    pub(super) fn forward_key_to_shell_buffer(&mut self, buf_id: &str, key: event::KeyEvent) {
         let Some(shell_id) = self
             .shell_mgr
-            .session_id_for_buffer(&buf_id)
+            .session_id_for_buffer(buf_id)
             .map(ToString::to_string)
         else {
             return;

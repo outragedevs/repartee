@@ -93,8 +93,13 @@ fn token_key(token: &str) -> Option<KeyEvent> {
 impl App {
     pub(super) fn cancel_bindings(&mut self) {
         self.bindings.sequence.clear();
-        for (event, _) in self.bindings.events.drain(..) {
-            if let KeyCode::Char(ch) = event.code
+        let events = std::mem::take(&mut self.bindings.events);
+        for (event, _) in events {
+            if self.bindings.shell {
+                if let Some(buffer_id) = self.bindings.context.clone() {
+                    self.forward_key_to_shell_buffer(&buffer_id, event);
+                }
+            } else if let KeyCode::Char(ch) = event.code
                 && (event.modifiers - KeyModifiers::SHIFT).is_empty()
             {
                 self.input.insert_char(ch);
@@ -106,6 +111,7 @@ impl App {
         if self.bindings.config.as_ref() != Some(&self.config.keyboard)
             || self.bindings.shell != self.shell_input_active
         {
+            self.cancel_bindings();
             match self.config.keyboard.compile() {
                 Ok(keymap) => {
                     self.bindings.keymap = if self.shell_input_active {
@@ -123,7 +129,6 @@ impl App {
             }
             self.bindings.shell = self.shell_input_active;
             self.bindings.config = Some(self.config.keyboard.clone());
-            self.cancel_bindings();
         }
         if self.bindings.context != self.state.active_buffer_id {
             self.cancel_bindings();
@@ -384,6 +389,18 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!app.bindings.sequence.is_pending());
         assert!(app.bindings.events.is_empty());
+        app.config
+            .keyboard
+            .set("g-g", Binding::new("change_window", "1"))
+            .unwrap();
+        let composer = app.input.value.clone();
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert!(app.bindings.sequence.is_pending());
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.input.value, composer);
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        app.cancel_bindings();
+        assert_eq!(app.input.value, composer);
     }
 
     #[test]
