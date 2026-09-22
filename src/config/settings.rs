@@ -25,6 +25,10 @@ pub fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
         return None;
     }
 
+    if path == "keyboard.key_timeout" {
+        return Some(Resolved { value: config.keyboard.key_timeout.to_string(), is_credential: false });
+    }
+
     match parts[0] {
         "general" => {
             let val = match parts[1] {
@@ -320,6 +324,11 @@ pub fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result
                 && matches!(parts[2], "label" | "address")))
     {
         return Err("This setting cannot be empty".to_string());
+    }
+
+    if path == "keyboard.key_timeout" {
+        config.keyboard.key_timeout = raw.parse::<u64>().map_err(|_| "Expected timeout in milliseconds (0 disables it)".to_string())?;
+        return Ok(());
     }
 
     match parts[0] {
@@ -816,6 +825,7 @@ pub fn server_password_env_key(path: &str) -> Option<String> {
 
 /// Base setting paths (without server-specific ones).
 pub const BASE_PATHS: &[&str] = &[
+    "keyboard.key_timeout",
     "general.nick",
     "general.username",
     "general.realname",

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::time::Instant;
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Position;
@@ -115,16 +114,6 @@ impl App {
         self.emote_animator.clear();
     }
 
-    /// Maximum time (ms) between ESC and follow-up key to treat as ESC+key combo.
-    const ESC_TIMEOUT_MS: u128 = 500;
-
-    /// Check if a recent ESC press should combine with the current key.
-    fn consume_esc_prefix(&mut self) -> bool {
-        self.last_esc_time
-            .take()
-            .is_some_and(|t| t.elapsed().as_millis() < Self::ESC_TIMEOUT_MS)
-    }
-
     /// Switch to buffer N (0-9) — shared logic for Alt+N and ESC+N.
     pub(crate) fn switch_to_buffer_num(&mut self, n: usize) {
         if n == 0 {
@@ -155,7 +144,7 @@ impl App {
         self.nick_list_scroll = 0;
     }
 
-    fn switch_to_activity_buffer(&mut self) {
+    pub(super) fn switch_to_activity_buffer(&mut self) {
         if let Some(id) = self.state.next_activity_buffer() {
             self.state.set_active_buffer(&id);
             self.scroll_offset = 0;
@@ -165,7 +154,7 @@ impl App {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn handle_key(&mut self, key: event::KeyEvent) {
+    pub(super) fn handle_key_unbound(&mut self, key: event::KeyEvent) {
         if let Some(panel) = &mut self.settings_panel {
             let action = panel.key(key);
             self.settings_action(action);
@@ -173,44 +162,10 @@ impl App {
         }
         // Shell input mode: forward most keys to the active shell PTY.
         if self.shell_input_active {
-            if matches!(key.code, KeyCode::Char('a' | 'A'))
-                && key.modifiers.contains(KeyModifiers::ALT)
-                && (key.modifiers - KeyModifiers::ALT - KeyModifiers::SHIFT).is_empty()
-            {
-                self.switch_to_activity_buffer();
-                return;
-            }
             // Ctrl+] exits shell input mode (telnet convention).
             if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char(']') {
                 self.shell_input_active = false;
                 return;
-            }
-            // Alt+digit / Alt+arrow switches buffers even in shell mode.
-            if key.modifiers.contains(KeyModifiers::ALT) {
-                if let KeyCode::Char(c) = key.code
-                    && c.is_ascii_digit()
-                {
-                    let n = c.to_digit(10).unwrap_or(0) as usize;
-                    self.switch_to_buffer_num(n);
-                    return;
-                }
-                match key.code {
-                    KeyCode::Left => {
-                        self.state.prev_buffer();
-                        self.scroll_offset = 0;
-                        self.reset_sidepanel_scrolls();
-                        self.update_shell_input_state();
-                        return;
-                    }
-                    KeyCode::Right => {
-                        self.state.next_buffer();
-                        self.scroll_offset = 0;
-                        self.reset_sidepanel_scrolls();
-                        self.update_shell_input_state();
-                        return;
-                    }
-                    _ => {}
-                }
             }
             // Forward everything else to the shell PTY.
             self.forward_key_to_shell(key);
@@ -229,60 +184,11 @@ impl App {
             return;
         }
 
-        // Check for ESC+key combos (ESC pressed recently, now a follow-up key)
-        let esc_active = if key.code == KeyCode::Esc {
-            // Don't consume ESC prefix on another ESC press
-            self.last_esc_time.take();
-            false
-        } else {
-            self.consume_esc_prefix()
-        };
-
-        // ESC+digit → buffer switch (like Alt+digit)
-        // ESC+Left/Right → prev/next buffer (like Alt+Left/Right)
-        if esc_active {
-            match key.code {
-                KeyCode::Char('a' | 'A') if (key.modifiers - KeyModifiers::SHIFT).is_empty() => {
-                    self.switch_to_activity_buffer();
-                    return;
-                }
-                KeyCode::Char(c) if c.is_ascii_digit() && key.modifiers.is_empty() => {
-                    let n = c.to_digit(10).unwrap_or(0) as usize;
-                    self.switch_to_buffer_num(n);
-                    return;
-                }
-                KeyCode::Left if key.modifiers.is_empty() => {
-                    self.state.prev_buffer();
-                    self.scroll_offset = 0;
-                    self.reset_sidepanel_scrolls();
-                    return;
-                }
-                KeyCode::Right if key.modifiers.is_empty() => {
-                    self.state.next_buffer();
-                    self.scroll_offset = 0;
-                    self.reset_sidepanel_scrolls();
-                    return;
-                }
-                _ => {
-                    // ESC expired or unrecognized follow-up — fall through to normal handling
-                }
-            }
-        }
-
         match (key.modifiers, key.code) {
-            (mods, KeyCode::Char('a' | 'A')) if mods.contains(KeyModifiers::ALT)
-                && (mods - KeyModifiers::ALT - KeyModifiers::SHIFT).is_empty() => {
-                self.switch_to_activity_buffer();
-            }
             // ESC — dismiss spell suggestions, image preview, or record for ESC+key combo
             (_, KeyCode::Esc) => {
                 if self.input.spell_state.is_some() {
                     self.input.dismiss_spell();
-                } else if matches!(
-                    self.image_preview,
-                    crate::image_preview::PreviewStatus::Hidden
-                ) {
-                    self.last_esc_time = Some(Instant::now());
                 } else {
                     self.dismiss_image_preview();
                 }
@@ -307,20 +213,6 @@ impl App {
                 self.input.end();
                 self.scroll_offset = 0;
                 self.collapse_backlog_if_at_bottom();
-            }
-            (KeyModifiers::ALT, KeyCode::Char(c)) if c.is_ascii_digit() => {
-                let n = c.to_digit(10).unwrap_or(0) as usize;
-                self.switch_to_buffer_num(n);
-            }
-            (mods, KeyCode::Left) if mods.contains(KeyModifiers::ALT) => {
-                self.state.prev_buffer();
-                self.scroll_offset = 0;
-                self.reset_sidepanel_scrolls();
-            }
-            (mods, KeyCode::Right) if mods.contains(KeyModifiers::ALT) => {
-                self.state.next_buffer();
-                self.scroll_offset = 0;
-                self.reset_sidepanel_scrolls();
             }
             // Alt+Enter inserts a literal newline for multi-line compose (sent
             // as one draft/multiline batch on submit). Must precede the plain
@@ -453,6 +345,7 @@ impl App {
     }
 
     pub(crate) fn handle_paste(&mut self, text: &str) {
+        self.cancel_bindings();
         if let Some(panel) = &mut self.settings_panel {
             panel.insert(text);
             return;
@@ -1920,9 +1813,13 @@ impl App {
             return;
         };
         let buf_id = buf.id.clone();
+        self.forward_key_to_shell_buffer(&buf_id, key);
+    }
+
+    pub(super) fn forward_key_to_shell_buffer(&mut self, buf_id: &str, key: event::KeyEvent) {
         let Some(shell_id) = self
             .shell_mgr
-            .session_id_for_buffer(&buf_id)
+            .session_id_for_buffer(buf_id)
             .map(ToString::to_string)
         else {
             return;
@@ -3005,7 +2902,7 @@ pub mod submit_typing_tests {
             forwarder_handles: HashMap::new(),
             irc_tx,
             irc_rx,
-            last_esc_time: None,
+            bindings: crate::app::bindings::NativeBindings::default(),
             buffer_list_scroll: 0,
             buffer_list_total: 0,
             nick_list_scroll: 0,

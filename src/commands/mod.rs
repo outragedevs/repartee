@@ -1,4 +1,5 @@
 pub mod docs;
+mod handlers_bind;
 pub(crate) mod handlers_admin;
 pub(crate) mod handlers_dcc;
 mod handlers_e2e;

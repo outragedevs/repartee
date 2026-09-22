@@ -488,6 +488,8 @@ template variables, context variables, and command chaining with semicolons.</p>
 </ul>
 <p>If the alias body contains no <code>$</code> references, <code>$*</code> is appended automatically.
 This means <code>/alias ns /msg NickServ</code> works the same as <code>/alias ns /msg NickServ $*</code>.</p>
+<p>Variables are expanded only in the alias template. Dollar expressions inside
+argument values are kept literal.</p>
 <h3>Context Variables</h3>
 <ul>
 <li><code>$C</code> or <code>${C}</code> — current channel/buffer name</li>
@@ -499,6 +501,8 @@ This means <code>/alias ns /msg NickServ</code> works the same as <code>/alias n
 <p>Use <code>;</code> to chain multiple commands in one alias:</p>
 <pre><code>/alias j /join $0; /msg $0 hello everyone
 </code></pre>
+<p>Semicolons separate commands only in the saved alias body. Semicolons in
+arguments remain part of the argument text, including through nested aliases.</p>
 <h3>Recursion Guard</h3>
 <p>Aliases can reference other aliases. Recursion is capped at 10 levels to
 prevent infinite loops.</p>
@@ -540,6 +544,68 @@ automatically on startup.</p>
 </code></pre>
 <h2>See Also</h2>
 <p>/server, /connect</p>
+</div>
+<div id="bind" class="command-entry" data-command="bind" data-category="Configuration">
+<h1>/bind</h1>
+<h2>Syntax</h2>
+<pre><code>/bind [&lt;key&gt; [&lt;action&gt; [&lt;data&gt;]]]
+/bind -list
+/bind -delete &lt;key&gt;
+/bind -reset &lt;key&gt;
+</code></pre>
+<h2>Description</h2>
+<p>List current bindings, filter by key, or assign an action. <code>-list</code> lists supported
+actions. <code>-delete</code> removes a binding, including a default; <code>-reset</code> restores its
+default. Successful changes are saved immediately. A failed save leaves the
+previous configuration active. Customizations and deleted defaults survive
+restart and <code>/reload</code>.</p>
+<p>Keys are case-sensitive. Use <code>meta-</code> for Alt or Escape followed by another key,
+and uppercase caret notation for Control (<code>^W^C</code>). <code>key</code> gives a sequence a name;
+combine names with hyphens. Recursive definitions are rejected. <code>/command</code>
+is shorthand for <code>command command</code>. Command arguments retain internal spaces.</p>
+<p>The default navigation bindings are <code>meta-a</code> and <code>meta-A</code> for unread activity,
+<code>meta-0</code> through <code>meta-9</code> for numbered windows, and <code>meta-left</code>/<code>meta-right</code> for
+adjacent windows. These are editable bindings, not hardcoded fallbacks.
+Numbers match the sidebar; 0 is Status. Unlike irssi, Alt+0 does not select 10
+unless explicitly rebound. Activity uses the highest unread priority, breaking
+ties by oldest unread activity, not by last visited window.</p>
+<p><code>change_window</code>, <code>active_window</code>, <code>previous_window</code>, and <code>next_window</code> navigate.
+<code>command</code> executes a command in the current window/network. <code>multi</code> runs action
+names with arguments separated by semicolons; <code>nothing</code> consumes a key.
+Editing, history, completion, scrolling, <code>insert_text</code>, and <code>refresh_screen</code>
+actions are available through <code>-list</code>. Unsupported actions produce an error.</p>
+<p>A complete sequence that is also a prefix waits for more input. Configure
+<code>/set keyboard.key_timeout 1000</code> for a one-second timeout; 0 disables that
+sequence timeout, as in irssi. A lone Escape has a separate 500 ms prefix
+window. On timeout an exact match executes. Unmatched printable input is
+preserved instead of silently discarded. Paste bypasses bindings and ends
+an incomplete sequence. Key release events do not execute bindings.</p>
+<p>Settings, wizard and emote modals receive input first. Escape dismisses spell
+suggestions and image previews first. In shell input mode only navigation
+bindings apply; other input goes to the PTY. A standalone Escape goes to the
+PTY immediately, so use Alt navigation while a shell owns input. The terminal shim reserves
+Ctrl+backslash, Ctrl+4 and Ctrl+Z for detach. Detach clears incomplete sequences.</p>
+<p>The initial integration applies to TUI input. Browser execution is implemented
+in the subsequent integration stage; configuring bindings from a browser still
+updates the shared saved configuration.</p>
+<h2>Examples</h2>
+<pre><code>/bind meta-0 change_window 10
+/bind meta-c /clear
+/bind ^W^C command query someone
+/bind meta-q key win1
+/bind meta-w key win2
+/bind win1-win2 change_window 12
+/bind meta-x multi erase_line;insert_text hello
+/bind -delete meta-a
+/bind -reset meta-a
+</code></pre>
+<p>The full two-digit scheme is described at
+<a href="https://redlegion.org/posts/2012-05-03-100-windows-in-irssi/">https://redlegion.org/posts/2012-05-03-100-windows-in-irssi/</a>.
+The implementation was compared with official irssi commit
+<code>43f1727ef9fe1cb51d5031ee2dd0e1965217e4cb</code>, particularly <code>keyboard.c</code>,
+<code>gui-readline.c</code>, and the bind help page.</p>
+<h2>See Also</h2>
+<p>/set, /alias, /help</p>
 </div>
 <div id="flood" class="command-entry" data-command="flood" data-category="Configuration">
 <h1>/flood</h1>
@@ -636,12 +702,15 @@ ALL       All of the above
 <p>Set or view the format string for a statusbar item.</p>
 <pre><code>/items format &lt;item&gt; [format_string]
 </code></pre>
-<p>Without a format string, shows the current format.</p>
+<p>Without a format string, shows the current format. The full remaining text is
+used as the value. Enclose it in single or double quotes to preserve leading
+or trailing spaces; <code>&quot;&quot;</code> sets an empty value.</p>
 <h3>separator</h3>
 <p>Set or view the separator between statusbar items.</p>
 <pre><code>/items separator [string]
 </code></pre>
-<p>Without a string, shows the current separator.</p>
+<p>Without a string, shows the current separator. Quotes are removed from the
+value: <code>/items separator &quot; | &quot;</code> preserves spaces around the separator.</p>
 <h3>available</h3>
 <p>List all available statusbar item types.</p>
 <pre><code>/items available

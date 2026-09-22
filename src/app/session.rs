@@ -248,6 +248,7 @@ impl App {
 
     /// Tear down the shim connection (terminal, tasks, channels).
     pub(crate) fn teardown_shim(&mut self) {
+        self.cancel_bindings();
         self.terminal = None;
         self.socket_output_tx = None;
         self.socket_output = None;
@@ -269,6 +270,7 @@ impl App {
 
     /// Perform detach: save state, drop terminal, start socket listener.
     pub(crate) fn perform_detach(&mut self) {
+        self.cancel_bindings();
         self.should_detach = false;
 
         // A wizard's captured state can go stale across a detach/reattach
