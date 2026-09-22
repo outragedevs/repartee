@@ -261,6 +261,11 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v2.1.3
+
+- **Configurable keyboard bindings.** `/bind` now lists, assigns, deletes, and resets irssi-style key sequences and actions. Custom bindings persist across restarts and reloads, while invalid definitions and failed saves leave the active configuration intact.
+- **Shared navigation in terminal and browser.** Editable defaults cover unread activity, numbered windows, and adjacent windows. The web client receives binding changes live and applies navigation and commands only to the initiating browser session; terminal shell input retains its own key handling.
+
 ### v2.1.2
 
 - **Safer IRC command handling.** Channel-sensitive commands now require the correct context, preserve complete reason text and literal arguments, handle IPv6 endpoints and LINKS masks correctly, and apply network casemapping when reusing query buffers.
