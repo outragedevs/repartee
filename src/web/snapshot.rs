@@ -29,6 +29,7 @@ pub fn build_sync_init(
     let buffers: Vec<BufferMeta> = sorted
         .iter()
         .map(|b| BufferMeta {
+            activity_order: state.activity_order_for(&b.id),
             pinned: b.metadata.pinned,
             muted: b.metadata.muted,
             blocked: b.metadata.blocked,
@@ -85,6 +86,7 @@ pub fn build_sync_init(
         typing,
         statusbar_items: statusbar_item_names(statusbar),
         statusbar_enabled: statusbar.enabled,
+        keyboard: crate::keybindings::KeyboardConfig::default(),
     }
 }
 

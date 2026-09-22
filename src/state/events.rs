@@ -126,7 +126,12 @@ impl AppState {
         {
             buffer.last_read = timestamp;
         }
+        self.activity_order.remove(&buffer.id);
+        if buffer.activity != ActivityLevel::None {
+            self.register_activity(&buffer.id);
+        }
         let mut meta = crate::web::protocol::BufferMeta {
+            activity_order: self.activity_order_for(&buffer.id),
             id: buffer.id.clone(),
             connection_id: buffer.connection_id.clone(),
             name: buffer.name.clone(),
@@ -141,10 +146,6 @@ impl AppState {
             muted: buffer.metadata.muted,
             blocked: buffer.metadata.blocked,
         };
-        self.activity_order.remove(&buffer.id);
-        if buffer.activity != ActivityLevel::None {
-            self.register_activity(&buffer.id);
-        }
         self.buffers.insert(buffer.id.clone(), buffer);
         meta.e2e_enabled = matches!(
             self.buffers[&meta.id].buffer_type,
@@ -539,7 +540,7 @@ impl AppState {
             buf.activity = ActivityLevel::Mention;
             buf.unread_count += 1;
             self.pending_web_events
-                .push(crate::web::protocol::WebEvent::ActivityChanged {
+                .push(crate::web::protocol::WebEvent::ActivityChanged { activity_order: None,
                     buffer_id: buffer_id.to_string(),
                     activity: ActivityLevel::Mention as u8,
                     unread_count: buf.unread_count,
@@ -2068,7 +2069,7 @@ impl AppState {
                 buf.activity = level;
                 buf.unread_count += 1;
                 self.pending_web_events
-                    .push(crate::web::protocol::WebEvent::ActivityChanged {
+                    .push(crate::web::protocol::WebEvent::ActivityChanged { activity_order: None,
                         buffer_id: buffer_id.to_string(),
                         activity: level as u8,
                         unread_count: buf.unread_count,

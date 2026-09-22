@@ -14,6 +14,7 @@ pub async fn run_with_tick(app: &mut App, script: &str, tick: fn(&mut App)) {
         buffers: Vec::new(), connections: Vec::new(), mention_count: 0,
         active_buffer_id: None, timestamp_format: "%H:%M".into(), emotes_enabled: false, emotes_input_enabled: false,
         typing: std::collections::HashMap::new(), statusbar_items: Vec::new(), statusbar_enabled: false,
+        keyboard: crate::keybindings::KeyboardConfig::default(),
     }));
     app.web_state_snapshot = Some(Arc::clone(&snapshot));
     app.refresh_web_state_snapshot();

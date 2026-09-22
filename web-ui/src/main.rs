@@ -1,4 +1,7 @@
 mod app;
+mod bindings;
+#[path = "../../shared/keybindings.rs"]
+pub mod keybindings;
 mod components;
 mod constants;
 mod emoji;

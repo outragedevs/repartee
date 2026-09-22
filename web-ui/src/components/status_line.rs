@@ -259,6 +259,7 @@ mod tests {
 
     fn buf(id: &str, buffer_type: &str, activity: u8) -> BufferMeta {
         BufferMeta {
+            activity_order: None,
             id: id.to_string(),
             connection_id: "net".to_string(),
             name: id.to_string(),

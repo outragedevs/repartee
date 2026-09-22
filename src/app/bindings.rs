@@ -177,7 +177,11 @@ impl App {
         }
         let now = u64::try_from(self.bindings.clock.elapsed().as_millis()).unwrap_or(u64::MAX);
         let expired = self.bindings.sequence.expire(&self.bindings.keymap, now);
-        self.dispatch_bindings(expired);
+        if !expired.is_empty() {
+            self.dispatch_bindings(expired);
+            self.handle_key(key);
+            return;
+        }
         self.bindings.events.push_back((key, tokens.clone()));
         let actions = self
             .bindings
@@ -355,6 +359,48 @@ impl App {
 mod tests {
     use super::*;
     use crate::state::buffer::{Buffer, BufferType};
+
+    #[tokio::test]
+    #[ignore = "requires a disposable browser driver script"]
+    async fn browser_bind_fixture() {
+        let Ok(script) = std::env::var("REPARTEE_BIND_BROWSER_SCRIPT") else { return };
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let directory = tempfile::tempdir().unwrap();
+        app.config_path = directory.path().join("config.toml");
+        app.state.add_buffer(Buffer::for_test("_default", BufferType::Server, "Status"));
+        for number in 1..=100 {
+            app.state.add_buffer(Buffer::for_test("fixture", BufferType::Channel, &format!("#room{number:03}")));
+        }
+        app.state.set_active_buffer("fixture/#room001");
+        for (key, digit) in "qwertyuiop".chars().zip("1234567890".chars()) {
+            app.config.keyboard.set(&format!("meta-{key}"), Binding::new("key", &format!("win{digit}"))).unwrap();
+        }
+        for tens in 0..=9 {
+            for units in 0..=9 {
+                app.config.keyboard.set(&format!("win{tens}-win{units}"), Binding::new("change_window", &format!("{tens}{units}"))).unwrap();
+            }
+        }
+        app.config.keyboard.set("meta-c", Binding::new("insert_text", "hello ❤")).unwrap();
+        app.config.keyboard.set("meta-z", Binding::new("command", "wizard")).unwrap();
+        app.state.set_activity("fixture/#room020", crate::state::buffer::ActivityLevel::Activity);
+        app.state.set_activity("fixture/#room010", crate::state::buffer::ActivityLevel::Activity);
+        super::super::filehost_browser_fixture::run(&mut app, &script).await;
+        assert_eq!(app.state.active_buffer_id.as_deref(), Some("fixture/#room001"));
+    }
+
+    #[test]
+    fn expired_action_gives_new_modal_priority_over_current_key() {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        app.config.keyboard.key_timeout = 1;
+        app.config.keyboard.set("a", Binding::new("command", "wizard")).unwrap();
+        app.config.keyboard.set("a-b", Binding::new("nothing", "")).unwrap();
+        app.config.keyboard.set("b", Binding::new("insert_text", "wrong context")).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        app.bindings.clock -= std::time::Duration::from_millis(10);
+        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        assert!(app.settings_panel.is_some());
+        assert!(app.input.value.is_empty());
+    }
 
     #[test]
     fn pending_special_keys_keep_their_events_and_shell_escape_never_waits() {

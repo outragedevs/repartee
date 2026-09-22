@@ -23,7 +23,10 @@ pub enum WebEvent {
         context: Option<crate::irc::webpush::BrowserContext>,
     },
     /// Initial state sync on WebSocket connect.
+    KeyboardBindingsChanged { keyboard: crate::keybindings::KeyboardConfig },
     SyncInit {
+        #[serde(default)]
+        keyboard: crate::keybindings::KeyboardConfig,
         buffers: Vec<BufferMeta>,
         connections: Vec<ConnectionMeta>,
         mention_count: u32,
@@ -140,6 +143,8 @@ pub enum WebEvent {
     BufferClosed { buffer_id: String },
     /// Buffer activity level or unread count changed.
     ActivityChanged {
+        #[serde(default)]
+        activity_order: Option<u64>,
         buffer_id: String,
         activity: u8,
         unread_count: u32,
@@ -272,6 +277,7 @@ pub enum WebCommand {
     SendMessage { buffer_id: String, text: String },
     /// Switch the session-local active buffer (does NOT affect terminal).
     SwitchBuffer { buffer_id: String },
+    SwitchBufferLocal { buffer_id: String },
     /// Mark messages as read up to a timestamp.
     Presence { present: bool },
     MarkRead { buffer_id: String, up_to: i64, #[serde(default)] message_id: Option<u64> },
@@ -382,6 +388,8 @@ pub struct SaveServerCmd {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[expect(clippy::struct_excessive_bools, reason = "metadata flags are independent server-controlled preferences")]
 pub struct BufferMeta {
+    #[serde(default)]
+    pub activity_order: Option<u64>,
     pub id: String,
     pub connection_id: String,
     pub name: String,
@@ -620,6 +628,7 @@ mod tests {
             typing: HashMap::new(),
             statusbar_items: Vec::new(),
             statusbar_enabled: true,
+            keyboard: crate::keybindings::KeyboardConfig::default(),
         }
     }
 
@@ -664,6 +673,7 @@ mod tests {
             typing,
             statusbar_items: Vec::new(),
             statusbar_enabled: true,
+            keyboard: crate::keybindings::KeyboardConfig::default(),
         };
 
         let json = serde_json::to_string(&event).expect("serializes");

@@ -114,7 +114,8 @@ async fn handle_socket(
                     Some(Ok(axum::extract::ws::Message::Text(text))) => {
                         match serde_json::from_str::<WebCommand>(&text) {
                             Ok(cmd) => {
-                                if let WebCommand::SwitchBuffer { ref buffer_id } = cmd {
+                                if let WebCommand::SwitchBuffer { ref buffer_id }
+                                    | WebCommand::SwitchBufferLocal { ref buffer_id } = cmd {
                                     active_buffer_id = Some(buffer_id.clone());
                                 }
                                 if state.web_cmd_tx.send((cmd, session_id.clone())).await.is_err() {
@@ -195,6 +196,7 @@ fn build_sync_init_from_snapshot(state: &AppHandle, active_buffer_id: Option<Str
             typing: snap.typing.clone(),
             statusbar_items: snap.statusbar_items.clone(),
             statusbar_enabled: snap.statusbar_enabled,
+            keyboard: snap.keyboard.clone(),
         };
     }
     // Fallback: empty init.
@@ -210,6 +212,7 @@ fn build_sync_init_from_snapshot(state: &AppHandle, active_buffer_id: Option<Str
         typing: std::collections::HashMap::new(),
         statusbar_items: crate::web::snapshot::statusbar_item_names(&statusbar),
         statusbar_enabled: statusbar.enabled,
+        keyboard: crate::keybindings::KeyboardConfig::default(),
     }
 }
 

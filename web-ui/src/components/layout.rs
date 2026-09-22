@@ -17,6 +17,7 @@ use crate::state::AppState;
 #[component]
 pub fn Layout() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
+    crate::bindings::install(state);
 
     // Auto-fetch messages and nick list whenever active buffer changes
     // or after a resync (lag recovery / reconnect clears backlog_loaded).

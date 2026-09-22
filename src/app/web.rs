@@ -1,6 +1,11 @@
 use super::App;
 
 impl App {
+    pub(crate) fn publish_keyboard_bindings(&self) {
+        self.refresh_web_state_snapshot();
+        self.broadcast_web(crate::web::protocol::WebEvent::KeyboardBindingsChanged { keyboard: self.config.keyboard.clone() });
+    }
+
     fn prepare_web_image_extractors(&mut self) {
         let secret = if self.config.web.session_secret.is_empty() {
             vec![0u8; 32]
@@ -70,7 +75,10 @@ impl App {
     }
 
     /// Broadcast a `WebEvent` to all connected web clients.
-    pub(crate) fn broadcast_web(&self, event: crate::web::protocol::WebEvent) {
+    pub(crate) fn broadcast_web(&self, mut event: crate::web::protocol::WebEvent) {
+        if let crate::web::protocol::WebEvent::ActivityChanged { buffer_id, activity_order, .. } = &mut event {
+            *activity_order = self.state.activity_order_for(buffer_id);
+        }
         let _ = self.web_broadcaster.send(event);
     }
 
@@ -161,6 +169,7 @@ impl App {
                     &self.config.statusbar,
                 ),
                 statusbar_enabled: self.config.statusbar.enabled,
+                keyboard: self.config.keyboard.clone(),
             },
         ));
         self.web_state_snapshot = Some(std::sync::Arc::clone(&snapshot));
@@ -381,6 +390,7 @@ impl App {
             snap.typing = typing;
             snap.statusbar_items = statusbar_items;
             snap.statusbar_enabled = statusbar_enabled;
+            snap.keyboard.clone_from(&self.config.keyboard);
         }
     }
 
@@ -552,6 +562,7 @@ impl App {
             return;
         }
 
+        let local_switch = matches!(&cmd, WebCommand::SwitchBufferLocal { .. });
         match cmd {
             WebCommand::WebPush(request) => self.handle_webpush_request(&request, session_id),
             WebCommand::UploadFile { submission } => {
@@ -596,7 +607,8 @@ impl App {
                     sent_message,
                 );
             }
-            WebCommand::SwitchBuffer { buffer_id } => {
+            WebCommand::SwitchBuffer { buffer_id }
+            | WebCommand::SwitchBufferLocal { buffer_id } => {
                 if self.state.web_history_buffers.get(session_id).is_some_and(|id| id != &buffer_id) {
                     self.release_web_history(session_id);
                 }
@@ -613,7 +625,7 @@ impl App {
                     .buffers
                     .get(&buffer_id)
                     .is_some_and(|b| b.buffer_type == crate::state::buffer::BufferType::Shell);
-                if !is_shell {
+                if !is_shell && !local_switch {
                     self.state.set_active_buffer(&buffer_id);
                 }
                 // Per-session tracking is always needed for shell input/screen
@@ -899,7 +911,7 @@ impl App {
             return;
         }
         self.state.clear_visible_activity(buffer_id);
-        self.broadcast_web(crate::web::protocol::WebEvent::ActivityChanged {
+        self.broadcast_web(crate::web::protocol::WebEvent::ActivityChanged { activity_order: None,
             buffer_id: buffer_id.to_string(),
             activity: 0,
             unread_count: 0,
@@ -1107,6 +1119,26 @@ mod command_context_tests {
     use crate::irc::{IrcHandle, IrcSender};
     use crate::state::buffer::{Buffer, BufferType};
     use crate::web::protocol::{WebCommand, WebEvent};
+
+    #[tokio::test]
+    async fn bound_web_navigation_preserves_other_clients() {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        for name in ["#one", "#two", "#three"] {
+            app.state.add_buffer(Buffer::for_test("net", BufferType::Channel, name));
+        }
+        app.state.set_active_buffer("net/#one");
+        app.confirm_web_buffer("other", "net/#three");
+        app.drain_pending_web_events();
+        let mut receiver = app.web_broadcaster.subscribe();
+        app.handle_web_command(WebCommand::SwitchBufferLocal {
+            buffer_id: "net/#two".into(),
+        }, "browser");
+        app.drain_pending_web_events();
+        assert_eq!(app.state.active_buffer_id.as_deref(), Some("net/#one"));
+        assert_eq!(app.web_active_buffers["browser"], "net/#two");
+        assert_eq!(app.web_active_buffers["other"], "net/#three");
+        assert!(receiver.try_recv().is_err());
+    }
 
     #[tokio::test]
     async fn removed_web_conversation_never_falls_back_to_another_network() {

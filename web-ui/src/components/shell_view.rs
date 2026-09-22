@@ -509,14 +509,14 @@ fn ansi_index_to_rgb(idx: u8) -> u32 {
     }
 }
 
-fn base64_encode(bytes: &[u8]) -> String {
+pub(crate) fn base64_encode(bytes: &[u8]) -> String {
     let binary: String = bytes.iter().map(|&b| b as char).collect();
     web_sys::window()
         .and_then(|w| w.btoa(&binary).ok())
         .unwrap_or_default()
 }
 
-fn key_event_to_bytes(ev: &KeyboardEvent) -> Vec<u8> {
+pub(crate) fn key_event_to_bytes(ev: &KeyboardEvent) -> Vec<u8> {
     let key = ev.key();
     let ctrl = ev.ctrl_key();
     let alt = ev.alt_key();

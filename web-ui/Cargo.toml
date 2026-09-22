@@ -11,7 +11,7 @@ serde_json = "1.0"
 web-sys = { version = "0.3", features = [
     "WebSocket", "CustomEvent", "MessageEvent", "ErrorEvent", "CloseEvent",
     "Location", "Window", "Storage", "Document", "Element", "HtmlElement",
-    "HtmlDocument", "HtmlInputElement", "HtmlTextAreaElement", "KeyboardEvent",
+    "KeyboardEventInit", "HtmlDocument", "HtmlInputElement", "HtmlTextAreaElement", "KeyboardEvent",
     "HtmlCanvasElement", "File", "FileList", "Blob",
     "Clipboard", "Navigator", "FontFaceSet", "FontFaceSetLoadStatus",
     "ClipboardEvent", "DataTransfer",

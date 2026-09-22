@@ -51,9 +51,18 @@ bindings apply; other input goes to the PTY. A standalone Escape goes to the
 PTY immediately, so use Alt navigation while a shell owns input. The terminal shim reserves
 Ctrl+backslash, Ctrl+4 and Ctrl+Z for detach. Detach clears incomplete sequences.
 
-The initial integration applies to TUI input. Browser execution is implemented
-in the subsequent integration stage; configuring bindings from a browser still
-updates the shared saved configuration.
+TUI and WWW share the saved configuration. Browser key sequences and bound
+window navigation belong to the initiating browser session; they do not move
+another browser or the terminal. Binding changes are delivered to connected
+browsers immediately. Commands use the initiating browser's current window.
+
+Browser and operating-system shortcuts can prevent key events from reaching
+the page. Command-key shortcuts on macOS are left to the browser. Where Alt is
+reserved, use Escape followed by the key, or choose another binding. Bindings
+do not intercept other form fields, open modals, or IME composition. Paste
+cancels a pending sequence before inserting text. Browser shell input uses
+only navigation bindings, with a bare Escape forwarded immediately.
+`refresh_screen` has no effect in WWW because the browser paints the interface.
 
 ## Examples
 

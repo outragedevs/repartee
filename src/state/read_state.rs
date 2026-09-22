@@ -235,7 +235,7 @@ impl AppState {
             self.activity_order.remove(buffer_id);
         }
         self.pending_web_events
-            .push(crate::web::protocol::WebEvent::ActivityChanged {
+            .push(crate::web::protocol::WebEvent::ActivityChanged { activity_order: None,
                 buffer_id: buffer_id.to_string(),
                 activity: buffer.activity as u8,
                 unread_count: buffer.unread_count,

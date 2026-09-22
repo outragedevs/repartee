@@ -76,6 +76,7 @@ pub fn cmd_bind(app: &mut App, args: &[String]) {
         return;
     }
     app.config.keyboard = draft.keyboard;
+    app.publish_keyboard_bindings();
     add_local_event(app, "Keyboard binding saved");
 }
 
