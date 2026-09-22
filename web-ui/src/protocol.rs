@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 pub enum WebEvent {
     SettingsSnapshot { #[serde(default)] scope: crate::settings_model::SettingsScope, fields: Vec<crate::settings_model::SettingField>, session_id: String },
     SettingsSaved { error: Option<String>, session_id: String },
+    KeyboardBindingsChanged { keyboard: crate::keybindings::KeyboardConfig },
     SyncInit {
+        #[serde(default)]
+        keyboard: crate::keybindings::KeyboardConfig,
         buffers: Vec<BufferMeta>,
         connections: Vec<ConnectionMeta>,
         mention_count: u32,
@@ -107,6 +110,8 @@ pub enum WebEvent {
         buffer_id: String,
     },
     ActivityChanged {
+        #[serde(default)]
+        activity_order: Option<u64>,
         buffer_id: String,
         activity: u8,
         unread_count: u32,
@@ -220,6 +225,7 @@ pub enum WebCommand {
     SwitchBuffer {
         buffer_id: String,
     },
+    SwitchBufferLocal { buffer_id: String },
     Presence { present: bool },
     MarkRead {
         buffer_id: String,
@@ -327,6 +333,8 @@ pub struct SaveServerCmd {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BufferMeta {
+    #[serde(default)]
+    pub activity_order: Option<u64>,
     pub id: String,
     pub connection_id: String,
     pub name: String,

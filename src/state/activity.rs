@@ -62,6 +62,8 @@ impl AppState {
         }
     }
 
+    pub fn activity_order_for(&self, buffer_id: &str) -> Option<u64> { self.activity_order.get(buffer_id).copied() }
+
     pub fn next_activity_buffer(&self) -> Option<String> {
         self.buffers
             .values()
@@ -102,6 +104,22 @@ mod tests {
     fn deliver(state: &mut AppState, id: &str, level: ActivityLevel) {
         let message = make_test_message(state, "activity");
         state.add_transient_message_with_activity(id, message, level);
+    }
+
+    #[test]
+    fn created_unread_buffers_publish_the_registered_activity_order() {
+        let mut state = state();
+        state.pending_web_events.clear();
+        for name in ["#z-first", "#a-second", "#z-first"] {
+            let mut buffer = Buffer::for_test("net", BufferType::Channel, name);
+            buffer.activity = ActivityLevel::Activity;
+            state.add_buffer(buffer);
+            let Some(crate::web::protocol::WebEvent::BufferCreated { buffer, .. }) =
+                state.pending_web_events.last() else { panic!("missing created event") };
+            assert!(buffer.activity_order.is_some());
+            assert_eq!(buffer.activity_order, state.activity_order_for(&buffer.id));
+        }
+        assert_eq!(state.next_activity_buffer().as_deref(), Some("net/#a-second"));
     }
 
     #[test]

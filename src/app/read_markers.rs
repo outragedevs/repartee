@@ -210,7 +210,7 @@ impl App {
                     || buffer.activity != crate::state::buffer::ActivityLevel::None
             }) {
                 self.state.clear_visible_activity(&buffer_id);
-                self.broadcast_web(crate::web::protocol::WebEvent::ActivityChanged {
+                self.broadcast_web(crate::web::protocol::WebEvent::ActivityChanged { activity_order: None,
                     buffer_id,
                     activity: 0,
                     unread_count: 0,

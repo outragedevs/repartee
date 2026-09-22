@@ -116,6 +116,7 @@ pub(super) fn warn_flood_reconnect(app: &mut App) {
 
 #[expect(clippy::too_many_lines)]
 pub fn apply_setting_runtime(app: &mut App, path: &str, raw: &str) {
+    if path == "keyboard.key_timeout" { app.publish_keyboard_bindings(); }
     let ev = super::helpers::add_local_event;
     // Hot restart web server when lifecycle settings change.
     if matches!(

@@ -41,6 +41,7 @@ pub struct WebStateSnapshot {
     pub statusbar_items: Vec<String>,
     /// `statusbar.enabled` — `false` means the browser renders no status line.
     pub statusbar_enabled: bool,
+    pub keyboard: crate::keybindings::KeyboardConfig,
 }
 
 /// Shared state passed to all axum handlers.

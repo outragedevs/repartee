@@ -158,6 +158,7 @@ pub(crate) fn apply_reloaded_config(app: &mut App, new_config: crate::config::Ap
     }
     app.web_restart_pending |= app.config.web.requires_restart(&new_config.web);
     app.config = new_config;
+    app.publish_keyboard_bindings();
     app.cached_config_toml = None;
     app.inline_previews.invalidate_layout();
     for (path, value) in runtime_changes {
@@ -1997,6 +1998,27 @@ mod server_add_tests {
 mod translate_reload_tests {
     use crate::app::input::submit_typing_tests::test_app;
     use crate::config::{TranslateAiConfig, TranslateAiModelConfig, TranslateBufferConfig};
+
+    #[test]
+    fn reload_restores_saved_bindings_and_publishes_deleted_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let env_path = temp.path().join(".env");
+        std::fs::write(&env_path, "").unwrap();
+        let mut app = test_app();
+        app.config_path = path.clone();
+        crate::commands::handlers_bind::cmd_bind(&mut app, &["meta-q key win1".into()]);
+        crate::commands::handlers_bind::cmd_bind(&mut app, &["-delete meta-a".into()]);
+        let saved = app.config.keyboard.clone();
+        let mut restarted = test_app();
+        let mut events = restarted.web_broadcaster.subscribe();
+        super::reload_from_paths(&mut restarted, &path, &env_path);
+        assert_eq!(restarted.config.keyboard, saved);
+        assert!(!restarted.config.keyboard.effective().contains_key("meta-a"));
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
+            matches!(event, crate::web::protocol::WebEvent::KeyboardBindingsChanged { keyboard } if keyboard == saved)
+        }));
+    }
 
     #[test]
     fn reload_applies_dcc_spellcheck_mentions_and_web_settings() {

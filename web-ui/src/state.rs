@@ -108,6 +108,7 @@ pub struct AppState {
     pub buffers: RwSignal<Vec<BufferMeta>>,
     pub connections: RwSignal<Vec<ConnectionMeta>>,
     pub active_buffer: RwSignal<Option<String>>,
+    pub keyboard: RwSignal<crate::keybindings::KeyboardConfig>,
     pub messages: RwSignal<HashMap<String, Vec<WireMessage>>>,
     pub nick_lists: RwSignal<HashMap<String, Vec<WireNick>>>,
     pub nick_lists_loaded: RwSignal<HashSet<String>>,
@@ -257,6 +258,7 @@ impl AppState {
             buffers: RwSignal::new(Vec::new()),
             connections: RwSignal::new(Vec::new()),
             active_buffer: RwSignal::new(None),
+            keyboard: RwSignal::new(crate::keybindings::KeyboardConfig::default()),
             messages: RwSignal::new(HashMap::new()),
             nick_lists: RwSignal::new(HashMap::new()),
             nick_lists_loaded: RwSignal::new(HashSet::new()),
@@ -368,7 +370,9 @@ impl AppState {
     /// Handle a WebEvent from the server, updating signals accordingly.
     pub fn handle_event(&self, event: WebEvent) {
         match event {
+            WebEvent::KeyboardBindingsChanged { keyboard } => self.keyboard.set(keyboard),
             WebEvent::SyncInit {
+                keyboard,
                 buffers,
                 connections,
                 mention_count,
@@ -396,6 +400,7 @@ impl AppState {
                 // sends nothing and `paused` is sent once and then sits for 30s.
                 // Blanking here left a reconnecting tab with no indicator for up
                 // to that long while the TUI showed it the whole time.
+                self.keyboard.set(keyboard);
                 self.typing.set(typing);
                 self.statusbar_items.set(statusbar_items);
                 self.statusbar_enabled.set(statusbar_enabled);
@@ -563,6 +568,7 @@ impl AppState {
                 });
             }
             WebEvent::ActivityChanged {
+                activity_order,
                 buffer_id,
                 activity,
                 unread_count,
@@ -570,6 +576,7 @@ impl AppState {
                 self.buffers.update(|bufs| {
                     if let Some(b) = bufs.iter_mut().find(|b| b.id == buffer_id) {
                         b.activity = activity;
+                        b.activity_order = activity_order;
                         b.unread_count = unread_count;
                     }
                 });
@@ -1055,10 +1062,10 @@ impl AppState {
 /// (never re-derive `idx + 1` locally), so "Act: 4" always names the window
 /// the list labels "4.".
 pub fn numbered_buffers(buffers: &[BufferMeta]) -> impl Iterator<Item = (u32, &BufferMeta)> {
-    buffers
-        .iter()
-        .enumerate()
-        .map(|(idx, b)| (u32::try_from(idx + 1).unwrap_or(u32::MAX), b))
+    buffers.iter().scan(0u32, |number, buffer| {
+        let index = if buffer.connection_id == "_default" { 0 } else { *number = number.saturating_add(1); *number };
+        Some((index, buffer))
+    })
 }
 
 /// Trim the buffer to `cap`, dropping oldest from the head. Returns `true` if it
@@ -1410,6 +1417,26 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_configuration_updates_live_and_survives_initial_sync() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = headless_state();
+            let mut keyboard = crate::keybindings::KeyboardConfig::default();
+            keyboard.remove("meta-a");
+            keyboard.set("meta-q", crate::keybindings::Binding::new("change_window", "12")).unwrap();
+            state.handle_event(WebEvent::KeyboardBindingsChanged { keyboard: keyboard.clone() });
+            assert_eq!(state.keyboard.get_untracked(), keyboard);
+            let event = serde_json::json!({
+                "type": "SyncInit", "buffers": [], "connections": [], "mention_count": 0,
+                "keyboard": keyboard
+            });
+            state.keyboard.set(crate::keybindings::KeyboardConfig::default());
+            state.handle_event(serde_json::from_value(event).unwrap());
+            assert_eq!(state.keyboard.get_untracked(), keyboard);
+        });
+    }
+
+    #[test]
     fn clear_discards_all_cached_rows_only_in_the_target_buffer() {
         let state = headless_state();
         state.active_buffer.set(Some("net/#test".into()));
@@ -1654,6 +1681,7 @@ mod tests {
             typing: HashMap::new(),
             statusbar_items: Vec::new(),
             statusbar_enabled: true,
+            keyboard: crate::keybindings::KeyboardConfig::default(),
         });
 
         assert!(state.typing.get_untracked().is_empty());

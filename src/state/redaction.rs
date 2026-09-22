@@ -756,7 +756,7 @@ mod tests {
         assert_eq!(app.state.buffers["one/#a"].activity, super::super::buffer::ActivityLevel::Events);
         assert_eq!(app.state.buffers["one/#a"].unread_count, 1);
         assert!(app.state.pending_web_events.iter().any(|event| matches!(event,
-            crate::web::protocol::WebEvent::ActivityChanged { buffer_id, activity: 1, unread_count: 1 } if buffer_id == "one/#a")));
+            crate::web::protocol::WebEvent::ActivityChanged { buffer_id, activity: 1, unread_count: 1, .. } if buffer_id == "one/#a")));
     }
 
     #[tokio::test]

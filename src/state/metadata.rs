@@ -116,7 +116,7 @@ impl AppState {
                     let removed_unread = buffer.messages.iter().rev().take(buffer.unread_count as usize).filter(|message| ids.contains(&message.id)).count();
                     buffer.unread_count = buffer.unread_count.saturating_sub(u32::try_from(removed_unread).unwrap_or(u32::MAX));
                     if buffer.unread_count == 0 { buffer.activity = super::buffer::ActivityLevel::None; }
-                    self.pending_web_events.push(crate::web::protocol::WebEvent::ActivityChanged {
+                    self.pending_web_events.push(crate::web::protocol::WebEvent::ActivityChanged { activity_order: None,
                         buffer_id: buffer_id.clone(), activity: buffer.activity as u8, unread_count: buffer.unread_count,
                     });
                 }

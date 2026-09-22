@@ -417,7 +417,7 @@ async fn blocking_inviter_recomputes_remaining_server_activity() {
     assert_eq!(app.state.buffers[id].activity, ActivityLevel::Activity);
     assert_eq!(app.state.buffers[id].unread_count, 1);
     assert!(std::iter::from_fn(|| web.try_recv().ok()).any(|event| matches!(event,
-        crate::web::protocol::WebEvent::ActivityChanged { buffer_id, activity, unread_count }
+        crate::web::protocol::WebEvent::ActivityChanged { buffer_id, activity, unread_count, .. }
         if buffer_id == id && activity == ActivityLevel::Activity as u8 && unread_count == 1)));
     app.state.set_active_buffer(id);
     assert_eq!(app.state.buffers[id].unread_count, 0);
