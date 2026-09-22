@@ -11,6 +11,8 @@
 mod app;
 mod commands;
 mod config;
+#[path = "../shared/keybindings.rs"]
+mod keybindings;
 #[path = "../shared/settings.rs"]
 mod settings_model;
 mod constants;

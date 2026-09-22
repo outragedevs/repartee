@@ -24,6 +24,12 @@ use super::types::{CommandCategory, CommandDef};
 
 static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
     vec![
+        ("bind", CommandDef {
+            handler: super::handlers_bind::cmd_bind,
+            description: "List or configure keyboard bindings",
+            aliases: &[],
+            category: CommandCategory::Configuration,
+        }),
         ("account", CommandDef {
             handler: crate::app::account_registration::command,
             description: "Register or verify an upstream IRC account",

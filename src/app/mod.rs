@@ -21,6 +21,7 @@ mod oauthbearer_fixture;
 #[cfg(test)]
 mod filehost_browser_fixture;
 pub mod input;
+mod bindings;
 mod irc;
 mod irc_dispatch;
 mod labels;
@@ -445,7 +446,7 @@ pub struct App {
     pub(crate) forwarder_handles: HashMap<String, tokio::task::JoinHandle<()>>,
     pub irc_tx: mpsc::Sender<IrcEvent>,
     pub(crate) irc_rx: mpsc::Receiver<IrcEvent>,
-    pub(crate) last_esc_time: Option<Instant>,
+    pub(crate) bindings: bindings::NativeBindings,
     pub buffer_list_scroll: usize,
     pub buffer_list_total: usize,
     pub nick_list_scroll: usize,
@@ -927,7 +928,7 @@ impl App {
             forwarder_handles: HashMap::new(),
             irc_tx,
             irc_rx,
-            last_esc_time: None,
+            bindings: bindings::NativeBindings::default(),
             buffer_list_scroll: 0,
             buffer_list_total: 0,
             nick_list_scroll: 0,
@@ -1554,7 +1555,14 @@ impl App {
                     .reset(tokio::time::Instant::now() + next);
             }
 
+            let binding_deadline = self.binding_deadline();
             tokio::select! {
+                () = async {
+                    match binding_deadline {
+                        Some(deadline) => tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.tick_bindings(),
                 () = async {
                     match output_drained {
                         Some(notify) => notify.notified().await,

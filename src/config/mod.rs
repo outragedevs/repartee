@@ -92,6 +92,7 @@ pub struct AppConfig {
     pub image_preview: ImagePreviewConfig,
     pub servers: HashMap<String, ServerConfig>,
     pub aliases: HashMap<String, String>,
+    pub keyboard: crate::keybindings::KeyboardConfig,
     pub ignores: Vec<IgnoreEntry>,
     pub scripts: ScriptsConfig,
     pub logging: LoggingConfig,
@@ -123,6 +124,7 @@ impl Default for AppConfig {
             image_preview: ImagePreviewConfig::default(),
             servers: HashMap::new(),
             aliases: HashMap::new(),
+            keyboard: crate::keybindings::KeyboardConfig::default(),
             ignores: Vec::new(),
             scripts: ScriptsConfig::default(),
             logging: LoggingConfig::default(),
@@ -1036,6 +1038,7 @@ pub fn load_config(path: &Path) -> Result<AppConfig> {
     match std::fs::read_to_string(path) {
         Ok(content) => {
             let config: AppConfig = toml::from_str(&content)?;
+            config.keyboard.compile().map_err(|error| color_eyre::eyre::eyre!(error))?;
             Ok(config)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(default_config()),

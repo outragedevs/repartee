@@ -65,11 +65,15 @@ pub fn parse_command(input: &str) -> Option<ParsedCommand> {
     // Greediness is a property of the command, not of the spelling used to
     // reach it, so resolve built-in aliases before deciding.
     let canonical = super::registry::resolve_alias(&command).unwrap_or(command.as_str());
-    let rest = if canonical == "shell" {
+    let rest = if matches!(canonical, "shell" | "bind") {
         rest.trim_start()
     } else {
         rest.trim()
     };
+
+    if canonical == "bind" {
+        return Some(ParsedCommand { name: command, args: vec![rest.to_string()] });
+    }
 
     if canonical == "items" {
         let head_count = match rest.split_whitespace().next() {
