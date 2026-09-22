@@ -261,6 +261,14 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v2.1.2
+
+- **Safer IRC command handling.** Channel-sensitive commands now require the correct context, preserve complete reason text and literal arguments, handle IPv6 endpoints and LINKS masks correctly, and apply network casemapping when reusing query buffers.
+- **More reliable DCC chat.** DCC offers, replies, echoes, routing, advertised addresses, peer validation, and transport cleanup now remain scoped to the intended network and session, with stricter validation for addresses and port ranges.
+- **Stronger configuration and reload behavior.** Failed saves roll back cleanly and report errors, runtime reloads update active settings and web-server lifecycle state, credentials survive failed reloads, and themes are validated before being stored.
+- **Hardened E2E, history, and logs.** Imported encryption keys are validated and reflected in live state, incoming trust is accepted in the recipient context, encrypted searches keep the newest matches, and log-status database failures are surfaced instead of silently hidden.
+- **Consistent terminal and web interactions.** Browser commands and settings wizards target the correct buffer and network, clears synchronize with pending history, spellcheck results return to their originating buffer, alias expansion respects command boundaries, and statusbar item values preserve their complete text.
+
 ### v2.1.1
 
 - **Shared settings panels for terminal and web.** A complete settings interface now exposes validated drafts, section resets, inherited values, pending-save protection, mouse controls, and browser-local settings consistently in both clients. Redesigned modals add network tabs and structured collection editors without losing unsaved browser drafts across reconnects.
