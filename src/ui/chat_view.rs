@@ -165,8 +165,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         let seek_target = app
             .highlight_seek
             .as_ref()
-            .filter(|seek| seek.buffer_id == buf.id && seek.scroll_offset.is_none())
-            .map(|seek| seek.message_id)
+            .and_then(|seek| seek.pending_target(&buf.id, app.scroll_offset))
             .filter(|id| buf.messages.iter().any(|msg| msg.id == *id));
         let mut seek_pending = seek_target.is_some();
         let mut visual_lines: VecDeque<Line<'_>> = VecDeque::new();
@@ -262,7 +261,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         if seek_target.is_some()
             && let Some(seek) = app.highlight_seek.as_mut()
         {
-            seek.scroll_offset = Some(scroll);
+            seek.shown_at(scroll);
+        } else if app.highlight_seek.as_ref().is_some_and(crate::app::highlight_seek::HighlightSeek::is_pending) {
+            // The view moved after the seek was requested, or its message is
+            // gone: the later action wins.
+            app.highlight_seek = None;
         }
         app.chat_scroll_at_top = scroll_pinned_at_top(walked_all, scroll, total, visible_height);
 

@@ -254,7 +254,10 @@ impl App {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn execute_binding(&mut self, binding: &Binding) {
+    pub(super) fn execute_binding(&mut self, binding: &Binding) {
+        if binding.action.starts_with("scroll_") {
+            self.cancel_pending_highlight_seek();
+        }
         let direct_key = match binding.action.as_str() {
             "backward_character" => Some(KeyCode::Left),
             "forward_character" => Some(KeyCode::Right),

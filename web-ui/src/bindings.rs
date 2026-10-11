@@ -295,7 +295,7 @@ fn seek_highlight(state: AppState, forward: bool) {
         (element.get_bounding_client_rect().top() - container_top) as i32 + view_top
     };
     let anchor = SEEK_ANCHOR
-        .with(|anchor| anchor.borrow_mut().take())
+        .with(|anchor| anchor.borrow().clone())
         .filter(|(_, top)| *top == view_top)
         .and_then(|(mid, _)| {
             container
@@ -328,9 +328,15 @@ fn seek_highlight(state: AppState, forward: bool) {
             SEEK_ANCHOR.with(|anchor| *anchor.borrow_mut() = Some((mid, top)));
         }
     } else if forward {
+        SEEK_ANCHOR.with(|anchor| *anchor.borrow_mut() = None);
         state
             .scroll_mode
             .set(crate::state::ScrollMode::FollowingTail);
+        // Same as "Jump to latest message": collapse the pinned backlog window,
+        // which the scroll handler skips while already following the tail.
+        if let Some(id) = state.active_buffer.get_untracked() {
+            state.collapse_backlog(&id);
+        }
         container.set_scroll_top(container.scroll_height());
     }
 }

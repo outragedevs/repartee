@@ -10,15 +10,45 @@ pub enum SeekDirection {
     Next,
 }
 
-/// The highlight the last seek targeted. `scroll_offset` is `None` until the
-/// chat renderer has scrolled it into view, then records the resulting offset;
-/// the seek stays the anchor for the next one only while the view is still
-/// there, so any manual scrolling falls back to the visible edges.
+/// The highlight the last seek targeted. It stays the anchor for the next seek
+/// only while the view has not been scrolled by anything else, so manual
+/// scrolling falls back to the visible edges.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HighlightSeek {
-    pub buffer_id: String,
-    pub message_id: u64,
-    pub scroll_offset: Option<usize>,
+    buffer_id: String,
+    message_id: u64,
+    state: SeekState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeekState {
+    /// Waiting for the chat renderer, which knows the wrapped line counts, to
+    /// scroll the target into view. Requested at this scroll offset.
+    Pending { from: usize },
+    /// The renderer placed the target at this scroll offset.
+    Shown { offset: usize },
+}
+
+impl HighlightSeek {
+    fn anchors(&self, buffer_id: &str, scroll_offset: usize) -> bool {
+        let (SeekState::Pending { from: offset } | SeekState::Shown { offset }) = self.state;
+        self.buffer_id == buffer_id && offset == scroll_offset
+    }
+
+    /// Message the renderer should scroll to, unless the view moved since the
+    /// seek was requested.
+    pub fn pending_target(&self, buffer_id: &str, scroll_offset: usize) -> Option<u64> {
+        (matches!(self.state, SeekState::Pending { .. }) && self.anchors(buffer_id, scroll_offset))
+            .then_some(self.message_id)
+    }
+
+    pub const fn is_pending(&self) -> bool {
+        matches!(self.state, SeekState::Pending { .. })
+    }
+
+    pub const fn shown_at(&mut self, offset: usize) {
+        self.state = SeekState::Shown { offset };
+    }
 }
 
 impl App {
@@ -34,12 +64,7 @@ impl App {
         let anchor = self
             .highlight_seek
             .as_ref()
-            .filter(|seek| {
-                seek.buffer_id == buffer.id
-                    && seek
-                        .scroll_offset
-                        .is_none_or(|offset| offset == self.scroll_offset)
-            })
+            .filter(|seek| seek.anchors(&buffer.id, self.scroll_offset))
             .and_then(|seek| index_of(seek.message_id));
         let target = match direction {
             SeekDirection::Previous => {
@@ -74,7 +99,9 @@ impl App {
                 self.highlight_seek = Some(HighlightSeek {
                     buffer_id: buffer.id.clone(),
                     message_id: messages[index].id,
-                    scroll_offset: None,
+                    state: SeekState::Pending {
+                        from: self.scroll_offset,
+                    },
                 });
             }
             None if direction == SeekDirection::Next => {
@@ -83,6 +110,14 @@ impl App {
                 self.collapse_backlog_if_at_bottom();
             }
             None => {}
+        }
+    }
+
+    /// Explicit scroll actions decide the view, so they drop a seek that the
+    /// renderer has not applied yet.
+    pub(crate) fn cancel_pending_highlight_seek(&mut self) {
+        if self.highlight_seek.as_ref().is_some_and(HighlightSeek::is_pending) {
+            self.highlight_seek = None;
         }
     }
 }
@@ -134,6 +169,10 @@ mod tests {
         app
     }
 
+    fn target(app: &App) -> u64 {
+        app.highlight_seek.as_ref().unwrap().message_id
+    }
+
     fn visible(app: &App) -> (u64, u64) {
         let rows = app.chat_rows.as_ref().unwrap();
         (
@@ -157,13 +196,13 @@ mod tests {
         assert!((top..=bottom).contains(&10), "{top}..{bottom}");
         app.seek_highlight(SeekDirection::Previous);
         render(&mut app);
-        assert_eq!(app.highlight_seek.as_ref().unwrap().message_id, 10);
+        assert_eq!(target(&app), 10);
         app.seek_highlight(SeekDirection::Next);
         render(&mut app);
-        assert_eq!(app.highlight_seek.as_ref().unwrap().message_id, 40);
+        assert_eq!(target(&app), 40);
         app.seek_highlight(SeekDirection::Next);
         render(&mut app);
-        assert_eq!(app.highlight_seek.as_ref().unwrap().message_id, 99);
+        assert_eq!(target(&app), 99);
         app.seek_highlight(SeekDirection::Next);
         render(&mut app);
         assert!(app.highlight_seek.is_none());
@@ -176,14 +215,33 @@ mod tests {
         let mut app = app_with(&[10, 40, 70]);
         app.seek_highlight(SeekDirection::Previous);
         render(&mut app);
-        assert_eq!(app.highlight_seek.as_ref().unwrap().message_id, 70);
+        assert_eq!(target(&app), 70);
         app.scroll_offset += 40;
         render(&mut app);
         let (top, _) = visible(&app);
         assert!(top < 40);
         app.seek_highlight(SeekDirection::Previous);
         render(&mut app);
-        assert_eq!(app.highlight_seek.as_ref().unwrap().message_id, 10);
+        assert_eq!(target(&app), 10);
+    }
+
+    #[test]
+    fn a_later_scroll_before_the_redraw_wins_over_a_pending_seek() {
+        let mut app = app_with(&[10, 40, 70]);
+        app.execute_binding(&crate::keybindings::Binding::new(
+            "multi",
+            "seek_previous_highlight;scroll_end",
+        ));
+        render(&mut app);
+        assert_eq!(app.scroll_offset, 0);
+        assert_eq!(visible(&app).1, 100);
+        assert!(app.highlight_seek.is_none());
+
+        app.seek_highlight(SeekDirection::Previous);
+        app.scroll_offset += 10;
+        render(&mut app);
+        assert_eq!(app.scroll_offset, 10);
+        assert!(app.highlight_seek.is_none());
     }
 
     #[test]
