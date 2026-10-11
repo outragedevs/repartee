@@ -304,7 +304,8 @@ fn seek_highlight(state: AppState, forward: bool) {
                 .flatten()
         })
         .map(|element| offset(&element));
-    let Ok(nodes) = container.query_selector_all(".chat-line.mention") else {
+    // The mentions window renders its (all highlighted) lines as `mention-log`.
+    let Ok(nodes) = container.query_selector_all(".chat-line.mention, .chat-line.mention-log") else {
         return;
     };
     let mentions: Vec<web_sys::Element> = (0..nodes.length())
@@ -315,8 +316,16 @@ fn seek_highlight(state: AppState, forward: bool) {
         let from = anchor.map_or(view_top.saturating_add(view_height), |top| top.saturating_add(1));
         mentions.into_iter().find(|element| offset(element) >= from)
     } else {
-        let before = anchor.unwrap_or(view_top);
-        mentions.into_iter().rev().find(|element| offset(element) < before)
+        // Without an anchor, a highlight crossing the top edge is visible and
+        // does not count as above the view.
+        #[allow(clippy::cast_possible_truncation)]
+        let bottom = |element: &web_sys::Element| {
+            offset(element).saturating_add(element.get_bounding_client_rect().height() as i32)
+        };
+        mentions.into_iter().rev().find(|element| match anchor {
+            Some(top) => offset(element) < top,
+            None => bottom(element) <= view_top,
+        })
     };
     if let Some(element) = target {
         state
