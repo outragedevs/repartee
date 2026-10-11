@@ -641,6 +641,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn entering_by_command_keeps_the_loaded_history_in_view() {
+        let mut harness = Harness::new(20);
+        harness.app.state.buffers.get_mut("net/#chan").unwrap().pin_backlog = true;
+        harness.app.scroll_offset = 10;
+        harness.frame();
+        for ch in "/bare".chars() {
+            harness.key(KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        harness.key(KeyCode::Enter, KeyModifiers::NONE);
+        let start = harness.start();
+        assert!(start.is_some());
+        assert_eq!(harness.app.scroll_offset, 0);
+        harness.app.collapse_backlog_if_at_bottom();
+        assert!(harness.app.state.buffers["net/#chan"].pin_backlog);
+        harness.frame();
+        assert_eq!(harness.start(), start);
+    }
+
+    #[tokio::test]
     async fn an_opened_dialog_ends_the_bare_display() {
         let mut harness = Harness::new(20);
         harness.app.config.emotes.enabled = true;
