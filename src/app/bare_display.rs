@@ -69,6 +69,13 @@ impl BareView {
         Self { placed, messages }
     }
 
+    /// The last of `count` messages is on screen in full.
+    fn shows_end(&self, count: usize, (cols, rows): (usize, usize)) -> bool {
+        self.placed.last().is_some_and(|(index, row)| {
+            *index + 1 == count && row + self.messages[index].rows(cols) <= rows
+        })
+    }
+
     fn output(&self, (cols, rows): (usize, usize)) -> Vec<u8> {
         bare_view::render(
             self.placed
@@ -300,7 +307,7 @@ impl App {
             return None;
         }
         let size = self.bare_size();
-        let output = {
+        let (output, at_end) = {
             let bare = self.bare_display.as_mut()?;
             let buffer = self.state.buffers.get(&bare.buffer_id)?;
             let start = message_index(buffer, bare.start);
@@ -308,10 +315,10 @@ impl App {
                 // The top message left the scrollback; the view follows the end.
                 bare.start = None;
             }
-            BareView::new(buffer, start, size, &self.theme, &self.config).output(size)
+            let view = BareView::new(buffer, start, size, &self.theme, &self.config);
+            (view.output(size), view.shows_end(buffer.messages.len(), size))
         };
         let first = self.bare_display.as_ref()?.shown.is_none();
-        let at_end = self.bare_display.as_ref()?.start.is_none();
         if self.bare_display.as_ref()?.shown.as_ref() == Some(&output) {
             self.mark_terminal_read_at_end(at_end);
             return Some(true);

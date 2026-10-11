@@ -1286,6 +1286,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_cut_off_last_message_in_the_bare_display_is_not_read() {
+        let mut app = sending_app();
+        server_message(&mut app, 1123);
+        app.state.set_active_buffer("account/peer");
+        server_message(&mut app, 2456);
+        let id = app.state.buffers["account/peer"].messages.back().unwrap().id;
+        let buffer = app.state.buffers.get_mut("account/peer").unwrap();
+        buffer.messages.back_mut().unwrap().text = "word ".repeat(200);
+        app.terminal = Some(crate::ui::setup_socket_terminal(Box::new(Vec::<u8>::new()), 20, 4).unwrap());
+        app.cached_term_cols = 20;
+        app.cached_term_rows = 4;
+        app.terminal_focused = true;
+        app.toggle_bare_display(None).unwrap();
+        assert!(app.render_terminal_frame());
+        assert_eq!(app.state.buffers["account/peer"].messages.back().unwrap().id, id);
+        assert_ne!(app.state.buffers["account/peer"].unread_count, 0);
+        assert!(app.irc_handles["account"].sender().captured().is_empty());
+    }
+
+    #[tokio::test]
     async fn queries_and_updates_use_legacy_read_when_needed() {
         let mut app = sending_app();
         let conn = app.state.connections.get_mut("account").unwrap();
