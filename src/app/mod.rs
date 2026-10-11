@@ -1793,7 +1793,18 @@ impl App {
                     // the loop picks each emote's frame from it. No
                     // `needs_full_redraw` (that would clear the screen and
                     // flicker); the re-arm above schedules the next tick.
-                    self.emote_anim_clock.advance(self.emote_anim_start.elapsed());
+                    // While earlier output is still on its way to the terminal
+                    // the shown frame is kept; the re-arm retries after the
+                    // next interval instead of queueing more image data.
+                    if self
+                        .socket_output
+                        .as_ref()
+                        .is_some_and(|output| output.drain_clock.backlogged())
+                    {
+                        self.emote_anim_clock.hold();
+                    } else {
+                        self.emote_anim_clock.advance(self.emote_anim_start.elapsed());
+                    }
                 },
                 action = self.script_action_rx.recv() => {
                     if let Some(action) = action {

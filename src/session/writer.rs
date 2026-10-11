@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,21 +23,17 @@ struct DrainTiming {
     queued_at: Option<Instant>,
     last: Option<Duration>,
     terminal_acks: bool,
-    unacked: u64,
-}
-
-impl DrainTiming {
-    fn finish(&mut self) {
-        if let Some(queued_at) = self.queued_at.take() {
-            self.last = Some(queued_at.elapsed());
-        }
-    }
+    sent: u64,
+    acked: u64,
+    /// End offset (in `sent` bytes) and queue time of each unacknowledged flush.
+    in_flight: VecDeque<(u64, Instant)>,
 }
 
 /// Measures how long queued output takes to reach the terminal, so callers can
 /// pace optional redraws to what the link actually delivers. With shim
-/// acknowledgements the measurement ends when the shim has written every byte;
-/// without them it falls back to the local socket accepting the output.
+/// acknowledgements every flush is timed until the shim has written its last
+/// byte, so the measurement keeps updating under a sustained backlog; without
+/// them it falls back to the local socket accepting the output.
 #[derive(Clone, Default)]
 pub struct DrainClock(Arc<Mutex<DrainTiming>>);
 
@@ -47,31 +44,52 @@ impl DrainClock {
 
     fn start(&self, bytes: usize) {
         let mut timing = self.0.lock().unwrap();
-        timing.queued_at.get_or_insert_with(Instant::now);
+        let now = Instant::now();
         if timing.terminal_acks {
-            timing.unacked = timing
-                .unacked
+            timing.sent = timing
+                .sent
                 .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+            let end = timing.sent;
+            timing.in_flight.push_back((end, now));
+        } else {
+            timing.queued_at.get_or_insert(now);
         }
     }
 
     pub fn socket_drained(&self) {
         let mut timing = self.0.lock().unwrap();
-        if !timing.terminal_acks {
-            timing.finish();
+        if !timing.terminal_acks
+            && let Some(queued_at) = timing.queued_at.take()
+        {
+            timing.last = Some(queued_at.elapsed());
         }
     }
 
     pub fn terminal_written(&self, bytes: u64) {
         let mut timing = self.0.lock().unwrap();
-        timing.unacked = timing.unacked.saturating_sub(bytes);
-        if timing.unacked == 0 {
-            timing.finish();
+        timing.acked = timing.acked.saturating_add(bytes).min(timing.sent);
+        while let Some(&(end, queued_at)) = timing.in_flight.front() {
+            if end > timing.acked {
+                break;
+            }
+            timing.in_flight.pop_front();
+            timing.last = Some(queued_at.elapsed());
         }
+        drop(timing);
     }
 
     pub fn last_drain(&self) -> Option<Duration> {
         self.0.lock().unwrap().last
+    }
+
+    /// Output is still on its way to the terminal.
+    pub fn backlogged(&self) -> bool {
+        let timing = self.0.lock().unwrap();
+        if timing.terminal_acks {
+            timing.acked < timing.sent
+        } else {
+            timing.queued_at.is_some()
+        }
     }
 }
 
@@ -246,11 +264,38 @@ mod tests {
         writer.flush().unwrap();
         clock.socket_drained();
         assert_eq!(clock.last_drain(), None);
+        assert!(clock.backlogged());
         std::thread::sleep(Duration::from_millis(20));
-        clock.terminal_written(5);
+        clock.terminal_written(3);
         assert_eq!(clock.last_drain(), None);
-        clock.terminal_written(6);
+        clock.terminal_written(2);
         assert!(clock.last_drain().unwrap() >= Duration::from_millis(20));
+        assert!(clock.backlogged());
+        clock.terminal_written(6);
+        assert!(!clock.backlogged());
+    }
+
+    #[test]
+    fn sustained_terminal_backlog_keeps_updating_the_measurement() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let queued = Arc::new(AtomicUsize::new(0));
+        let mut writer = SocketWriter::new(tx, queued, 1024);
+        let clock = writer.output().drain_clock;
+        clock.enable_terminal_acks();
+        writer.write_all(b"frame").unwrap();
+        writer.flush().unwrap();
+        let mut previous = Duration::ZERO;
+        for _ in 0..3 {
+            std::thread::sleep(Duration::from_millis(10));
+            writer.write_all(b"frame").unwrap();
+            writer.flush().unwrap();
+            clock.terminal_written(5);
+            let drain = clock.last_drain().unwrap();
+            assert!(drain >= Duration::from_millis(10));
+            assert_ne!(drain, previous);
+            previous = drain;
+            assert!(clock.backlogged());
+        }
     }
 
     #[test]

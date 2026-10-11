@@ -139,6 +139,11 @@ impl AnimationClock {
         self.due = None;
     }
 
+    /// Keep the shown frame and let the next `schedule` arm a fresh deadline.
+    pub const fn hold(&mut self) {
+        self.due = None;
+    }
+
     #[must_use]
     pub const fn shown_ms(&self) -> u128 {
         self.shown_ms
@@ -266,6 +271,10 @@ mod tests {
         clock.advance(Duration::from_millis(210));
         assert_eq!(clock.shown_ms(), 210);
         assert_eq!(clock.schedule(true, later, interval), Some(later + interval));
+        clock.hold();
+        assert_eq!(clock.shown_ms(), 210);
+        let held = later + Duration::from_millis(300);
+        assert_eq!(clock.schedule(true, held, interval), Some(held + interval));
         assert_eq!(clock.schedule(false, later, interval), None);
         assert_eq!(clock.schedule(true, start, interval), Some(start + interval));
         assert_eq!(clock.shown_ms(), 210);
