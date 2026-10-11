@@ -940,6 +940,7 @@ mod tests {
                 rows: 40,
                 font_size: None,
                 env_vars: HashMap::new(),
+                output_acks: false,
             },
         )
         .await

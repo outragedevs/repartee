@@ -327,6 +327,7 @@ async fn run_relay_loop<W>(
 where
     W: tokio::io::AsyncWriteExt + Unpin + Send,
 {
+    let mut output_acks = false;
     loop {
         tokio::select! {
             msg = input_rx.recv() => {
@@ -341,10 +342,19 @@ where
             msg = downstream_rx.recv() => {
                 match msg {
                     Some(MainMessage::Output(bytes)) => {
-                        let mut stdout = std::io::stdout().lock();
-                        let _ = stdout.write_all(&bytes);
-                        let _ = stdout.flush();
+                        {
+                            let mut stdout = std::io::stdout().lock();
+                            let _ = stdout.write_all(&bytes);
+                            let _ = stdout.flush();
+                        }
+                        if output_acks {
+                            let written = ShimMessage::OutputWritten(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                            if let Err(e) = protocol::write_message(write_half, &written).await {
+                                return RelayExit::WriteError(e.to_string());
+                            }
+                        }
                     }
+                    Some(MainMessage::OutputAcks) => output_acks = true,
                     Some(MainMessage::Detached) => return RelayExit::Detached,
                     Some(MainMessage::Quit) => return RelayExit::Quit,
                     None => return RelayExit::ConnectionLost,

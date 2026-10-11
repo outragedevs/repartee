@@ -483,6 +483,8 @@ pub struct App {
     pub emote_animator: crate::app::emote_anim::EmoteAnimator,
     /// Animation clock origin; frame indices derive from `now - this`.
     pub emote_anim_start: std::time::Instant,
+    /// Paced animation time actually shown on screen.
+    pub emote_anim_clock: crate::app::emote_anim::AnimationClock,
     /// Emote picker overlay state (open/hidden + filter/selection).
     pub emote_picker: crate::ui::emote_picker::EmotePickerState,
     /// Open add/edit-server (or future) wizard overlay, if any.
@@ -526,6 +528,9 @@ pub struct App {
         Option<tokio::sync::mpsc::Receiver<crate::session::protocol::ShimMessage>>,
     pub is_socket_attached: bool,
     pub terminal_focused: bool,
+    /// The terminal explicitly reported losing focus. Unlike `terminal_focused`
+    /// this stays false for terminals that never send focus events.
+    pub terminal_blurred: bool,
     pub(crate) term_reader_stop: Arc<AtomicBool>,
     pub(crate) term_rx: Option<tokio::sync::mpsc::Receiver<crossterm::event::Event>>,
     pub(crate) shim_output_handle: Option<tokio::task::JoinHandle<()>>,
@@ -961,6 +966,7 @@ impl App {
             emote_placements: Vec::new(),
             emote_animator: crate::app::emote_anim::EmoteAnimator::default(),
             emote_anim_start: Instant::now(),
+            emote_anim_clock: crate::app::emote_anim::AnimationClock::default(),
             emote_picker: crate::ui::emote_picker::EmotePickerState::default(),
             wizard: None,
             settings_panel: None,
@@ -994,6 +1000,7 @@ impl App {
             shim_event_rx: None,
             is_socket_attached: false,
             terminal_focused: false,
+            terminal_blurred: false,
             term_reader_stop: Arc::new(AtomicBool::new(false)),
             term_rx: None,
             shim_output_handle: None,
@@ -1502,6 +1509,10 @@ impl App {
         let emote_anim_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
         tokio::pin!(emote_anim_sleep);
 
+        // An iteration woken only by shim output acknowledgements skips the
+        // redraw and keeps the previous deferral state; see `handle_shim_messages`.
+        let mut skip_render = false;
+        let mut output_deferred = false;
         while !self.should_quit {
             // Runs after EVERY dispatch below, whatever the dispatch was. The
             // active buffer is global and a dozen things flip it with no keyboard
@@ -1530,29 +1541,37 @@ impl App {
             // it early-returns unless the active buffer is at-bottom AND pinned.
             self.collapse_backlog_if_at_bottom();
 
-            let output_deferred = !self.render_terminal_frame();
+            if !std::mem::take(&mut skip_render) {
+                output_deferred = !self.render_terminal_frame();
+            }
             let output_drained = self.socket_output.as_ref().map(|output| Arc::clone(&output.drained));
 
-            // Re-arm the animation clock: wake in 50ms iff an animated (multi-frame)
-            // emote is currently on screen, else sleep far out (idle = no wakeups).
+            // Re-arm the animation clock while an animated (multi-frame) emote is
+            // on screen and the terminal has not reported losing focus, else sleep
+            // far out (idle = no wakeups). The interval follows how fast the shim
+            // drains output, so a slow link is not kept saturated by animation.
             {
                 // `self.terminal.is_some()` guards the detached case: while
                 // detached there is no render to clear `emote_placements`, so a
                 // stale animated placement must not keep waking the loop at 50ms.
                 let animating = self.terminal.is_some()
+                    && !self.terminal_blurred
                     && self.emotes_graphical()
                     && self
                         .emote_placements
                         .iter()
                         .any(|p| crate::app::emote_anim::EmoteAnimator::is_animated(p.emote_index));
-                let next = if animating {
-                    std::time::Duration::from_millis(50)
-                } else {
-                    std::time::Duration::from_hours(24)
-                };
-                emote_anim_sleep
-                    .as_mut()
-                    .reset(tokio::time::Instant::now() + next);
+                let now = tokio::time::Instant::now();
+                let interval = crate::app::emote_anim::frame_interval(
+                    self.socket_output
+                        .as_ref()
+                        .and_then(|output| output.drain_clock.last_drain()),
+                );
+                let next = self
+                    .emote_anim_clock
+                    .schedule(animating, now, interval)
+                    .unwrap_or_else(|| now + std::time::Duration::from_hours(24));
+                emote_anim_sleep.as_mut().reset(next);
             }
 
             let binding_deadline = self.binding_deadline();
@@ -1600,7 +1619,7 @@ impl App {
                         None => std::future::pending().await,
                     }
                 } => if let Some(message) = shim_ev {
-                    self.handle_shim_messages(message);
+                    skip_render = !self.handle_shim_messages(message);
                 } else {
                     tracing::info!("shim disconnected, returning to detached mode");
                     self.terminal = None;
@@ -1770,10 +1789,22 @@ impl App {
                     self.drain_pending_web_events();
                 },
                 () = &mut emote_anim_sleep => {
-                    // Waking here re-enters the loop and redraws unconditionally;
-                    // the next draw recomputes each emote's frame index from the
-                    // animation clock. No `needs_full_redraw` (that would clear the
-                    // screen and flicker); the re-arm above schedules the next tick.
+                    // Advance the shown animation time; the redraw on re-entering
+                    // the loop picks each emote's frame from it. No
+                    // `needs_full_redraw` (that would clear the screen and
+                    // flicker); the re-arm above schedules the next tick.
+                    // While earlier output is still on its way to the terminal
+                    // the shown frame is kept; the re-arm retries after the
+                    // next interval instead of queueing more image data.
+                    if self
+                        .socket_output
+                        .as_ref()
+                        .is_some_and(|output| output.drain_clock.backlogged())
+                    {
+                        self.emote_anim_clock.hold();
+                    } else {
+                        self.emote_anim_clock.advance(self.emote_anim_start.elapsed());
+                    }
                 },
                 action = self.script_action_rx.recv() => {
                     if let Some(action) = action {

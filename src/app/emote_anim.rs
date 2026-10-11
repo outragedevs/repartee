@@ -3,6 +3,7 @@
 //! compositing over the placeholder cells the chat renderer reserved.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
@@ -90,6 +91,62 @@ impl EmoteAnimator {
             .get(emote_index as usize)
             .and_then(|n| crate::emotes::frames(n))
             .is_some_and(|f| f.len() > 1)
+    }
+}
+
+const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(50);
+const MAX_FRAME_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Delay before the next animation redraw. Starts at ~20 FPS and stretches to
+/// twice the last measured output drain time, so animation uses at most about
+/// half of a slow link and leaves room for keystroke echo.
+#[must_use]
+pub fn frame_interval(last_drain: Option<Duration>) -> Duration {
+    last_drain.map_or(MIN_FRAME_INTERVAL, |drain| {
+        drain
+            .saturating_mul(2)
+            .clamp(MIN_FRAME_INTERVAL, MAX_FRAME_INTERVAL)
+    })
+}
+
+/// Animation time shown on screen. It only advances when the paced animation
+/// deadline fires, so redraws caused by input or other events repeat the same
+/// frame instead of sending a new one.
+#[derive(Default)]
+pub struct AnimationClock {
+    shown_ms: u128,
+    due: Option<tokio::time::Instant>,
+}
+
+impl AnimationClock {
+    /// Deadline of the next animation frame. An already armed deadline is kept,
+    /// so frequent unrelated wakeups cannot postpone the animation forever.
+    pub fn schedule(
+        &mut self,
+        animating: bool,
+        now: tokio::time::Instant,
+        interval: Duration,
+    ) -> Option<tokio::time::Instant> {
+        if !animating {
+            self.due = None;
+            return None;
+        }
+        Some(*self.due.get_or_insert(now + interval))
+    }
+
+    pub const fn advance(&mut self, elapsed: Duration) {
+        self.shown_ms = elapsed.as_millis();
+        self.due = None;
+    }
+
+    /// Keep the shown frame and let the next `schedule` arm a fresh deadline.
+    pub const fn hold(&mut self) {
+        self.due = None;
+    }
+
+    #[must_use]
+    pub const fn shown_ms(&self) -> u128 {
+        self.shown_ms
     }
 }
 
@@ -200,6 +257,39 @@ pub fn composite(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn animation_clock_keeps_its_deadline_across_unrelated_wakeups() {
+        let mut clock = AnimationClock::default();
+        let start = tokio::time::Instant::now();
+        let interval = Duration::from_millis(200);
+        let due = clock.schedule(true, start, interval).unwrap();
+        assert_eq!(due, start + interval);
+        let later = start + Duration::from_millis(150);
+        assert_eq!(clock.schedule(true, later, interval), Some(due));
+        assert_eq!(clock.shown_ms(), 0);
+        clock.advance(Duration::from_millis(210));
+        assert_eq!(clock.shown_ms(), 210);
+        assert_eq!(clock.schedule(true, later, interval), Some(later + interval));
+        clock.hold();
+        assert_eq!(clock.shown_ms(), 210);
+        let held = later + Duration::from_millis(300);
+        assert_eq!(clock.schedule(true, held, interval), Some(held + interval));
+        assert_eq!(clock.schedule(false, later, interval), None);
+        assert_eq!(clock.schedule(true, start, interval), Some(start + interval));
+        assert_eq!(clock.shown_ms(), 210);
+    }
+
+    #[test]
+    fn frame_interval_follows_output_drain_time_within_bounds() {
+        assert_eq!(frame_interval(None), MIN_FRAME_INTERVAL);
+        assert_eq!(frame_interval(Some(Duration::from_millis(5))), MIN_FRAME_INTERVAL);
+        assert_eq!(
+            frame_interval(Some(Duration::from_millis(120))),
+            Duration::from_millis(240)
+        );
+        assert_eq!(frame_interval(Some(Duration::from_secs(3))), MAX_FRAME_INTERVAL);
+    }
 
     fn frames_with(delays: &[u32]) -> Vec<crate::emotes::Frame> {
         delays
