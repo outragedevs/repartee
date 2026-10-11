@@ -272,8 +272,10 @@ fn execute(state: AppState, binding: &Binding, bypass: &Cell<bool>) {
 }
 
 thread_local! {
-    /// `data-mid` of the last seek target and the scroll position it produced;
-    /// it anchors the next seek only while the view has not moved since.
+    /// `data-mid` of the last seek target and its distance from the top of the
+    /// view. It anchors the next seek only while the target is still there:
+    /// user scrolling moves it, while the backlog restore that follows loading
+    /// older messages keeps it in place.
     static SEEK_ANCHOR: RefCell<Option<(String, i32)>> = const { RefCell::new(None) };
 }
 
@@ -296,14 +298,14 @@ fn seek_highlight(state: AppState, forward: bool) {
     };
     let anchor = SEEK_ANCHOR
         .with(|anchor| anchor.borrow().clone())
-        .filter(|(_, top)| *top == view_top)
-        .and_then(|(mid, _)| {
+        .and_then(|(mid, from_top)| {
             container
                 .query_selector(&format!("[data-mid=\"{mid}\"]"))
                 .ok()
                 .flatten()
-        })
-        .map(|element| offset(&element));
+                .map(|element| offset(&element))
+                .filter(|top| (top - view_top - from_top).abs() <= 2)
+        });
     let Ok(nodes) = container.query_selector_all(".chat-line.highlighted") else {
         return;
     };
@@ -338,8 +340,10 @@ fn seek_highlight(state: AppState, forward: bool) {
             },
         );
         if let Some(mid) = element.get_attribute("data-mid") {
-            let top = container.scroll_top();
-            SEEK_ANCHOR.with(|anchor| *anchor.borrow_mut() = Some((mid, top)));
+            #[allow(clippy::cast_possible_truncation)]
+            let from_top =
+                (element.get_bounding_client_rect().top() - container.get_bounding_client_rect().top()) as i32;
+            SEEK_ANCHOR.with(|anchor| *anchor.borrow_mut() = Some((mid, from_top)));
         }
     } else if forward {
         SEEK_ANCHOR.with(|anchor| *anchor.borrow_mut() = None);

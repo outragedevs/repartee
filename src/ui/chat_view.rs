@@ -103,9 +103,13 @@ const fn scroll_pinned_at_top(
 
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     render_once(frame, area, app);
-    // A seek requested after scrolling, before this frame, is resolved against
-    // the rows just drawn and then applied by drawing once more.
-    if app.resolve_deferred_seek() {
+    // Seeks requested after scrolling, before this frame, are resolved against
+    // the rows just drawn and applied by drawing again. Each pass consumes at
+    // least one queued seek; the bound only guards against a logic error.
+    for _ in 0..8 {
+        if !app.resolve_deferred_seek() {
+            break;
+        }
         render_once(frame, area, app);
     }
 }
