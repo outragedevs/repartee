@@ -191,6 +191,11 @@ impl App {
         self.dispatch_bindings(actions);
     }
 
+    /// A key sequence prefix is waiting for more input.
+    pub(super) const fn binding_sequence_pending(&self) -> bool {
+        self.bindings.sequence.is_pending()
+    }
+
     pub(super) fn binding_deadline(&mut self) -> Option<Instant> {
         self.sync_bindings();
         if self.settings_panel.is_some() || self.wizard.is_some() || self.emote_picker.is_open() {

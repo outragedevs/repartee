@@ -371,7 +371,6 @@ pub struct Sequence {
 }
 
 impl Sequence {
-    #[cfg(test)]
     pub const fn is_pending(&self) -> bool {
         !self.pending.is_empty()
     }

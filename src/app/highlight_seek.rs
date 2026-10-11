@@ -53,6 +53,7 @@ impl HighlightSeek {
 
 impl App {
     pub(crate) fn seek_highlight(&mut self, direction: SeekDirection) {
+        self.highlight_seek_requests = self.highlight_seek_requests.wrapping_add(1);
         let Some(buffer) = self.state.active_buffer() else {
             return;
         };
@@ -306,17 +307,47 @@ mod tests {
             .keyboard
             .set("meta-K", crate::keybindings::Binding::new("seek_previous_highlight", ""))
             .unwrap();
-        let mut press = crossterm::event::KeyEvent::new(
+        let press = crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char('K'),
             crossterm::event::KeyModifiers::ALT | crossterm::event::KeyModifiers::SHIFT,
         );
+        let release = crossterm::event::KeyEvent {
+            kind: crossterm::event::KeyEventKind::Release,
+            ..press
+        };
         app.handle_event(crossterm::event::Event::Key(press));
-        press.kind = crossterm::event::KeyEventKind::Release;
-        app.handle_event(crossterm::event::Event::Key(press));
+        app.handle_event(crossterm::event::Event::Key(release));
         render(&mut app);
         assert_eq!(target(&app), 70);
         let (top, bottom) = visible(&app);
         assert!((top..=bottom).contains(&70), "{top}..{bottom}");
+
+        // Repeated presses in one event batch, before any redraw, keep stepping.
+        for _ in 0..2 {
+            app.handle_event(crossterm::event::Event::Key(press));
+            app.handle_event(crossterm::event::Event::Key(release));
+        }
+        render(&mut app);
+        assert_eq!(target(&app), 10);
+
+        // The same with Escape arriving as its own event before each key.
+        app.scroll_offset = 0;
+        app.highlight_seek = None;
+        render(&mut app);
+        let escape = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        let shifted_k = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('K'),
+            crossterm::event::KeyModifiers::SHIFT,
+        );
+        for _ in 0..2 {
+            app.handle_event(crossterm::event::Event::Key(escape));
+            app.handle_event(crossterm::event::Event::Key(shifted_k));
+        }
+        render(&mut app);
+        assert_eq!(target(&app), 40);
     }
 
     #[test]
