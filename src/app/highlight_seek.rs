@@ -42,6 +42,14 @@ impl HighlightSeek {
             .then_some(self.message_id)
     }
 
+    /// Offset at which the renderer placed the target in `buffer_id`.
+    pub fn shown_offset(&self, buffer_id: &str) -> Option<usize> {
+        match self.state {
+            SeekState::Shown { offset } if self.buffer_id == buffer_id => Some(offset),
+            _ => None,
+        }
+    }
+
     pub const fn is_pending(&self) -> bool {
         matches!(self.state, SeekState::Pending { .. })
     }
@@ -165,10 +173,16 @@ mod tests {
     }
 
     fn app_with(highlights: &[u64]) -> App {
+        app_with_text(highlights, |id| format!("line {id}"))
+    }
+
+    fn app_with_text(highlights: &[u64], text: impl Fn(u64) -> String) -> App {
         let mut app = crate::app::input::submit_typing_tests::test_app();
         let mut buffer = Buffer::for_test("net", BufferType::Channel, "#chan");
         for id in 1..=100 {
-            buffer.messages.push_back(message(id, highlights.contains(&id)));
+            let mut line = message(id, highlights.contains(&id));
+            line.text = text(id);
+            buffer.messages.push_back(line);
         }
         app.state.add_buffer(buffer);
         app.state.set_active_buffer("net/#chan");
@@ -216,6 +230,18 @@ mod tests {
         assert!(app.highlight_seek.is_none());
         assert_eq!(app.scroll_offset, 0);
         assert_eq!(visible(&app).1, 100);
+    }
+
+    #[test]
+    fn the_target_stays_visible_beyond_the_per_message_render_budget() {
+        let mut app = app_with_text(&[10], |id| format!("{id} {}", "word ".repeat(300)));
+        app.seek_highlight(SeekDirection::Previous);
+        for _ in 0..3 {
+            render(&mut app);
+            let (top, bottom) = visible(&app);
+            assert!((top..=bottom).contains(&10), "{top}..{bottom}");
+        }
+        assert!(app.scroll_offset > 100 * 16);
     }
 
     #[test]

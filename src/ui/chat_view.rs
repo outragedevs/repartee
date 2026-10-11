@@ -168,6 +168,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             .and_then(|seek| seek.pending_target(&buf.id, app.scroll_offset))
             .filter(|id| buf.messages.iter().any(|msg| msg.id == *id));
         let mut seek_pending = seek_target.is_some();
+        // Keep the viewport a seek produced: its offset came from a real walk,
+        // so it may exceed the per-message estimate behind the budget cap.
+        if let Some(offset) = app.highlight_seek.as_ref().and_then(|seek| seek.shown_offset(&buf.id))
+            && offset == app.scroll_offset
+        {
+            needed = needed.max(visible_height.saturating_add(offset));
+        }
         let mut visual_lines: VecDeque<Line<'_>> = VecDeque::new();
         let mut image_rows = VecDeque::new();
         let mut message_rows = VecDeque::new();
