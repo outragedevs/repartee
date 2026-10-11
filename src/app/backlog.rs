@@ -894,8 +894,11 @@ impl App {
     /// `scrollback_limit`), unpin, and clear `history_exhausted` so a later
     /// scroll-up reloads fresh. This is the "free what we're not displaying" step.
     pub(crate) fn collapse_backlog_if_at_bottom(&mut self) {
+        // The bare display may show loaded history while the normal view sits
+        // at the bottom (`/bare` resets its offset), so it keeps the backlog.
         if self.scroll_offset != 0
             || self.log_browser_mode
+            || self.bare_display.is_some()
             || self
                 .highlight_seek
                 .as_ref()

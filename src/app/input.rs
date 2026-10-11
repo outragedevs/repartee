@@ -82,6 +82,9 @@ impl App {
                     }
                     self.needs_full_redraw = true;
                 }
+                // Resizing clears the screen, so the bare display has to be
+                // written again even where its text is unchanged.
+                self.redraw_bare_display();
                 self.refresh_emote_font_size();
                 self.resize_all_shells();
             }
@@ -175,6 +178,9 @@ impl App {
 
     #[allow(clippy::too_many_lines)]
     pub(super) fn handle_key_unbound(&mut self, key: event::KeyEvent) {
+        if self.bare_display_key(key) {
+            return;
+        }
         if let Some(panel) = &mut self.settings_panel {
             let action = panel.key(key);
             self.settings_action(action);
@@ -2959,6 +2965,7 @@ pub mod submit_typing_tests {
             emote_animator: crate::app::emote_anim::EmoteAnimator::default(),
             emote_anim_start: Instant::now(),
             emote_anim_clock: crate::app::emote_anim::AnimationClock::default(),
+            bare_display: None,
             emote_picker: crate::ui::emote_picker::EmotePickerState::default(),
             wizard: None,
             settings_panel: None,

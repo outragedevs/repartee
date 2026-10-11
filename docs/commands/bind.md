@@ -27,7 +27,8 @@ is shorthand for `command command`. Command arguments retain internal spaces.
 
 The default navigation bindings are `meta-a` and `meta-A` for unread activity,
 `meta-0` through `meta-9` for numbered windows, and `meta-left`/`meta-right` for
-adjacent windows. These are editable bindings, not hardcoded fallbacks.
+adjacent windows, and `meta-l` for the bare display (see `/bare`). These are
+editable bindings, not hardcoded fallbacks.
 Numbers match the sidebar; 0 is Status. Unlike irssi, Alt+0 does not select 10
 unless explicitly rebound. Activity uses the highest unread priority, breaking
 ties by oldest unread activity, not by last visited window.
@@ -37,7 +38,7 @@ ties by oldest unread activity, not by last visited window.
 the nearest highlight above or below the visible messages; repeated presses step
 from one highlight to the next, and seeking past the newest highlight returns to
 the live end. Only messages already loaded in the window are searched. They have
-no default keys. `command` executes a command in the current window/network. `multi` runs action
+no default keys. `bare_display` toggles the bare display. `command` executes a command in the current window/network. `multi` runs action
 names with arguments separated by semicolons; `nothing` consumes a key.
 Editing, history, completion, scrolling, `insert_text`, and `refresh_screen`
 actions are available through `-list`. Unsupported actions produce an error.
@@ -66,7 +67,8 @@ reserved, use Escape followed by the key, or choose another binding. Bindings
 do not intercept other form fields, open modals, or IME composition. Paste
 cancels a pending sequence before inserting text. Browser shell input uses
 only navigation bindings, with a bare Escape forwarded immediately.
-`refresh_screen` has no effect in WWW because the browser paints the interface.
+`refresh_screen` and `bare_display` have no effect in WWW because the browser
+paints the interface and selects text itself.
 
 ## Examples
 

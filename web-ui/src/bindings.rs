@@ -245,7 +245,7 @@ fn execute(state: AppState, binding: &Binding, bypass: &Cell<bool>) {
         "backward_history" => synthetic("ArrowUp", bypass),
         "forward_history" => synthetic("ArrowDown", bypass),
         "nothing" | "key" | "change_window" | "active_window" | "previous_window"
-        | "next_window" | "refresh_screen" => {}
+        | "next_window" | "refresh_screen" | "bare_display" => {}
         "scroll_backward" | "scroll_forward" | "scroll_start" | "scroll_end" => {
             if let Some(element) = web_sys::window()
                 .and_then(|w| w.document())

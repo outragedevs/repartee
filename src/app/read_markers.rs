@@ -186,9 +186,14 @@ impl App {
     }
 
     pub(crate) fn mark_terminal_read(&mut self) {
+        self.mark_terminal_read_at_end(self.scroll_offset == 0);
+    }
+
+    /// Mark the active buffer read if the terminal shows its end (`at_end`).
+    pub(crate) fn mark_terminal_read_at_end(&mut self, at_end: bool) {
         if !self.terminal_focused
             || self.terminal.is_none()
-            || self.scroll_offset != 0
+            || !at_end
             || self.log_browser_mode
             || self.wizard.is_some()
             || self.emote_picker.is_open()
@@ -1259,6 +1264,44 @@ mod tests {
         server_message(&mut app, 2456);
         app.mark_terminal_read();
         assert_eq!(app.state.buffers["account/peer"].unread_count, 2);
+        assert!(app.irc_handles["account"].sender().captured().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_live_bare_display_marks_messages_read() {
+        let mut app = sending_app();
+        server_message(&mut app, 1123);
+        app.state.set_active_buffer("account/peer");
+        server_message(&mut app, 2456);
+        app.terminal = Some(crate::ui::setup_socket_terminal(Box::new(Vec::<u8>::new()), 80, 24).unwrap());
+        app.cached_term_cols = 80;
+        app.cached_term_rows = 24;
+        app.terminal_focused = true;
+        // The normal view was scrolled up; the bare display follows the end.
+        app.scroll_offset = 5;
+        app.toggle_bare_display(None).unwrap();
+        assert!(app.render_terminal_frame());
+        assert_eq!(app.state.buffers["account/peer"].unread_count, 0);
+        assert_eq!(app.irc_handles["account"].sender().captured().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_cut_off_last_message_in_the_bare_display_is_not_read() {
+        let mut app = sending_app();
+        server_message(&mut app, 1123);
+        app.state.set_active_buffer("account/peer");
+        server_message(&mut app, 2456);
+        let id = app.state.buffers["account/peer"].messages.back().unwrap().id;
+        let buffer = app.state.buffers.get_mut("account/peer").unwrap();
+        buffer.messages.back_mut().unwrap().text = "word ".repeat(200);
+        app.terminal = Some(crate::ui::setup_socket_terminal(Box::new(Vec::<u8>::new()), 20, 4).unwrap());
+        app.cached_term_cols = 20;
+        app.cached_term_rows = 4;
+        app.terminal_focused = true;
+        app.toggle_bare_display(None).unwrap();
+        assert!(app.render_terminal_frame());
+        assert_eq!(app.state.buffers["account/peer"].messages.back().unwrap().id, id);
+        assert_ne!(app.state.buffers["account/peer"].unread_count, 0);
         assert!(app.irc_handles["account"].sender().captured().is_empty());
     }
 

@@ -60,6 +60,7 @@ pub const ACTIONS: &[&str] = &[
     "scroll_end",
     "seek_previous_highlight",
     "seek_next_highlight",
+    "bare_display",
     "refresh_screen",
     "insert_text",
 ];
@@ -72,6 +73,7 @@ pub fn defaults() -> BTreeMap<String, Binding> {
         ("meta-A", "active_window", ""),
         ("meta-left", "previous_window", ""),
         ("meta-right", "next_window", ""),
+        ("meta-l", "bare_display", ""),
     ] {
         bindings.insert(key.into(), Binding::new(action, data));
     }

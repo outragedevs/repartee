@@ -6,6 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crate::keybindings::{Binding, Dispatch, KeyboardConfig, Keymap, Sequence};
 
 use super::App;
+use super::bare_display::BareScroll;
 use super::highlight_seek::SeekDirection;
 
 pub struct NativeBindings {
@@ -323,12 +324,26 @@ impl App {
             "erase_to_beg_of_line" => self.input.clear_to_start(),
             "erase_to_end_of_line" => self.input.clear_to_end(),
             "delete_previous_word" => self.input.delete_word_back(),
+            "bare_display" => {
+                let _ = self.toggle_bare_display(None);
+            }
+            "scroll_start" if self.bare_display.is_some() => self.scroll_bare_display(BareScroll::Top),
+            "scroll_end" if self.bare_display.is_some() => self.scroll_bare_display(BareScroll::Bottom),
+            "seek_previous_highlight" if self.bare_display.is_some() => {
+                self.scroll_bare_display(BareScroll::Highlight(SeekDirection::Previous));
+            }
+            "seek_next_highlight" if self.bare_display.is_some() => {
+                self.scroll_bare_display(BareScroll::Highlight(SeekDirection::Next));
+            }
             "scroll_start" => self.scroll_offset = usize::MAX / 2,
             "scroll_end" => {
                 self.scroll_offset = 0;
                 self.collapse_backlog_if_at_bottom();
             }
-            "refresh_screen" => self.needs_full_redraw = true,
+            "refresh_screen" => {
+                self.needs_full_redraw = true;
+                self.redraw_bare_display();
+            }
             "seek_previous_highlight" => self.seek_highlight(SeekDirection::Previous),
             "seek_next_highlight" => self.seek_highlight(SeekDirection::Next),
             "backward_word" => {

@@ -17,7 +17,7 @@ use super::handlers_irc::{
 use super::handlers_shrink::cmd_shrink;
 use super::handlers_translate::cmd_translate;
 use super::handlers_ui::{
-    cmd_alias, cmd_clear, cmd_close, cmd_detach, cmd_emote, cmd_help, cmd_items, cmd_quit,
+    cmd_alias, cmd_bare, cmd_clear, cmd_close, cmd_detach, cmd_emote, cmd_help, cmd_items, cmd_quit,
     cmd_shell, cmd_unalias, cmd_wizard,
 };
 use super::types::{CommandCategory, CommandDef};
@@ -690,6 +690,15 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
             CommandDef {
                 handler: cmd_stats,
                 description: "Request server statistics",
+                aliases: &[],
+                category: CommandCategory::Other,
+            },
+        ),
+        (
+            "bare",
+            CommandDef {
+                handler: cmd_bare,
+                description: "Show the window as plain text to select and click",
                 aliases: &[],
                 category: CommandCategory::Other,
             },

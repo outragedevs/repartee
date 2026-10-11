@@ -184,6 +184,7 @@ impl App {
         self.is_socket_attached = true;
         self.terminal_focused = false;
         self.terminal_blurred = false;
+        self.bare_display = None;
         self.needs_full_redraw = true;
         self.cached_term_cols = cols;
         self.cached_term_rows = rows;
@@ -277,6 +278,7 @@ impl App {
         self.is_socket_attached = false;
         self.terminal_focused = false;
         self.terminal_blurred = false;
+        self.bare_display = None;
         self.shim_term_env = None;
         self.shim_output_handle.take();
         if let Some(h) = self.shim_input_handle.take() {
