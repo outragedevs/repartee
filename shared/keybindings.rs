@@ -58,6 +58,8 @@ pub const ACTIONS: &[&str] = &[
     "scroll_forward",
     "scroll_start",
     "scroll_end",
+    "seek_previous_highlight",
+    "seek_next_highlight",
     "refresh_screen",
     "insert_text",
 ];
@@ -369,7 +371,6 @@ pub struct Sequence {
 }
 
 impl Sequence {
-    #[cfg(test)]
     pub const fn is_pending(&self) -> bool {
         !self.pending.is_empty()
     }

@@ -265,7 +265,97 @@ fn execute(state: AppState, binding: &Binding, bypass: &Cell<bool>) {
                 element.set_scroll_top(top);
             }
         }
+        "seek_previous_highlight" => seek_highlight(state, false),
+        "seek_next_highlight" => seek_highlight(state, true),
         action => edit(action, &binding.data),
+    }
+}
+
+thread_local! {
+    /// `data-mid` of the last seek target and its distance from the top of the
+    /// view. It anchors the next seek only while the target is still there:
+    /// user scrolling moves it, while the backlog restore that follows loading
+    /// older messages keeps it in place.
+    static SEEK_ANCHOR: RefCell<Option<(String, i32)>> = const { RefCell::new(None) };
+}
+
+/// Scroll the chat to the nearest highlight above (or below) the current view
+/// or the last seek target. Seeking down past the last highlight returns to the
+/// live end of the conversation.
+fn seek_highlight(state: AppState, forward: bool) {
+    let Some(container) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.query_selector(".chat-messages").ok().flatten())
+    else {
+        return;
+    };
+    let view_top = container.scroll_top();
+    let view_height = container.client_height();
+    let container_top = container.get_bounding_client_rect().top();
+    #[allow(clippy::cast_possible_truncation)]
+    let offset = |element: &web_sys::Element| {
+        (element.get_bounding_client_rect().top() - container_top) as i32 + view_top
+    };
+    let anchor = SEEK_ANCHOR
+        .with(|anchor| anchor.borrow().clone())
+        .and_then(|(mid, from_top)| {
+            container
+                .query_selector(&format!("[data-mid=\"{mid}\"]"))
+                .ok()
+                .flatten()
+                .map(|element| offset(&element))
+                .filter(|top| (top - view_top - from_top).abs() <= 2)
+        });
+    let Ok(nodes) = container.query_selector_all(".chat-line.highlighted") else {
+        return;
+    };
+    let mentions: Vec<web_sys::Element> = (0..nodes.length())
+        .filter_map(|index| nodes.item(index))
+        .filter_map(|node| node.dyn_into::<web_sys::Element>().ok())
+        .collect();
+    let target = if forward {
+        let from = anchor.map_or(view_top.saturating_add(view_height), |top| top.saturating_add(1));
+        mentions.into_iter().find(|element| offset(element) >= from)
+    } else {
+        // Without an anchor, a highlight crossing the top edge is visible and
+        // does not count as above the view.
+        #[allow(clippy::cast_possible_truncation)]
+        let bottom = |element: &web_sys::Element| {
+            offset(element).saturating_add(element.get_bounding_client_rect().height() as i32)
+        };
+        mentions.into_iter().rev().find(|element| match anchor {
+            Some(top) => offset(element) < top,
+            None => bottom(element) <= view_top,
+        })
+    };
+    if let Some(element) = target {
+        container.set_scroll_top(offset(&element).saturating_sub(view_height / 3).max(0));
+        // A target near the end can leave the view at the bottom, possibly
+        // without any scroll event; keep following the tail then.
+        state.scroll_mode.set(
+            if crate::components::chat_view::is_near_bottom(&container) {
+                crate::state::ScrollMode::FollowingTail
+            } else {
+                crate::state::ScrollMode::ReadingHistory
+            },
+        );
+        if let Some(mid) = element.get_attribute("data-mid") {
+            #[allow(clippy::cast_possible_truncation)]
+            let from_top =
+                (element.get_bounding_client_rect().top() - container.get_bounding_client_rect().top()) as i32;
+            SEEK_ANCHOR.with(|anchor| *anchor.borrow_mut() = Some((mid, from_top)));
+        }
+    } else if forward {
+        SEEK_ANCHOR.with(|anchor| *anchor.borrow_mut() = None);
+        state
+            .scroll_mode
+            .set(crate::state::ScrollMode::FollowingTail);
+        // Same as "Jump to latest message": collapse the pinned backlog window,
+        // which the scroll handler skips while already following the tail.
+        if let Some(id) = state.active_buffer.get_untracked() {
+            state.collapse_backlog(&id);
+        }
+        container.set_scroll_top(container.scroll_height());
     }
 }
 

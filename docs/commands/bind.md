@@ -33,7 +33,11 @@ unless explicitly rebound. Activity uses the highest unread priority, breaking
 ties by oldest unread activity, not by last visited window.
 
 `change_window`, `active_window`, `previous_window`, and `next_window` navigate.
-`command` executes a command in the current window/network. `multi` runs action
+`seek_previous_highlight` and `seek_next_highlight` scroll the current window to
+the nearest highlight above or below the visible messages; repeated presses step
+from one highlight to the next, and seeking past the newest highlight returns to
+the live end. Only messages already loaded in the window are searched. They have
+no default keys. `command` executes a command in the current window/network. `multi` runs action
 names with arguments separated by semicolons; `nothing` consumes a key.
 Editing, history, completion, scrolling, `insert_text`, and `refresh_screen`
 actions are available through `-list`. Unsupported actions produce an error.
@@ -73,6 +77,8 @@ only navigation bindings, with a bare Escape forwarded immediately.
     /bind meta-w key win2
     /bind win1-win2 change_window 12
     /bind meta-x multi erase_line;insert_text hello
+    /bind meta-K seek_previous_highlight
+    /bind meta-J seek_next_highlight
     /bind -delete meta-a
     /bind -reset meta-a
 

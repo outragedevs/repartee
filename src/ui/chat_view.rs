@@ -8,11 +8,27 @@ use crate::theme::hex_to_color;
 
 pub struct ChatRows {
     buffer_id: String,
+    scroll_offset: usize,
     rows: Vec<(u64, Option<String>)>,
     walked_messages: usize,
 }
 
 impl ChatRows {
+    /// These rows show `buffer_id` at `scroll_offset`, i.e. they are current.
+    pub fn rendered_at(&self, buffer_id: &str, scroll_offset: usize) -> bool {
+        self.buffer_id == buffer_id && self.scroll_offset == scroll_offset
+    }
+
+    /// Message shown in the topmost visible row of `buffer_id`.
+    pub fn top_message(&self, buffer_id: &str) -> Option<u64> {
+        (self.buffer_id == buffer_id).then(|| self.rows.first().map(|(id, _)| *id)).flatten()
+    }
+
+    /// Message shown in the bottommost visible row of `buffer_id`.
+    pub fn bottom_message(&self, buffer_id: &str) -> Option<u64> {
+        (self.buffer_id == buffer_id).then(|| self.rows.last().map(|(id, _)| *id)).flatten()
+    }
+
     pub fn message_count(&self, buffer_id: &str) -> usize {
         if self.buffer_id == buffer_id { self.walked_messages } else { 0 }
     }
@@ -85,8 +101,21 @@ const fn scroll_pinned_at_top(
     walked_all && scroll >= total.saturating_sub(visible_height)
 }
 
-#[allow(clippy::too_many_lines)]
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
+    render_once(frame, area, app);
+    // Seeks requested after scrolling, before this frame, are resolved against
+    // the rows just drawn and applied by drawing again. Each pass consumes at
+    // least one queued seek; the bound only guards against a logic error.
+    for _ in 0..8 {
+        if !app.resolve_deferred_seek() {
+            break;
+        }
+        render_once(frame, area, app);
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_once(frame: &mut Frame, area: Rect, app: &mut App) {
     // Clear any emote placements up-front so early returns (shell buffer, zero
     // area) don't leave stale rects that would ghost-render over another view
     // and keep the animation clock spinning. The normal path overwrites this.
@@ -149,7 +178,29 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         // Walk messages in reverse and wrap each into visual lines. The break
         // below fires in O(buf.messages.len()) via the budget cap — this
         // prevents the v0.8.4 OOM on long mouse-wheel scrolls.
-        let needed = compute_render_budget(buf.messages.len(), visible_height, app.scroll_offset, inline_enabled);
+        let mut needed = compute_render_budget(buf.messages.len(), visible_height, app.scroll_offset, inline_enabled);
+        // A pending highlight seek extends the walk until its message plus one
+        // screen of context above it is wrapped; still bounded by the buffer.
+        let seek_target = app
+            .highlight_seek
+            .as_ref()
+            .and_then(|seek| seek.pending_target(&buf.id, app.scroll_offset))
+            .filter(|id| buf.messages.iter().any(|msg| msg.id == *id));
+        let mut seek_pending = seek_target.is_some();
+        // The per-message estimate behind the budget cap undercounts very long
+        // messages. Lines the previous frame actually walked are real, so the
+        // budget may extend one screen past them: scrolling from a deep
+        // position (e.g. after a seek) keeps working, while a pathological
+        // offset still grows the walk by at most a screen per frame.
+        if let Some((extent_buffer, extent)) = &app.chat_line_extent
+            && *extent_buffer == buf.id
+        {
+            needed = needed.max(
+                visible_height
+                    .saturating_add(app.scroll_offset)
+                    .min(extent.saturating_add(visible_height)),
+            );
+        }
         let mut visual_lines: VecDeque<Line<'_>> = VecDeque::new();
         let mut image_rows = VecDeque::new();
         let mut message_rows = VecDeque::new();
@@ -204,12 +255,17 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
                 message_rows.push_front(msg.id);
             }
 
+            if seek_pending && Some(msg.id) == seek_target {
+                seek_pending = false;
+                needed = needed.max(visual_lines.len().saturating_add(visible_height));
+            }
+
             // The budget check counts the *expanded* lines (reserved blanks
             // included), so multi-row emotes only make this break fire sooner —
             // `visual_lines.len()` stays bounded by `needed` (≤ buffer_len *
             // MAX_WRAPPED_LINES_PER_MSG) plus one message's lines. The v0.8.4 OOM
             // bound therefore still holds; do not move the reservation after this.
-            if visual_lines.len() > needed {
+            if visual_lines.len() > needed && !seek_pending {
                 break;
             }
         }
@@ -220,6 +276,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         let walked_all = msgs.next().is_none();
 
         let total = visual_lines.len();
+        app.chat_line_extent = Some((buf.id.clone(), total));
+        if let Some(target) = seek_target
+            && let Some(row) = message_rows.iter().position(|id| *id == target)
+        {
+            // Place the highlight a third of the way down the view.
+            let skip = row.saturating_sub(visible_height / 3);
+            app.scroll_offset = total.saturating_sub(visible_height.saturating_add(skip));
+        }
         let (scroll, skip) = resolve_scroll(total, visible_height, app.scroll_offset);
         // Write the clamped value back: without this, wheel-up past the top
         // leaves scroll_offset above max and every wheel-down only "works
@@ -227,7 +291,19 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         // budget cut the line walk short, `total` exceeds
         // visible_height+offset and the offset passes through untouched, so
         // this only clamps at the true top boundary.
+        if let Some(seek) = app.highlight_seek.as_mut() {
+            seek.follow_clamp(app.scroll_offset, scroll);
+        }
         app.scroll_offset = scroll;
+        if seek_target.is_some()
+            && let Some(seek) = app.highlight_seek.as_mut()
+        {
+            seek.shown_at(scroll);
+        } else if app.highlight_seek.as_ref().is_some_and(|seek| seek.is_pending() && !seek.is_deferred()) {
+            // The view moved after the seek was requested, or its message is
+            // gone: the later action wins.
+            app.highlight_seek = None;
+        }
         app.chat_scroll_at_top = scroll_pinned_at_top(walked_all, scroll, total, visible_height);
 
         let visible_lines: Vec<Line<'_>> = visual_lines
@@ -240,6 +316,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         inline_placements = crate::image_preview::inline::placements(&visible_image_rows, area);
         app.chat_rows = Some(ChatRows {
             buffer_id: buf.id.clone(),
+            scroll_offset: scroll,
             walked_messages,
             rows: message_rows.into_iter().skip(skip).take(visible_height)
                 .zip(visible_image_rows.iter().map(|row| row.as_ref().map(|(key, _)| key.url.clone())))

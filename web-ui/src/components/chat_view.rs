@@ -60,7 +60,7 @@ fn debug_log(state: AppState, why: &str) {
 /// usually loaded before the user reaches the very top.
 const BACKLOG_TRIGGER_PX: f64 = 400.0;
 
-fn is_near_bottom(el: &web_sys::Element) -> bool {
+pub(crate) fn is_near_bottom(el: &web_sys::Element) -> bool {
     el.scroll_height() as f64 - el.scroll_top() as f64 - el.client_height() as f64
         <= SCROLL_THRESHOLD
 }
@@ -1059,6 +1059,12 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         "chat-line own"
     } else {
         "chat-line"
+    };
+    // Marks every highlighted line for the seek key bindings, whatever its look.
+    let line_class = if msg.highlight {
+        format!("{line_class} highlighted")
+    } else {
+        line_class.to_owned()
     };
 
     if is_separator {

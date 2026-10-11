@@ -39,6 +39,9 @@ impl App {
         // with no value change still needs to run it.
         let input_before = self.input.value.clone();
         let buffer_before = self.state.active_buffer_id.clone();
+        let user_input = matches!(&event, Event::Key(key) if key.kind != crossterm::event::KeyEventKind::Release)
+            || matches!(event, Event::Mouse(_) | Event::Paste(_));
+        let seeks_before = self.highlight_seek_requests;
         match event {
             Event::FocusGained => {
                 self.terminal_focused = true;
@@ -83,6 +86,14 @@ impl App {
                 self.resize_all_shells();
             }
             Event::Resize(..) => {}
+        }
+        // Other input after a seek but before its redraw decides the view
+        // instead. Repeated seek keys and sequence prefixes keep the target.
+        if user_input
+            && self.highlight_seek_requests == seeks_before
+            && !self.binding_sequence_pending()
+        {
+            self.cancel_pending_highlight_seek();
         }
         if self.input.value != input_before || self.state.active_buffer_id != buffer_before {
             self.on_input_changed();
@@ -2931,6 +2942,9 @@ pub mod submit_typing_tests {
             quit_message: None,
             image_preview: crate::image_preview::PreviewStatus::default(),
             chat_rows: None,
+            highlight_seek: None,
+            highlight_seek_requests: 0,
+            chat_line_extent: None,
             inline_previews: crate::image_preview::inline::InlinePreviews::default(),
             image_clear_rect: None,
             upload_pending: false,

@@ -894,7 +894,13 @@ impl App {
     /// `scrollback_limit`), unpin, and clear `history_exhausted` so a later
     /// scroll-up reloads fresh. This is the "free what we're not displaying" step.
     pub(crate) fn collapse_backlog_if_at_bottom(&mut self) {
-        if self.scroll_offset != 0 || self.log_browser_mode {
+        if self.scroll_offset != 0
+            || self.log_browser_mode
+            || self
+                .highlight_seek
+                .as_ref()
+                .is_some_and(crate::app::highlight_seek::HighlightSeek::is_pending)
+        {
             return;
         }
         if let Some(id) = self.state.active_buffer_id.clone() {
