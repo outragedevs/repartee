@@ -71,6 +71,32 @@ pub fn render_message(
     styled_spans_to_line(&all_spans)
 }
 
+/// Plain text of a message for the bare display: timestamp, nick and body with
+/// every color and theme decoration dropped, as in weechat's bare mode.
+pub fn bare_text(msg: &Message, theme: &crate::theme::ThemeFile, config: &AppConfig) -> String {
+    fn plain(spans: Vec<StyledSpan>) -> String {
+        spans.into_iter().map(|span| span.text).collect()
+    }
+
+    if msg.message_type == MessageType::MentionLog {
+        return plain(parse_format_string(&msg.text, &[]));
+    }
+    let nick = msg.nick.as_deref().unwrap_or("");
+    let body = plain(parse_irc_text(&msg.text));
+    let line = match msg.message_type {
+        MessageType::Event => plain(render_event(msg, theme)),
+        MessageType::Action => format!("* {nick} {body}"),
+        MessageType::Notice => format!("-{nick}- {body}"),
+        _ if nick.is_empty() => body,
+        _ => format!("<{}{nick}> {body}", msg.nick_mode.as_deref().unwrap_or("")),
+    };
+    let ts = msg
+        .timestamp
+        .with_timezone(&chrono::Local)
+        .format(&config.general.timestamp_format);
+    format!("{ts} {line}")
+}
+
 fn render_event(msg: &Message, theme: &crate::theme::ThemeFile) -> Vec<StyledSpan> {
     let events = &theme.formats.events;
     let abstracts = &theme.abstracts;

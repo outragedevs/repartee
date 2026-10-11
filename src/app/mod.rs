@@ -5,6 +5,7 @@ mod autostart_tests;
     reason = "log_browser reuses format_date_separator"
 )]
 pub(crate) mod backlog;
+mod bare_display;
 mod dcc;
 pub mod e2e_gate;
 #[allow(
@@ -492,6 +493,8 @@ pub struct App {
     pub emote_anim_start: std::time::Instant,
     /// Paced animation time actually shown on screen.
     pub emote_anim_clock: crate::app::emote_anim::AnimationClock,
+    /// Bare display (`meta-l`) while it is on.
+    pub(crate) bare_display: Option<bare_display::BareDisplay>,
     /// Emote picker overlay state (open/hidden + filter/selection).
     pub emote_picker: crate::ui::emote_picker::EmotePickerState,
     /// Open add/edit-server (or future) wizard overlay, if any.
@@ -977,6 +980,7 @@ impl App {
             emote_animator: crate::app::emote_anim::EmoteAnimator::default(),
             emote_anim_start: Instant::now(),
             emote_anim_clock: crate::app::emote_anim::AnimationClock::default(),
+            bare_display: None,
             emote_picker: crate::ui::emote_picker::EmotePickerState::default(),
             wizard: None,
             settings_panel: None,
@@ -1566,6 +1570,7 @@ impl App {
                 // stale animated placement must not keep waking the loop at 50ms.
                 let animating = self.terminal.is_some()
                     && !self.terminal_blurred
+                    && self.bare_display.is_none()
                     && self.emotes_graphical()
                     && self
                         .emote_placements
@@ -1585,7 +1590,14 @@ impl App {
             }
 
             let binding_deadline = self.binding_deadline();
+            let bare_deadline = self.bare_display_deadline();
             tokio::select! {
+                () = async {
+                    match bare_deadline {
+                        Some(deadline) => tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.tick_bare_display(),
                 () = async {
                     match binding_deadline {
                         Some(deadline) => tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await,
@@ -1633,6 +1645,7 @@ impl App {
                 } else {
                     tracing::info!("shim disconnected, returning to detached mode");
                     self.terminal = None;
+                    self.bare_display = None;
                     self.socket_output_tx = None;
                     self.socket_output = None;
                     self.shim_event_rx = None;

@@ -16,6 +16,11 @@ impl App {
         if self.terminal.is_none() {
             return true;
         }
+        if self.bare_display.is_some()
+            && let Some(sent) = self.render_bare_frame()
+        {
+            return sent;
+        }
         let output = self.socket_output.clone();
         if output.as_ref().is_some_and(|output| !output.begin_frame()) {
             return false;

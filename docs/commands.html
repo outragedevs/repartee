@@ -565,7 +565,8 @@ combine names with hyphens. Recursive definitions are rejected. <code>/command</
 is shorthand for <code>command command</code>. Command arguments retain internal spaces.</p>
 <p>The default navigation bindings are <code>meta-a</code> and <code>meta-A</code> for unread activity,
 <code>meta-0</code> through <code>meta-9</code> for numbered windows, and <code>meta-left</code>/<code>meta-right</code> for
-adjacent windows. These are editable bindings, not hardcoded fallbacks.
+adjacent windows, and <code>meta-l</code> for the bare display (see <code>/bare</code>). These are
+editable bindings, not hardcoded fallbacks.
 Numbers match the sidebar; 0 is Status. Unlike irssi, Alt+0 does not select 10
 unless explicitly rebound. Activity uses the highest unread priority, breaking
 ties by oldest unread activity, not by last visited window.</p>
@@ -574,7 +575,7 @@ ties by oldest unread activity, not by last visited window.</p>
 the nearest highlight above or below the visible messages; repeated presses step
 from one highlight to the next, and seeking past the newest highlight returns to
 the live end. Only messages already loaded in the window are searched. They have
-no default keys. <code>command</code> executes a command in the current window/network. <code>multi</code> runs action
+no default keys. <code>bare_display</code> toggles the bare display. <code>command</code> executes a command in the current window/network. <code>multi</code> runs action
 names with arguments separated by semicolons; <code>nothing</code> consumes a key.
 Editing, history, completion, scrolling, <code>insert_text</code>, and <code>refresh_screen</code>
 actions are available through <code>-list</code>. Unsupported actions produce an error.</p>
@@ -599,7 +600,8 @@ reserved, use Escape followed by the key, or choose another binding. Bindings
 do not intercept other form fields, open modals, or IME composition. Paste
 cancels a pending sequence before inserting text. Browser shell input uses
 only navigation bindings, with a bare Escape forwarded immediately.
-<code>refresh_screen</code> has no effect in WWW because the browser paints the interface.</p>
+<code>refresh_screen</code> and <code>bare_display</code> have no effect in WWW because the browser
+paints the interface and selects text itself.</p>
 <h2>Examples</h2>
 <pre><code>/bind meta-0 change_window 10
 /bind meta-c /clear
@@ -2083,6 +2085,44 @@ it is sent immediately. The query buffer is created and switched to.</p>
 <p>/msg, /close</p>
 </div>
 <h2 id="cat-other">Other</h2>
+<div id="bare" class="command-entry" data-command="bare" data-category="Other">
+<h1>/bare</h1>
+<h2>Syntax</h2>
+<pre><code>/bare [&lt;seconds&gt;]
+</code></pre>
+<h2>Description</h2>
+<p>Toggle the bare display, as in weechat. The terminal shows only the current
+window&#39;s messages as plain text: no sidebar, nick list, topic, status or input
+line. Mouse reporting is switched off, so the terminal selects text with the
+mouse as usual. Each message is printed as one line that the terminal wraps
+itself, so a long URL split across rows is still recognised and clickable as
+one link.</p>
+<p>The default key is <code>meta-l</code> (Alt+L or Escape then L); see <code>/bind</code> to change it.
+Press it again to return. With <code>&lt;seconds&gt;</code>, the normal layout returns on its
+own after that long.</p>
+<p>While the bare display is on:</p>
+<ul>
+<li>Page Up/Page Down scroll by a screen, Up/Down by one message, and Home/End
+jump to the oldest loaded message or the live end. The mouse wheel scrolls
+in terminals that turn it into arrow keys. Bound <code>scroll_start</code>,
+<code>scroll_end</code> and highlight seek actions work too.</li>
+<li>Following the live end, new messages appear as they arrive. A scrolled view
+stays where it is.</li>
+<li>Typing returns to the normal layout, and the typed text is kept in the
+input line. So does switching windows, from the terminal or anywhere else.</li>
+</ul>
+<p>Messages show their timestamp, nick and text without colors. Inline images
+and emotes are hidden until you return. Only messages already loaded in the
+window are shown. Shell windows have no bare display.</p>
+<p>The web interface does not need this mode: the browser selects text and opens
+links itself.</p>
+<h2>Examples</h2>
+<pre><code>/bare
+/bare 10
+</code></pre>
+<h2>See Also</h2>
+<p>/bind, /set</p>
+</div>
 <div id="clear" class="command-entry" data-command="clear" data-category="Other">
 <h1>/clear</h1>
 <h2>Syntax</h2>

@@ -217,6 +217,29 @@ fn show_subcommand_help(
     add_local_event(app, &divider(""));
 }
 
+/// `/bare [seconds]` — toggle the bare display, optionally returning to the
+/// normal layout after `seconds`.
+pub(crate) fn cmd_bare(app: &mut App, args: &[String]) {
+    if matches!(app.submit_origin, crate::app::translate::SubmitOrigin::Web(_)) {
+        add_local_event(
+            app,
+            &format!("{C_ERR}Bare display is a terminal feature; the browser selects text already.{C_RST}"),
+        );
+        return;
+    }
+    let delay = match args.first().map(|arg| arg.parse::<u64>()) {
+        None => None,
+        Some(Ok(seconds)) if seconds > 0 => Some(std::time::Duration::from_secs(seconds)),
+        Some(_) => {
+            add_local_event(app, &format!("{C_ERR}Usage: /bare [seconds]{C_RST}"));
+            return;
+        }
+    };
+    if let Err(error) = app.toggle_bare_display(delay) {
+        add_local_event(app, &format!("{C_ERR}{error}{C_RST}"));
+    }
+}
+
 pub(crate) fn cmd_clear(app: &mut App, _args: &[String]) {
     let is_mentions = app
         .state

@@ -1,3 +1,4 @@
+pub mod bare_view;
 pub mod buffer_list;
 pub mod chat_view;
 pub mod emote_layout;
