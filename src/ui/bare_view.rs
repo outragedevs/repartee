@@ -5,7 +5,8 @@
 
 use std::fmt::Write as _;
 
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 /// A message as the bare display prints it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,39 +41,34 @@ impl BareMessage {
 }
 
 /// Rows a line wraps to, the way a terminal wraps it: a wide character that
-/// does not fit at the end of a row moves whole to the next one.
+/// does not fit at the end of a row moves whole to the next one. Measured per
+/// grapheme, as the chat view does, so emoji sequences count as one glyph.
 fn line_rows(line: &str, cols: usize) -> usize {
-    let cols = cols.max(1);
-    let mut rows = 1;
-    let mut col = 0;
-    for ch in line.chars() {
-        let width = ch.width().unwrap_or(0);
-        if col + width > cols {
-            rows += 1;
-            col = 0;
-        }
-        col += width;
-    }
-    rows
+    fit(line, cols, usize::MAX).1
 }
 
 /// The longest prefix of `line` that fits in `rows` rows of `cols` columns.
 fn fit_rows(line: &str, cols: usize, rows: usize) -> &str {
+    fit(line, cols, rows).0
+}
+
+/// The prefix of `line` that fits in `rows` rows, and the rows it takes.
+fn fit(line: &str, cols: usize, rows: usize) -> (&str, usize) {
     let cols = cols.max(1);
     let mut row = 1;
     let mut col = 0;
-    for (index, ch) in line.char_indices() {
-        let width = ch.width().unwrap_or(0);
+    for (index, grapheme) in line.grapheme_indices(true) {
+        let width = grapheme.width();
         if col + width > cols {
+            if row == rows {
+                return (&line[..index], row);
+            }
             row += 1;
             col = 0;
         }
-        if row > rows {
-            return &line[..index];
-        }
         col += width;
     }
-    line
+    (line, row)
 }
 
 /// Where the shown messages start, as `(index, row)` in display order.
@@ -180,6 +176,15 @@ mod tests {
         // Nine columns, then a wide character that moves to the next row.
         assert_eq!(line_rows("abcdefghi界", 10), 2);
         assert_eq!(BareMessage::new("one\ntwo").rows(10), 2);
+    }
+
+    #[test]
+    fn emoji_sequences_are_measured_and_cut_as_one_glyph() {
+        let family = "👨\u{200d}👩\u{200d}👧";
+        assert_eq!(line_rows(&format!("{family}x"), 3), 1);
+        assert_eq!(line_rows("ab\u{2764}\u{fe0f}", 3), 2);
+        assert_eq!(fit_rows(&format!("ab{family}cd"), 3, 1), "ab");
+        assert_eq!(fit_rows(&format!("a{family}cd"), 3, 1), format!("a{family}"));
     }
 
     #[test]

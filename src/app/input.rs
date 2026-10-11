@@ -82,6 +82,9 @@ impl App {
                     }
                     self.needs_full_redraw = true;
                 }
+                // Resizing clears the screen, so the bare display has to be
+                // written again even where its text is unchanged.
+                self.redraw_bare_display();
                 self.refresh_emote_font_size();
                 self.resize_all_shells();
             }

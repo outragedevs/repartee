@@ -116,6 +116,10 @@ impl App {
         if buffer.buffer_type == BufferType::Shell {
             return Err("Bare display is not available in shell windows");
         }
+        let until = match delay {
+            Some(delay) => Some(Instant::now().checked_add(delay).ok_or("Delay is too long")?),
+            None => None,
+        };
         let buffer_id = buffer.id.clone();
         // A scrolled view keeps its top message; the live view keeps following.
         let start = if self.scroll_offset == 0 {
@@ -132,7 +136,7 @@ impl App {
         self.bare_display = Some(BareDisplay {
             buffer_id,
             start,
-            until: delay.map(|delay| Instant::now() + delay),
+            until,
             input: None,
             shown: None,
         });
@@ -298,7 +302,9 @@ impl App {
             .output(size)
         };
         let first = self.bare_display.as_ref()?.shown.is_none();
+        let at_end = self.bare_display.as_ref()?.start.is_none();
         if self.bare_display.as_ref()?.shown.as_ref() == Some(&output) {
+            self.mark_terminal_read_at_end(at_end);
             return Some(true);
         }
         let socket = self.socket_output.clone();
@@ -331,6 +337,7 @@ impl App {
                 if let Some(bare) = self.bare_display.as_mut() {
                     bare.shown = Some(output);
                 }
+                self.mark_terminal_read_at_end(at_end);
             }
             Err(error) => {
                 if let Some(socket) = &socket {
@@ -389,9 +396,16 @@ mod tests {
             harness
         }
 
-        /// Render once and return what reached the terminal.
+        /// Deliver queued output, render once, and return what reached the
+        /// terminal.
         fn frame(&mut self) -> String {
+            let mut out = self.drain();
             self.app.render_terminal_frame();
+            out.extend(self.drain());
+            String::from_utf8_lossy(&out).into_owned()
+        }
+
+        fn drain(&mut self) -> Vec<u8> {
             let mut out = Vec::new();
             while let Ok(message) = self.rx.try_recv() {
                 if let MainMessage::Output(bytes) = message {
@@ -399,7 +413,7 @@ mod tests {
                     out.extend(bytes);
                 }
             }
-            String::from_utf8_lossy(&out).into_owned()
+            out
         }
 
         fn key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
@@ -575,6 +589,24 @@ mod tests {
         harness.app.toggle_bare_display(Some(Duration::ZERO)).unwrap();
         assert!(harness.app.bare_display_deadline().is_some());
         harness.app.tick_bare_display();
+        assert!(harness.app.bare_display.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_resize_writes_the_unchanged_screen_again() {
+        let mut harness = Harness::new(20);
+        harness.app.toggle_bare_display(None).unwrap();
+        harness.frame();
+        assert_eq!(harness.frame(), "");
+        harness.app.handle_event(Event::Resize(40, 6));
+        harness.drain();
+        assert!(harness.frame().contains("<@peer> line 20"));
+    }
+
+    #[tokio::test]
+    async fn an_unrepresentable_delay_is_refused() {
+        let mut harness = Harness::new(1);
+        assert!(harness.app.toggle_bare_display(Some(Duration::MAX)).is_err());
         assert!(harness.app.bare_display.is_none());
     }
 
