@@ -1509,6 +1509,10 @@ impl App {
         let emote_anim_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
         tokio::pin!(emote_anim_sleep);
 
+        // An iteration woken only by shim output acknowledgements skips the
+        // redraw and keeps the previous deferral state; see `handle_shim_messages`.
+        let mut skip_render = false;
+        let mut output_deferred = false;
         while !self.should_quit {
             // Runs after EVERY dispatch below, whatever the dispatch was. The
             // active buffer is global and a dozen things flip it with no keyboard
@@ -1537,7 +1541,9 @@ impl App {
             // it early-returns unless the active buffer is at-bottom AND pinned.
             self.collapse_backlog_if_at_bottom();
 
-            let output_deferred = !self.render_terminal_frame();
+            if !std::mem::take(&mut skip_render) {
+                output_deferred = !self.render_terminal_frame();
+            }
             let output_drained = self.socket_output.as_ref().map(|output| Arc::clone(&output.drained));
 
             // Re-arm the animation clock while an animated (multi-frame) emote is
@@ -1613,7 +1619,7 @@ impl App {
                         None => std::future::pending().await,
                     }
                 } => if let Some(message) = shim_ev {
-                    self.handle_shim_messages(message);
+                    skip_render = !self.handle_shim_messages(message);
                 } else {
                     tracing::info!("shim disconnected, returning to detached mode");
                     self.terminal = None;

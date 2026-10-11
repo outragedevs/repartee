@@ -8,32 +8,41 @@ use crate::ui;
 use super::App;
 
 impl App {
-    pub(crate) fn handle_shim_messages(&mut self, first: crate::session::protocol::ShimMessage) {
-        self.handle_shim_message(first);
+    /// Handle a batch of shim messages. Returns `false` when the batch held only
+    /// output acknowledgements, which must not trigger a redraw: the redraw's
+    /// own output would be acknowledged again and keep the loop spinning.
+    pub(crate) fn handle_shim_messages(&mut self, first: crate::session::protocol::ShimMessage) -> bool {
+        let mut needs_render = self.handle_shim_message(first);
         if let Some(mut receiver) = self.shim_event_rx.take() {
             while !self.should_detach {
                 let Ok(message) = receiver.try_recv() else { break };
-                self.handle_shim_message(message);
+                needs_render |= self.handle_shim_message(message);
             }
             self.shim_event_rx = Some(receiver);
         }
-        self.drain_pending_web_events();
+        if needs_render {
+            self.drain_pending_web_events();
+        }
+        needs_render
     }
 
-    fn handle_shim_message(&mut self, message: crate::session::protocol::ShimMessage) {
+    fn handle_shim_message(&mut self, message: crate::session::protocol::ShimMessage) -> bool {
         use crate::session::protocol::ShimMessage;
+        if let ShimMessage::OutputWritten(bytes) = message {
+            if let Some(output) = &self.socket_output {
+                output.drain_clock.terminal_written(bytes);
+            }
+            return false;
+        }
         match message {
             ShimMessage::TermEvent(event) => self.handle_event(event),
             ShimMessage::Resize { cols, rows } => {
                 self.handle_event(crossterm::event::Event::Resize(cols, rows));
             }
             ShimMessage::Detach => self.should_detach = true,
-            ShimMessage::OutputWritten(bytes) => {
-                if let Some(output) = &self.socket_output {
-                    output.drain_clock.terminal_written(bytes);
-                }
-            }
+            ShimMessage::OutputWritten(_) => {}
         }
+        true
     }
 
     /// Start the Unix socket listener for shim connections.
@@ -367,6 +376,8 @@ mod tests {
             app.handle_shim_messages(ShimMessage::OutputWritten(bytes.len() as u64));
         }
         assert!(written > 0);
+        assert!(!app.handle_shim_messages(ShimMessage::OutputWritten(1)));
+        assert!(app.handle_shim_messages(ShimMessage::Resize { cols: 80, rows: 24 }));
     }
 
     #[tokio::test]
