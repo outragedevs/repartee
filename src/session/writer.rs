@@ -1,6 +1,7 @@
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tokio::sync::{Notify, mpsc};
 
@@ -16,6 +17,34 @@ struct OutputBuffer {
     failed: Option<io::ErrorKind>,
 }
 
+#[derive(Default)]
+struct DrainTiming {
+    queued_at: Option<Instant>,
+    last: Option<Duration>,
+}
+
+/// Measures how long queued output takes to reach the shim, so callers can
+/// pace optional redraws to what the link actually delivers.
+#[derive(Clone, Default)]
+pub struct DrainClock(Arc<Mutex<DrainTiming>>);
+
+impl DrainClock {
+    fn start(&self) {
+        self.0.lock().unwrap().queued_at.get_or_insert_with(Instant::now);
+    }
+
+    pub fn mark_drained(&self) {
+        let mut timing = self.0.lock().unwrap();
+        if let Some(queued_at) = timing.queued_at.take() {
+            timing.last = Some(queued_at.elapsed());
+        }
+    }
+
+    pub fn last_drain(&self) -> Option<Duration> {
+        self.0.lock().unwrap().last
+    }
+}
+
 #[derive(Clone)]
 pub struct SocketOutput {
     buffer: Arc<Mutex<OutputBuffer>>,
@@ -23,6 +52,7 @@ pub struct SocketOutput {
     queued_bytes: Arc<AtomicUsize>,
     max_queued_bytes: usize,
     pub drained: Arc<Notify>,
+    pub drain_clock: DrainClock,
     graphics_disabled: Arc<AtomicBool>,
 }
 
@@ -70,6 +100,7 @@ impl SocketOutput {
                     .filter(|next| *next <= self.max_queued_bytes)
             })
             .map_err(|current| queue_full_error(current, len, self.max_queued_bytes))?;
+        self.drain_clock.start();
         let data = std::mem::take(&mut buffer.bytes);
         self.tx.send(MainMessage::Output(data)).map_err(|_| {
             self.queued_bytes.fetch_sub(len, Ordering::AcqRel);
@@ -95,6 +126,7 @@ impl SocketWriter {
                 queued_bytes,
                 max_queued_bytes,
                 drained: Arc::new(Notify::new()),
+                drain_clock: DrainClock::default(),
                 graphics_disabled: Arc::new(AtomicBool::new(false)),
             },
         }
@@ -147,6 +179,29 @@ fn queue_full_error(current: usize, additional: usize, max: usize) -> io::Error 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drain_clock_measures_from_first_queued_output_until_drained() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let queued = Arc::new(AtomicUsize::new(0));
+        let mut writer = SocketWriter::new(tx, queued, 1024);
+        let clock = writer.output().drain_clock;
+        assert_eq!(clock.last_drain(), None);
+        clock.mark_drained();
+        assert_eq!(clock.last_drain(), None);
+        writer.write_all(b"first").unwrap();
+        writer.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        writer.write_all(b"second").unwrap();
+        writer.flush().unwrap();
+        clock.mark_drained();
+        let first = clock.last_drain().unwrap();
+        assert!(first >= Duration::from_millis(20));
+        writer.write_all(b"third").unwrap();
+        writer.flush().unwrap();
+        clock.mark_drained();
+        assert!(clock.last_drain().unwrap() < first);
+    }
 
     #[test]
     fn flush_tracks_queued_output_bytes() {

@@ -40,11 +40,18 @@ impl App {
         let input_before = self.input.value.clone();
         let buffer_before = self.state.active_buffer_id.clone();
         match event {
-            Event::FocusGained => self.terminal_focused = true,
-            Event::FocusLost => self.terminal_focused = false,
+            Event::FocusGained => {
+                self.terminal_focused = true;
+                self.terminal_blurred = false;
+            }
+            Event::FocusLost => {
+                self.terminal_focused = false;
+                self.terminal_blurred = true;
+            }
             Event::Key(key) => {
                 if key.kind != crossterm::event::KeyEventKind::Release {
                     self.terminal_focused = true;
+                    self.terminal_blurred = false;
                 }
                 self.handle_key(key);
             },
@@ -54,11 +61,13 @@ impl App {
                     | MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight)
                 {
                     self.terminal_focused = true;
+                    self.terminal_blurred = false;
                 }
                 self.handle_mouse(mouse);
             },
             Event::Paste(text) => {
                 self.terminal_focused = true;
+                self.terminal_blurred = false;
                 self.handle_paste(&text);
             },
             Event::Resize(cols, rows) if cols > 0 && rows > 0 => {
@@ -2968,6 +2977,7 @@ pub mod submit_typing_tests {
             shim_event_rx: None,
             is_socket_attached: false,
             terminal_focused: true,
+            terminal_blurred: false,
             term_reader_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             term_rx: None,
             shim_output_handle: None,
@@ -3018,6 +3028,27 @@ pub mod submit_typing_tests {
             cli_bind_override: None,
             typing: crate::app::typing::TypingSender::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+
+    #[test]
+    fn only_an_explicit_focus_loss_marks_the_terminal_blurred() {
+        let mut app = super::submit_typing_tests::test_app();
+        app.terminal_focused = false;
+        assert!(!app.terminal_blurred);
+        app.handle_event(Event::FocusLost);
+        assert!(app.terminal_blurred);
+        app.handle_event(Event::FocusGained);
+        assert!(!app.terminal_blurred);
+        app.handle_event(Event::FocusLost);
+        app.handle_event(Event::Key(event::KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+        assert!(!app.terminal_blurred);
+        assert!(app.terminal_focused);
+        assert!(!app.needs_full_redraw);
     }
 }
 

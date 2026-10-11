@@ -526,6 +526,9 @@ pub struct App {
         Option<tokio::sync::mpsc::Receiver<crate::session::protocol::ShimMessage>>,
     pub is_socket_attached: bool,
     pub terminal_focused: bool,
+    /// The terminal explicitly reported losing focus. Unlike `terminal_focused`
+    /// this stays false for terminals that never send focus events.
+    pub terminal_blurred: bool,
     pub(crate) term_reader_stop: Arc<AtomicBool>,
     pub(crate) term_rx: Option<tokio::sync::mpsc::Receiver<crossterm::event::Event>>,
     pub(crate) shim_output_handle: Option<tokio::task::JoinHandle<()>>,
@@ -994,6 +997,7 @@ impl App {
             shim_event_rx: None,
             is_socket_attached: false,
             terminal_focused: false,
+            terminal_blurred: false,
             term_reader_stop: Arc::new(AtomicBool::new(false)),
             term_rx: None,
             shim_output_handle: None,
@@ -1533,20 +1537,27 @@ impl App {
             let output_deferred = !self.render_terminal_frame();
             let output_drained = self.socket_output.as_ref().map(|output| Arc::clone(&output.drained));
 
-            // Re-arm the animation clock: wake in 50ms iff an animated (multi-frame)
-            // emote is currently on screen, else sleep far out (idle = no wakeups).
+            // Re-arm the animation clock while an animated (multi-frame) emote is
+            // on screen and the terminal has not reported losing focus, else sleep
+            // far out (idle = no wakeups). The interval follows how fast the shim
+            // drains output, so a slow link is not kept saturated by animation.
             {
                 // `self.terminal.is_some()` guards the detached case: while
                 // detached there is no render to clear `emote_placements`, so a
                 // stale animated placement must not keep waking the loop at 50ms.
                 let animating = self.terminal.is_some()
+                    && !self.terminal_blurred
                     && self.emotes_graphical()
                     && self
                         .emote_placements
                         .iter()
                         .any(|p| crate::app::emote_anim::EmoteAnimator::is_animated(p.emote_index));
                 let next = if animating {
-                    std::time::Duration::from_millis(50)
+                    crate::app::emote_anim::frame_interval(
+                        self.socket_output
+                            .as_ref()
+                            .and_then(|output| output.drain_clock.last_drain()),
+                    )
                 } else {
                     std::time::Duration::from_hours(24)
                 };

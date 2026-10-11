@@ -3,6 +3,7 @@
 //! compositing over the placeholder cells the chat renderer reserved.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
@@ -91,6 +92,21 @@ impl EmoteAnimator {
             .and_then(|n| crate::emotes::frames(n))
             .is_some_and(|f| f.len() > 1)
     }
+}
+
+const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(50);
+const MAX_FRAME_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Delay before the next animation redraw. Starts at ~20 FPS and stretches to
+/// twice the last measured output drain time, so animation uses at most about
+/// half of a slow link and leaves room for keystroke echo.
+#[must_use]
+pub fn frame_interval(last_drain: Option<Duration>) -> Duration {
+    last_drain.map_or(MIN_FRAME_INTERVAL, |drain| {
+        drain
+            .saturating_mul(2)
+            .clamp(MIN_FRAME_INTERVAL, MAX_FRAME_INTERVAL)
+    })
 }
 
 /// Current frame index for an emote's `&'static` frame slice at `elapsed_ms`,
@@ -200,6 +216,17 @@ pub fn composite(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_interval_follows_output_drain_time_within_bounds() {
+        assert_eq!(frame_interval(None), MIN_FRAME_INTERVAL);
+        assert_eq!(frame_interval(Some(Duration::from_millis(5))), MIN_FRAME_INTERVAL);
+        assert_eq!(
+            frame_interval(Some(Duration::from_millis(120))),
+            Duration::from_millis(240)
+        );
+        assert_eq!(frame_interval(Some(Duration::from_secs(3))), MAX_FRAME_INTERVAL);
+    }
 
     fn frames_with(delays: &[u32]) -> Vec<crate::emotes::Frame> {
         delays

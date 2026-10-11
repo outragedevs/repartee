@@ -106,6 +106,7 @@ impl App {
         );
         let output = socket_writer.output();
         let output_drained = Arc::clone(&output.drained);
+        let drain_clock = output.drain_clock.clone();
         let output_handle = tokio::spawn(async move {
             let mut write_half = write_half;
             while let Some(msg) = output_rx.recv().await {
@@ -120,6 +121,7 @@ impl App {
                 if output_len > 0
                     && output_queued_bytes.fetch_sub(output_len, Ordering::AcqRel) == output_len
                 {
+                    drain_clock.mark_drained();
                     output_drained.notify_one();
                 }
                 if result.is_err() {
@@ -163,6 +165,7 @@ impl App {
         self.detached = false;
         self.is_socket_attached = true;
         self.terminal_focused = false;
+        self.terminal_blurred = false;
         self.needs_full_redraw = true;
         self.cached_term_cols = cols;
         self.cached_term_rows = rows;
@@ -255,6 +258,7 @@ impl App {
         self.shim_event_rx = None;
         self.is_socket_attached = false;
         self.terminal_focused = false;
+        self.terminal_blurred = false;
         self.shim_term_env = None;
         self.shim_output_handle.take();
         if let Some(h) = self.shim_input_handle.take() {
