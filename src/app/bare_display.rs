@@ -159,6 +159,15 @@ impl App {
         self.needs_full_redraw = true;
     }
 
+    /// A dialog or image preview is open. It takes input and is drawn only by
+    /// the normal layout, so the bare display gives way to it.
+    const fn bare_display_covered(&self) -> bool {
+        self.settings_panel.is_some()
+            || self.wizard.is_some()
+            || self.emote_picker.is_open()
+            || !matches!(self.image_preview, crate::image_preview::PreviewStatus::Hidden)
+    }
+
     /// Write the bare display again even if it has not changed.
     pub(crate) fn redraw_bare_display(&mut self) {
         if let Some(bare) = self.bare_display.as_mut() {
@@ -187,7 +196,10 @@ impl App {
     /// one; Up and Down scroll too, which also makes the mouse wheel work
     /// where the terminal turns it into arrow keys.
     pub(super) fn bare_display_key(&mut self, key: KeyEvent) -> bool {
-        if self.bare_display.is_none() || !(key.modifiers - KeyModifiers::SHIFT).is_empty() {
+        if self.bare_display.is_none()
+            || self.bare_display_covered()
+            || !(key.modifiers - KeyModifiers::SHIFT).is_empty()
+        {
             return false;
         }
         let scroll = match key.code {
@@ -284,6 +296,7 @@ impl App {
         if *input != self.input.value
             || self.state.active_buffer_id.as_deref() != Some(bare.buffer_id.as_str())
             || !self.state.buffers.contains_key(&bare.buffer_id)
+            || self.bare_display_covered()
         {
             self.exit_bare_display();
             return None;
@@ -601,6 +614,20 @@ mod tests {
         harness.app.handle_event(Event::Resize(40, 6));
         harness.drain();
         assert!(harness.frame().contains("<@peer> line 20"));
+    }
+
+    #[tokio::test]
+    async fn an_opened_dialog_ends_the_bare_display() {
+        let mut harness = Harness::new(20);
+        harness.app.config.emotes.enabled = true;
+        harness.app.toggle_bare_display(None).unwrap();
+        harness.frame();
+        harness.key(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        assert!(harness.app.emote_picker.is_open());
+        harness.key(KeyCode::Down, KeyModifiers::NONE);
+        harness.frame();
+        assert!(harness.app.bare_display.is_none());
+        assert!(harness.app.toggle_bare_display(None).is_err());
     }
 
     #[tokio::test]
