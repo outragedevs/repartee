@@ -30,10 +30,11 @@ pub fn compute_chat_area_size(
     left_width: u16,
     right_visible: bool,
     right_width: u16,
+    bottom_border: bool,
 ) -> (u16, u16) {
-    // Vertical: topic(1) + main(fill) + bottom(3) = main = rows - 4.
-    // Bottom block has 1px top border, so inner is 2 rows (status + input).
-    let main_height = term_rows.saturating_sub(4);
+    // Vertical: topic(1) + main(fill) + bottom, where bottom is the optional
+    // top border (1) + status (1) + input (1): main = rows - 4, or rows - 3.
+    let main_height = term_rows.saturating_sub(3 + u16::from(bottom_border));
 
     // Horizontal: depends on sidebar visibility.
     let mut chat_width = term_cols;
@@ -70,7 +71,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     // Input grows for multi-line compose (Alt+Enter): one row per `\n`-separated
     // line, clamped so the chat area (Fill) is never starved. The bottom block is
-    // TOP border (1) + status (1) + N input rows.
+    // the optional TOP border (1) + status (1) + N input rows.
     let input_rows = u16::try_from(app.input.value.matches('\n').count() + 1)
         .unwrap_or(1)
         .clamp(1, 6);
@@ -78,7 +79,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let [topic_area, main_area, bottom_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Fill(1),
-        Constraint::Length(2 + input_rows),
+        Constraint::Length(1 + u16::from(config.statusbar.border) + input_rows),
     ])
     .areas(frame.area());
 
@@ -136,7 +137,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     let bottom_block = Block::default()
-        .borders(Borders::TOP)
+        .borders(if app.config.statusbar.border { Borders::TOP } else { Borders::NONE })
         .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(bg_alt));
     let bottom_inner = bottom_block.inner(bottom_area);
@@ -206,28 +207,64 @@ mod tests {
 
     #[test]
     fn compute_chat_area_both_sidebars() {
-        let (cols, rows) = compute_chat_area_size(120, 40, true, 20, true, 20);
+        let (cols, rows) = compute_chat_area_size(120, 40, true, 20, true, 20, true);
         assert_eq!(cols, 80); // 120 - 20 - 20
         assert_eq!(rows, 36); // 40 - 4
     }
 
     #[test]
     fn compute_chat_area_left_sidebar_only() {
-        let (cols, rows) = compute_chat_area_size(120, 40, true, 20, false, 0);
+        let (cols, rows) = compute_chat_area_size(120, 40, true, 20, false, 0, true);
         assert_eq!(cols, 100); // 120 - 20
         assert_eq!(rows, 36);
     }
 
     #[test]
     fn compute_chat_area_no_sidebars() {
-        let (cols, rows) = compute_chat_area_size(120, 40, false, 0, false, 0);
+        let (cols, rows) = compute_chat_area_size(120, 40, false, 0, false, 0, true);
         assert_eq!(cols, 120);
         assert_eq!(rows, 36);
     }
 
     #[test]
+    fn compute_chat_area_without_the_bottom_border_gains_a_row() {
+        let (cols, rows) = compute_chat_area_size(120, 40, true, 20, true, 20, false);
+        assert_eq!(cols, 80);
+        assert_eq!(rows, 37); // 40 - 3
+    }
+
+    fn rendered_rows(border: bool) -> (Vec<String>, UiRegions) {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        app.config.statusbar.border = border;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 12)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows = (0..buffer.area.height)
+            .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+        (rows, app.ui_regions.unwrap())
+    }
+
+    #[test]
+    fn the_bottom_border_can_be_turned_off() {
+        let (rows, regions) = rendered_rows(true);
+        let status = regions.status_area.unwrap();
+        assert!(rows[usize::from(status.y) - 1].contains('─'));
+
+        let (rows, regions_off) = rendered_rows(false);
+        let status_off = regions_off.status_area.unwrap();
+        assert_eq!(status_off.y, status.y);
+        assert!(rows.iter().all(|row| !row.contains('─')));
+        assert_eq!(
+            regions_off.chat_area.unwrap().height,
+            regions.chat_area.unwrap().height + 1
+        );
+    }
+
+    #[test]
     fn compute_chat_area_tiny_terminal() {
-        let (cols, rows) = compute_chat_area_size(10, 5, true, 20, false, 0);
+        let (cols, rows) = compute_chat_area_size(10, 5, true, 20, false, 0, true);
         assert_eq!(cols, 1); // clamped to min 1
         assert_eq!(rows, 1); // 5 - 4 = 1
     }

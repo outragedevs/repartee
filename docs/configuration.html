@@ -153,6 +153,7 @@ visible = true
 
 [statusbar]
 enabled = true
+border = true                 # line above the status line and input
 items = [&quot;time&quot;, &quot;nick_info&quot;, &quot;channel_info&quot;, &quot;typing&quot;, &quot;lag&quot;, &quot;active_windows&quot;]
 separator = &quot; | &quot;
 prompt = &quot;[$server❱ &quot;
@@ -295,6 +296,7 @@ levels = [&quot;ALL&quot;]
 <p>Left panel shows buffer list, right panel shows nick list. Set <code>visible = false</code> to hide a panel. Widths are in terminal columns.</p>
 <h3><code>[statusbar]</code></h3>
 <p>Configure which items appear in the status line. Available items: <code>active_windows</code>, <code>nick_info</code>, <code>channel_info</code>, <code>typing</code>, <code>lag</code>, <code>time</code>. The <code>typing</code> item shows who is currently typing in the active buffer (see <code>[typing]</code> below).</p>
+<p><code>border = false</code> removes the horizontal line above the status line and input, in the terminal and in the web UI. Change it at runtime with <code>/set statusbar.border false</code>; open browser tabs follow without a refresh.</p>
 <h3><code>[servers.*]</code></h3>
 <p>Each server gets a unique identifier (the key after <code>servers.</code>). The <code>channels</code> array lists channels to auto-join on connect. Channels with keys use the format <code>&quot;#channel key&quot;</code>.</p>
 <h4>SASL</h4>

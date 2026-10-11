@@ -271,6 +271,8 @@ impl Default for PanelConfig {
 #[serde(default)]
 pub struct StatusbarConfig {
     pub enabled: bool,
+    /// Draw the horizontal line above the status line and input.
+    pub border: bool,
     pub items: Vec<StatusbarItem>,
     pub separator: String,
     pub item_formats: HashMap<String, String>,
@@ -291,6 +293,7 @@ impl Default for StatusbarConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            border: true,
             items: vec![
                 StatusbarItem::Time,
                 StatusbarItem::NickInfo,

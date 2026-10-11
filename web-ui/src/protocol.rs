@@ -40,12 +40,17 @@ pub enum WebEvent {
         /// `statusbar.enabled` — `false` means: render no status line.
         #[serde(default = "default_true")]
         statusbar_enabled: bool,
+        /// `statusbar.border` — `false` drops the line above status and input.
+        #[serde(default = "default_true")]
+        statusbar_border: bool,
     },
     /// The status-line config changed at runtime (`/items …`,
     /// `/set statusbar.enabled …`, `/reload`) — no refresh needed.
     StatusbarConfig {
         items: Vec<String>,
         enabled: bool,
+        #[serde(default = "default_true")]
+        border: bool,
     },
     NewMessage {
         buffer_id: String,

@@ -86,6 +86,7 @@ pub fn build_sync_init(
         typing,
         statusbar_items: statusbar_item_names(statusbar),
         statusbar_enabled: statusbar.enabled,
+        statusbar_border: statusbar.border,
         keyboard: crate::keybindings::KeyboardConfig::default(),
     }
 }

@@ -275,7 +275,7 @@ fn ResponsiveLayout() -> impl IntoView {
                 <ChatView />
                 {move || has_nick_list().then(|| view! { <NickList /> })}
             </div>
-            <div class="bottom-bar">
+            <div class="bottom-bar" class:no-border=move || !state.statusbar_border.get()>
                 <StatusLine />
                 <InputLine />
                 <div class="bar-tools desktop-tools">

@@ -317,7 +317,7 @@ pub fn apply_setting_runtime(app: &mut App, path: &str, raw: &str) {
     }
 
     // Resize shells when sidebar layout changes (affects chat area dimensions).
-    if path.starts_with("sidepanel.") {
+    if path.starts_with("sidepanel.") || path == "statusbar.border" {
         app.resize_all_shells();
     }
 
