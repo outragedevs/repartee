@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -82,11 +82,12 @@ pub async fn run_connected_shim(pid: u32, stream: UnixStream) -> Result<()> {
     // congested SSH link) then backs up the socket instead of the input relay.
     let (downstream_tx, downstream_rx) = mpsc::channel::<MainMessage>(2);
     let (control_tx, mut control_rx) = mpsc::unbounded_channel::<Control>();
+    let terminal_released = Arc::new(Mutex::new(false));
     spawn_output_writer(
         std::io::stdout(),
         downstream_rx,
         control_tx,
-        Arc::clone(&input_stop),
+        Arc::clone(&terminal_released),
     );
     tokio::spawn(async move {
         let mut reader = read_half;
@@ -110,8 +111,11 @@ pub async fn run_connected_shim(pid: u32, stream: UnixStream) -> Result<()> {
     let exit_reason = run_relay_loop(&mut input_rx, &mut write_half, &mut control_rx).await;
     tracing::info!("shim relay loop exited");
 
-    // Cleanup.
+    // Cleanup. Taking the terminal lock waits for an in-flight output write
+    // to finish, and the flag set under it keeps the writer from starting
+    // another one, so the terminal is restored after the last frame byte.
     input_stop.store(true, Ordering::Relaxed);
+    *terminal_released.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
     let _ = crossterm::terminal::disable_raw_mode();
     let mut stdout = std::io::stdout();
     let _ = crossterm::execute!(
@@ -333,13 +337,13 @@ const fn is_detach_key(ev: &crossterm::event::Event) -> bool {
 }
 
 /// Write terminal output on a dedicated thread and pass acknowledgements and
-/// control messages on in socket order. Stops writing once `stop` is set so
-/// nothing lands after the shim has restored the terminal.
+/// control messages on in socket order. Each write holds `released`; once the
+/// shim sets it while restoring the terminal, no further output is written.
 fn spawn_output_writer<W>(
     mut out: W,
     mut downstream_rx: mpsc::Receiver<MainMessage>,
     control_tx: mpsc::UnboundedSender<Control>,
-    stop: Arc<AtomicBool>,
+    released: Arc<Mutex<bool>>,
 ) -> std::thread::JoinHandle<()>
 where
     W: Write + Send + 'static,
@@ -349,11 +353,13 @@ where
         while let Some(message) = downstream_rx.blocking_recv() {
             let control = match message {
                 MainMessage::Output(bytes) => {
-                    if stop.load(Ordering::Relaxed) {
+                    let terminal = released.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if *terminal {
                         break;
                     }
                     let _ = out.write_all(&bytes);
                     let _ = out.flush();
+                    drop(terminal);
                     if !output_acks {
                         continue;
                     }
@@ -451,8 +457,8 @@ mod tests {
         let (writer, open, written) = gated_writer();
         let (downstream_tx, downstream_rx) = mpsc::channel(2);
         let (control_tx, mut control_rx) = mpsc::unbounded_channel();
-        let stop = Arc::new(AtomicBool::new(false));
-        let handle = spawn_output_writer(writer, downstream_rx, control_tx, stop);
+        let released = Arc::new(Mutex::new(false));
+        let handle = spawn_output_writer(writer, downstream_rx, control_tx, released);
         downstream_tx.send(MainMessage::OutputAcks).await.unwrap();
         downstream_tx.send(MainMessage::Output(b"frame".to_vec())).await.unwrap();
 
@@ -491,12 +497,12 @@ mod tests {
     }
 
     #[test]
-    fn control_messages_wait_for_preceding_output_and_stop_suppresses_later_output() {
+    fn control_messages_wait_for_preceding_output() {
         let (writer, open, written) = gated_writer();
         let (downstream_tx, downstream_rx) = mpsc::channel(4);
         let (control_tx, mut control_rx) = mpsc::unbounded_channel();
-        let stop = Arc::new(AtomicBool::new(false));
-        let handle = spawn_output_writer(writer, downstream_rx, control_tx, Arc::clone(&stop));
+        let released = Arc::new(Mutex::new(false));
+        let handle = spawn_output_writer(writer, downstream_rx, control_tx, released);
         downstream_tx.try_send(MainMessage::Output(b"before".to_vec())).unwrap();
         downstream_tx.try_send(MainMessage::Quit).unwrap();
         std::thread::sleep(Duration::from_millis(50));
@@ -504,11 +510,33 @@ mod tests {
         open.send(()).unwrap();
         assert!(matches!(control_rx.blocking_recv(), Some(Control::Quit)));
         assert_eq!(written.lock().unwrap().as_slice(), b"before");
-        stop.store(true, Ordering::Relaxed);
+        drop(downstream_tx);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn releasing_the_terminal_waits_for_the_in_flight_write_and_blocks_later_output() {
+        let (writer, open, written) = gated_writer();
+        let (downstream_tx, downstream_rx) = mpsc::channel(4);
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        let released = Arc::new(Mutex::new(false));
+        let handle = spawn_output_writer(writer, downstream_rx, control_tx, Arc::clone(&released));
+        downstream_tx.try_send(MainMessage::Output(b"frame".to_vec())).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        let cleanup = {
+            let written = Arc::clone(&written);
+            std::thread::spawn(move || {
+                *released.lock().unwrap() = true;
+                written.lock().unwrap().clone()
+            })
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!cleanup.is_finished());
+        open.send(()).unwrap();
+        assert_eq!(cleanup.join().unwrap(), b"frame");
         downstream_tx.try_send(MainMessage::Output(b"after".to_vec())).unwrap();
         handle.join().unwrap();
-        assert_eq!(written.lock().unwrap().as_slice(), b"before");
-        assert!(control_rx.blocking_recv().is_none());
+        assert_eq!(written.lock().unwrap().as_slice(), b"frame");
     }
 
     #[test]
