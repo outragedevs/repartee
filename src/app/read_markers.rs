@@ -956,6 +956,7 @@ mod tests {
         assert!(app.state.buffers["account/peer"].unread_count > 0);
         assert!(app.irc_handles["account"].sender().captured().is_empty());
         app.handle_event(crossterm::event::Event::FocusGained);
+        assert!(!app.needs_full_redraw);
         tokio::time::timeout(Duration::from_secs(1), async {
             while !app.render_terminal_frame() {
                 tokio::task::yield_now().await;
