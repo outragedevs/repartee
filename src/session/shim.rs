@@ -26,6 +26,15 @@ enum RelayExit {
     ConnectionLost,
 }
 
+/// Messages from the output writer thread to the relay loop, in socket order:
+/// each one is sent only after all preceding terminal output was written.
+enum Control {
+    /// Bytes written to the terminal, to acknowledge upstream.
+    Written(u64),
+    Detached,
+    Quit,
+}
+
 /// Run the shim process that bridges a local terminal to a detached repartee instance.
 ///
 /// If `show_splash` is true, runs the splash screen animation while waiting
@@ -69,7 +78,16 @@ pub async fn run_connected_shim(pid: u32, stream: UnixStream) -> Result<()> {
     // and forwards them through an mpsc channel. This avoids the cancellation-
     // safety bug where `select!` could cancel a `read_exact` mid-read on large
     // messages (e.g. Kitty image frames), desynchronizing the byte stream.
-    let (downstream_tx, mut downstream_rx) = mpsc::channel::<MainMessage>(2);
+    // Terminal writes happen on a dedicated thread: a stalled terminal (e.g. a
+    // congested SSH link) then backs up the socket instead of the input relay.
+    let (downstream_tx, downstream_rx) = mpsc::channel::<MainMessage>(2);
+    let (control_tx, mut control_rx) = mpsc::unbounded_channel::<Control>();
+    spawn_output_writer(
+        std::io::stdout(),
+        downstream_rx,
+        control_tx,
+        Arc::clone(&input_stop),
+    );
     tokio::spawn(async move {
         let mut reader = read_half;
         loop {
@@ -89,7 +107,7 @@ pub async fn run_connected_shim(pid: u32, stream: UnixStream) -> Result<()> {
 
     // Main select loop: upstream (input → socket) and downstream (channel → stdout).
     tracing::info!("shim relay loop starting");
-    let exit_reason = run_relay_loop(&mut input_rx, &mut write_half, &mut downstream_rx).await;
+    let exit_reason = run_relay_loop(&mut input_rx, &mut write_half, &mut control_rx).await;
     tracing::info!("shim relay loop exited");
 
     // Cleanup.
@@ -314,20 +332,63 @@ const fn is_detach_key(ev: &crossterm::event::Event) -> bool {
     )
 }
 
-/// Relay loop: forward input upstream, forward output downstream.
+/// Write terminal output on a dedicated thread and pass acknowledgements and
+/// control messages on in socket order. Stops writing once `stop` is set so
+/// nothing lands after the shim has restored the terminal.
+fn spawn_output_writer<W>(
+    mut out: W,
+    mut downstream_rx: mpsc::Receiver<MainMessage>,
+    control_tx: mpsc::UnboundedSender<Control>,
+    stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()>
+where
+    W: Write + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut output_acks = false;
+        while let Some(message) = downstream_rx.blocking_recv() {
+            let control = match message {
+                MainMessage::Output(bytes) => {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let _ = out.write_all(&bytes);
+                    let _ = out.flush();
+                    if !output_acks {
+                        continue;
+                    }
+                    Control::Written(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+                }
+                MainMessage::OutputAcks => {
+                    output_acks = true;
+                    continue;
+                }
+                MainMessage::Detached => Control::Detached,
+                MainMessage::Quit => Control::Quit,
+            };
+            if control_tx.send(control).is_err() {
+                break;
+            }
+        }
+    })
+}
+
+/// Relay loop: forward input and output acknowledgements upstream and react to
+/// daemon control messages.
 ///
 /// Both sides are mpsc channels, which are cancellation-safe in `select!`.
 /// The downstream reader task handles the actual socket read (with non-
-/// cancellation-safe `read_exact`) in its own dedicated task.
+/// cancellation-safe `read_exact`) in its own dedicated task, and terminal
+/// output is written by `spawn_output_writer`, so this loop never waits on
+/// the terminal.
 async fn run_relay_loop<W>(
     input_rx: &mut mpsc::Receiver<ShimMessage>,
     write_half: &mut W,
-    downstream_rx: &mut mpsc::Receiver<MainMessage>,
+    control_rx: &mut mpsc::UnboundedReceiver<Control>,
 ) -> RelayExit
 where
     W: tokio::io::AsyncWriteExt + Unpin + Send,
 {
-    let mut output_acks = false;
     loop {
         tokio::select! {
             msg = input_rx.recv() => {
@@ -339,24 +400,16 @@ where
                     return RelayExit::InputClosed;
                 }
             }
-            msg = downstream_rx.recv() => {
-                match msg {
-                    Some(MainMessage::Output(bytes)) => {
-                        {
-                            let mut stdout = std::io::stdout().lock();
-                            let _ = stdout.write_all(&bytes);
-                            let _ = stdout.flush();
-                        }
-                        if output_acks {
-                            let written = ShimMessage::OutputWritten(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-                            if let Err(e) = protocol::write_message(write_half, &written).await {
-                                return RelayExit::WriteError(e.to_string());
-                            }
+            control = control_rx.recv() => {
+                match control {
+                    Some(Control::Written(bytes)) => {
+                        let written = ShimMessage::OutputWritten(bytes);
+                        if let Err(e) = protocol::write_message(write_half, &written).await {
+                            return RelayExit::WriteError(e.to_string());
                         }
                     }
-                    Some(MainMessage::OutputAcks) => output_acks = true,
-                    Some(MainMessage::Detached) => return RelayExit::Detached,
-                    Some(MainMessage::Quit) => return RelayExit::Quit,
+                    Some(Control::Detached) => return RelayExit::Detached,
+                    Some(Control::Quit) => return RelayExit::Quit,
                     None => return RelayExit::ConnectionLost,
                 }
             }
@@ -369,6 +422,94 @@ mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     use super::*;
+
+    struct GatedWriter {
+        gate: std::sync::mpsc::Receiver<()>,
+        written: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl Write for GatedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let _ = self.gate.recv();
+            self.written.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn gated_writer() -> (GatedWriter, std::sync::mpsc::Sender<()>, Arc<std::sync::Mutex<Vec<u8>>>) {
+        let (open, gate) = std::sync::mpsc::channel();
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        (GatedWriter { gate, written: Arc::clone(&written) }, open, written)
+    }
+
+    #[tokio::test]
+    async fn input_reaches_the_daemon_while_terminal_output_is_stalled() {
+        let (writer, open, written) = gated_writer();
+        let (downstream_tx, downstream_rx) = mpsc::channel(2);
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = spawn_output_writer(writer, downstream_rx, control_tx, stop);
+        downstream_tx.send(MainMessage::OutputAcks).await.unwrap();
+        downstream_tx.send(MainMessage::Output(b"frame".to_vec())).await.unwrap();
+
+        let (input_tx, mut input_rx) = mpsc::channel(8);
+        let (mut socket, mut daemon) = tokio::io::duplex(4096);
+        let relay = tokio::spawn(async move {
+            run_relay_loop(&mut input_rx, &mut socket, &mut control_rx).await
+        });
+        let key = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        input_tx.send(ShimMessage::TermEvent(key.clone())).await.unwrap();
+        let forwarded = tokio::time::timeout(
+            Duration::from_secs(1),
+            protocol::read_message::<_, ShimMessage>(&mut daemon),
+        )
+        .await
+        .expect("input must not wait for the stalled terminal")
+        .unwrap();
+        assert!(matches!(forwarded, ShimMessage::TermEvent(event) if event == key));
+        assert!(written.lock().unwrap().is_empty());
+
+        downstream_tx.send(MainMessage::Detached).await.unwrap();
+        open.send(()).unwrap();
+        let acknowledged = tokio::time::timeout(
+            Duration::from_secs(1),
+            protocol::read_message::<_, ShimMessage>(&mut daemon),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(acknowledged, ShimMessage::OutputWritten(5)));
+        let exit = tokio::time::timeout(Duration::from_secs(1), relay).await.unwrap().unwrap();
+        assert!(matches!(exit, RelayExit::Detached));
+        assert_eq!(written.lock().unwrap().as_slice(), b"frame");
+        drop(downstream_tx);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn control_messages_wait_for_preceding_output_and_stop_suppresses_later_output() {
+        let (writer, open, written) = gated_writer();
+        let (downstream_tx, downstream_rx) = mpsc::channel(4);
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = spawn_output_writer(writer, downstream_rx, control_tx, Arc::clone(&stop));
+        downstream_tx.try_send(MainMessage::Output(b"before".to_vec())).unwrap();
+        downstream_tx.try_send(MainMessage::Quit).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(control_rx.try_recv().is_err());
+        open.send(()).unwrap();
+        assert!(matches!(control_rx.blocking_recv(), Some(Control::Quit)));
+        assert_eq!(written.lock().unwrap().as_slice(), b"before");
+        stop.store(true, Ordering::Relaxed);
+        downstream_tx.try_send(MainMessage::Output(b"after".to_vec())).unwrap();
+        handle.join().unwrap();
+        assert_eq!(written.lock().unwrap().as_slice(), b"before");
+        assert!(control_rx.blocking_recv().is_none());
+    }
 
     #[test]
     fn dimensions_recover_without_a_resize_event_and_ignore_invalid_samples() {
