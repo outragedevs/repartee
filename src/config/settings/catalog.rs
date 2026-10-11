@@ -471,6 +471,7 @@ fn description(path: &str) -> &'static str {
             "Hours to retain join/part/quit events; 0 keeps them indefinitely."
         }
         "display.mentions_buffer" => "Show a separate buffer collecting mentions.",
+        "statusbar.border" => "Draw the line above the status line and input, in the terminal and the web UI.",
         "general.default_bind_ip" => {
             "Default local IP address for outgoing IRC connections; empty uses the system route."
         }

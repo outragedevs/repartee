@@ -997,6 +997,7 @@ pub(crate) fn push_statusbar_web_event(app: &mut App) {
         .push(crate::web::protocol::WebEvent::StatusbarConfig {
             items: crate::web::snapshot::statusbar_item_names(&app.config.statusbar),
             enabled: app.config.statusbar.enabled,
+            border: app.config.statusbar.border,
         });
 }
 
@@ -1107,6 +1108,7 @@ fn shell_open(app: &mut App, command: Option<&str>) {
         app.config.sidepanel.left.width,
         false, // shell buffers never show nick list
         0,
+        app.config.statusbar.border,
     );
     tracing::debug!(
         term_cols = app.cached_term_cols,

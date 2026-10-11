@@ -20,6 +20,7 @@ use super::protocol::WebCommand;
 ///
 /// Updated periodically (1s tick) by the main event loop.
 /// Web handlers read from this rather than locking `AppState` directly.
+#[expect(clippy::struct_excessive_bools, reason = "independent display switches mirrored from the config")]
 pub struct WebStateSnapshot {
     pub buffers: Vec<super::protocol::BufferMeta>,
     pub connections: Vec<super::protocol::ConnectionMeta>,
@@ -41,6 +42,8 @@ pub struct WebStateSnapshot {
     pub statusbar_items: Vec<String>,
     /// `statusbar.enabled` — `false` means the browser renders no status line.
     pub statusbar_enabled: bool,
+    /// `statusbar.border` — `false` drops the line above status and input.
+    pub statusbar_border: bool,
     pub keyboard: crate::keybindings::KeyboardConfig,
 }
 

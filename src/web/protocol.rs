@@ -64,6 +64,9 @@ pub enum WebEvent {
         /// `statusbar.enabled` — `false` renders no status line at all.
         #[serde(default = "default_true")]
         statusbar_enabled: bool,
+        /// `statusbar.border` — `false` drops the line above status and input.
+        #[serde(default = "default_true")]
+        statusbar_border: bool,
     },
     /// The status-line configuration changed at runtime (`/items …`,
     /// `/set statusbar.enabled …`, `/reload`), so open tabs re-render without
@@ -72,6 +75,8 @@ pub enum WebEvent {
     StatusbarConfig {
         items: Vec<String>,
         enabled: bool,
+        #[serde(default = "default_true")]
+        border: bool,
     },
     /// A new message was received in a buffer.
     NewMessage {
@@ -628,6 +633,7 @@ mod tests {
             typing: HashMap::new(),
             statusbar_items: Vec::new(),
             statusbar_enabled: true,
+            statusbar_border: true,
             keyboard: crate::keybindings::KeyboardConfig::default(),
         }
     }
@@ -673,6 +679,7 @@ mod tests {
             typing,
             statusbar_items: Vec::new(),
             statusbar_enabled: true,
+            statusbar_border: true,
             keyboard: crate::keybindings::KeyboardConfig::default(),
         };
 

@@ -157,6 +157,8 @@ pub(crate) fn apply_reloaded_config(app: &mut App, new_config: crate::config::Ap
         app.translate_backend = None;
     }
     app.web_restart_pending |= app.config.web.requires_restart(&new_config.web);
+    // `statusbar.*` is skipped above, but the border changes the chat height.
+    let border_changed = app.config.statusbar.border != new_config.statusbar.border;
     app.config = new_config;
     app.publish_keyboard_bindings();
     app.cached_config_toml = None;
@@ -198,6 +200,9 @@ pub(crate) fn apply_reloaded_config(app: &mut App, new_config: crate::config::Ap
     super::helpers::warn_if_translate_cannot_run(app);
     // A hand-edited `[statusbar]` section must reach open tabs too.
     super::handlers_ui::push_statusbar_web_event(app);
+    if border_changed {
+        app.resize_all_shells();
+    }
 }
 
 pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {

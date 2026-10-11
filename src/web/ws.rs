@@ -196,6 +196,7 @@ fn build_sync_init_from_snapshot(state: &AppHandle, active_buffer_id: Option<Str
             typing: snap.typing.clone(),
             statusbar_items: snap.statusbar_items.clone(),
             statusbar_enabled: snap.statusbar_enabled,
+            statusbar_border: snap.statusbar_border,
             keyboard: snap.keyboard.clone(),
         };
     }
@@ -212,6 +213,7 @@ fn build_sync_init_from_snapshot(state: &AppHandle, active_buffer_id: Option<Str
         typing: std::collections::HashMap::new(),
         statusbar_items: crate::web::snapshot::statusbar_item_names(&statusbar),
         statusbar_enabled: statusbar.enabled,
+        statusbar_border: statusbar.border,
         keyboard: crate::keybindings::KeyboardConfig::default(),
     }
 }

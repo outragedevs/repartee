@@ -63,6 +63,7 @@ visible = true
 
 [statusbar]
 enabled = true
+border = true                 # line above the status line and input
 items = ["time", "nick_info", "channel_info", "typing", "lag", "active_windows"]
 separator = " | "
 prompt = "[$server❱ "
@@ -216,6 +217,8 @@ Left panel shows buffer list, right panel shows nick list. Set `visible = false`
 ### `[statusbar]`
 
 Configure which items appear in the status line. Available items: `active_windows`, `nick_info`, `channel_info`, `typing`, `lag`, `time`. The `typing` item shows who is currently typing in the active buffer (see `[typing]` below).
+
+`border = false` removes the horizontal line above the status line and input, in the terminal and in the web UI. Change it at runtime with `/set statusbar.border false`; open browser tabs follow without a refresh.
 
 ### `[servers.*]`
 

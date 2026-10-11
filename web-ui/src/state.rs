@@ -216,6 +216,8 @@ pub struct AppState {
     pub statusbar_items: RwSignal<Vec<String>>,
     /// `statusbar.enabled` — `false` renders no status line at all.
     pub statusbar_enabled: RwSignal<bool>,
+    /// `statusbar.border` — `false` drops the line above status and input.
+    pub statusbar_border: RwSignal<bool>,
 }
 
 impl AppState {
@@ -312,6 +314,7 @@ impl AppState {
             // replaces (a tab would briefly show items the config removed).
             statusbar_items: RwSignal::new(Vec::new()),
             statusbar_enabled: RwSignal::new(true),
+            statusbar_border: RwSignal::new(true),
         }
     }
 
@@ -383,6 +386,7 @@ impl AppState {
                 typing,
                 statusbar_items,
                 statusbar_enabled,
+                statusbar_border,
             } => {
                 // Clear cached messages, nick lists, and backlog-loaded flags —
                 // forces re-fetch. Handles both initial connect and lag-recovery resync.
@@ -404,6 +408,7 @@ impl AppState {
                 self.typing.set(typing);
                 self.statusbar_items.set(statusbar_items);
                 self.statusbar_enabled.set(statusbar_enabled);
+                self.statusbar_border.set(statusbar_border);
 
                 self.buffers.set(buffers);
                 self.connections.set(connections);
@@ -955,9 +960,14 @@ impl AppState {
                 self.emotes_enabled.set(emotes_enabled);
                 self.emotes_input_enabled.set(emotes_input_enabled);
             }
-            WebEvent::StatusbarConfig { items, enabled } => {
+            WebEvent::StatusbarConfig {
+                items,
+                enabled,
+                border,
+            } => {
                 self.statusbar_items.set(items);
                 self.statusbar_enabled.set(enabled);
+                self.statusbar_border.set(border);
             }
             WebEvent::Error { message, .. } => {
                 self.error.set(Some(message));
@@ -1681,6 +1691,7 @@ mod tests {
             typing: HashMap::new(),
             statusbar_items: Vec::new(),
             statusbar_enabled: true,
+            statusbar_border: true,
             keyboard: crate::keybindings::KeyboardConfig::default(),
         });
 
@@ -1696,7 +1707,7 @@ mod tests {
         let json = r#"{"type":"SyncInit","buffers":[],"connections":[],"mention_count":0,
             "timestamp_format":"%H:%M",
             "statusbar_items":["time","channel_info","typing","lag"],
-            "statusbar_enabled":false}"#;
+            "statusbar_enabled":false,"statusbar_border":false}"#;
         let event: WebEvent = serde_json::from_str(json).expect("parses");
         state.handle_event(event);
         assert_eq!(
@@ -1704,6 +1715,7 @@ mod tests {
             vec!["time", "channel_info", "typing", "lag"]
         );
         assert!(!state.statusbar_enabled.get_untracked());
+        assert!(!state.statusbar_border.get_untracked());
     }
 
     #[test]
@@ -1717,8 +1729,10 @@ mod tests {
         state.handle_event(WebEvent::StatusbarConfig {
             items: vec!["time".to_string()],
             enabled: true,
+            border: false,
         });
         assert_eq!(state.statusbar_items.get_untracked(), vec!["time"]);
+        assert!(!state.statusbar_border.get_untracked());
     }
 
     #[test]
@@ -1731,6 +1745,7 @@ mod tests {
         let event: WebEvent = serde_json::from_str(json).expect("parses without typing");
         state.handle_event(event);
         assert!(state.typing.get_untracked().is_empty());
+        assert!(state.statusbar_border.get_untracked());
     }
 
     #[test]

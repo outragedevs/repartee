@@ -169,6 +169,7 @@ impl App {
                     &self.config.statusbar,
                 ),
                 statusbar_enabled: self.config.statusbar.enabled,
+                statusbar_border: self.config.statusbar.border,
                 keyboard: self.config.keyboard.clone(),
             },
         ));
@@ -376,6 +377,7 @@ impl App {
             typing,
             statusbar_items,
             statusbar_enabled,
+            statusbar_border,
             ..
         } = init
         {
@@ -390,6 +392,7 @@ impl App {
             snap.typing = typing;
             snap.statusbar_items = statusbar_items;
             snap.statusbar_enabled = statusbar_enabled;
+            snap.statusbar_border = statusbar_border;
             snap.keyboard.clone_from(&self.config.keyboard);
         }
     }

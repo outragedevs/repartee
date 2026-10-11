@@ -430,6 +430,8 @@ textarea {
        bar collapse animation and on Android keyboard open. */
     flex: 0 0 auto;
 }
+/* `statusbar.border = false` */
+.bottom-bar.no-border { border-top: none; }
 
 .status-line {
     padding: 1px 8px;

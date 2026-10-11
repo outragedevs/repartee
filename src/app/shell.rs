@@ -175,6 +175,7 @@ impl App {
             self.config.sidepanel.left.width,
             false,
             0,
+            self.config.statusbar.border,
         );
         let ids: Vec<String> = self
             .shell_mgr

@@ -88,6 +88,7 @@ pub fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
         "statusbar" => {
             let val = match parts[1] {
                 "enabled" => config.statusbar.enabled.to_string(),
+                "border" => config.statusbar.border.to_string(),
                 "separator" => config.statusbar.separator.clone(),
                 "prompt" => config.statusbar.prompt.clone(),
                 "background" => config.statusbar.background.clone(),
@@ -424,6 +425,7 @@ pub fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result
         }
         "statusbar" => match parts[1] {
             "enabled" => config.statusbar.enabled = parse_bool(raw)?,
+            "border" => config.statusbar.border = parse_bool(raw)?,
             "separator" => config.statusbar.separator = raw.to_string(),
             "prompt" => config.statusbar.prompt = raw.to_string(),
             "background" => config.statusbar.background = raw.to_string(),
@@ -852,6 +854,7 @@ pub const BASE_PATHS: &[&str] = &[
     "sidepanel.right.width",
     "sidepanel.right.visible",
     "statusbar.enabled",
+    "statusbar.border",
     "statusbar.separator",
     "statusbar.prompt",
     "statusbar.background",
