@@ -328,10 +328,16 @@ fn seek_highlight(state: AppState, forward: bool) {
         })
     };
     if let Some(element) = target {
-        state
-            .scroll_mode
-            .set(crate::state::ScrollMode::ReadingHistory);
         container.set_scroll_top(offset(&element).saturating_sub(view_height / 3).max(0));
+        // A target near the end can leave the view at the bottom, possibly
+        // without any scroll event; keep following the tail then.
+        state.scroll_mode.set(
+            if crate::components::chat_view::is_near_bottom(&container) {
+                crate::state::ScrollMode::FollowingTail
+            } else {
+                crate::state::ScrollMode::ReadingHistory
+            },
+        );
         if let Some(mid) = element.get_attribute("data-mid") {
             let top = container.scroll_top();
             SEEK_ANCHOR.with(|anchor| *anchor.borrow_mut() = Some((mid, top)));

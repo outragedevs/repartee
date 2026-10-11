@@ -96,9 +96,16 @@ impl App {
         };
         match target {
             Some(index) => {
+                let message_id = messages[index].id;
+                // Like PageUp: keep the loaded history while reading it, so
+                // `enforce_scrollback` does not drop the target or later anchors.
+                self.pin_active_backlog();
+                let Some(buffer_id) = self.state.active_buffer_id.clone() else {
+                    return;
+                };
                 self.highlight_seek = Some(HighlightSeek {
-                    buffer_id: buffer.id.clone(),
-                    message_id: messages[index].id,
+                    buffer_id,
+                    message_id,
                     state: SeekState::Pending {
                         from: self.scroll_offset,
                     },
@@ -190,6 +197,7 @@ mod tests {
         let (top, bottom) = visible(&app);
         assert!((top..=bottom).contains(&40), "{top}..{bottom}");
         assert!(app.scroll_offset > 0);
+        assert!(app.state.buffers["net/#chan"].pin_backlog);
         app.seek_highlight(SeekDirection::Previous);
         render(&mut app);
         let (top, bottom) = visible(&app);
