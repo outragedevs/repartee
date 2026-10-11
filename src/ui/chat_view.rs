@@ -13,6 +13,16 @@ pub struct ChatRows {
 }
 
 impl ChatRows {
+    /// Message shown in the topmost visible row of `buffer_id`.
+    pub fn top_message(&self, buffer_id: &str) -> Option<u64> {
+        (self.buffer_id == buffer_id).then(|| self.rows.first().map(|(id, _)| *id)).flatten()
+    }
+
+    /// Message shown in the bottommost visible row of `buffer_id`.
+    pub fn bottom_message(&self, buffer_id: &str) -> Option<u64> {
+        (self.buffer_id == buffer_id).then(|| self.rows.last().map(|(id, _)| *id)).flatten()
+    }
+
     pub fn message_count(&self, buffer_id: &str) -> usize {
         if self.buffer_id == buffer_id { self.walked_messages } else { 0 }
     }
@@ -149,7 +159,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         // Walk messages in reverse and wrap each into visual lines. The break
         // below fires in O(buf.messages.len()) via the budget cap — this
         // prevents the v0.8.4 OOM on long mouse-wheel scrolls.
-        let needed = compute_render_budget(buf.messages.len(), visible_height, app.scroll_offset, inline_enabled);
+        let mut needed = compute_render_budget(buf.messages.len(), visible_height, app.scroll_offset, inline_enabled);
+        // A pending highlight seek extends the walk until its message plus one
+        // screen of context above it is wrapped; still bounded by the buffer.
+        let seek_target = app
+            .highlight_seek
+            .as_ref()
+            .filter(|seek| seek.buffer_id == buf.id && seek.scroll_offset.is_none())
+            .map(|seek| seek.message_id)
+            .filter(|id| buf.messages.iter().any(|msg| msg.id == *id));
+        let mut seek_pending = seek_target.is_some();
         let mut visual_lines: VecDeque<Line<'_>> = VecDeque::new();
         let mut image_rows = VecDeque::new();
         let mut message_rows = VecDeque::new();
@@ -204,12 +223,17 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
                 message_rows.push_front(msg.id);
             }
 
+            if seek_pending && Some(msg.id) == seek_target {
+                seek_pending = false;
+                needed = needed.max(visual_lines.len().saturating_add(visible_height));
+            }
+
             // The budget check counts the *expanded* lines (reserved blanks
             // included), so multi-row emotes only make this break fire sooner —
             // `visual_lines.len()` stays bounded by `needed` (≤ buffer_len *
             // MAX_WRAPPED_LINES_PER_MSG) plus one message's lines. The v0.8.4 OOM
             // bound therefore still holds; do not move the reservation after this.
-            if visual_lines.len() > needed {
+            if visual_lines.len() > needed && !seek_pending {
                 break;
             }
         }
@@ -220,6 +244,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         let walked_all = msgs.next().is_none();
 
         let total = visual_lines.len();
+        if let Some(target) = seek_target
+            && let Some(row) = message_rows.iter().position(|id| *id == target)
+        {
+            // Place the highlight a third of the way down the view.
+            let skip = row.saturating_sub(visible_height / 3);
+            app.scroll_offset = total.saturating_sub(visible_height.saturating_add(skip));
+        }
         let (scroll, skip) = resolve_scroll(total, visible_height, app.scroll_offset);
         // Write the clamped value back: without this, wheel-up past the top
         // leaves scroll_offset above max and every wheel-down only "works
@@ -228,6 +259,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         // visible_height+offset and the offset passes through untouched, so
         // this only clamps at the true top boundary.
         app.scroll_offset = scroll;
+        if seek_target.is_some()
+            && let Some(seek) = app.highlight_seek.as_mut()
+        {
+            seek.scroll_offset = Some(scroll);
+        }
         app.chat_scroll_at_top = scroll_pinned_at_top(walked_all, scroll, total, visible_height);
 
         let visible_lines: Vec<Line<'_>> = visual_lines

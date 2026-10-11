@@ -2931,6 +2931,7 @@ pub mod submit_typing_tests {
             quit_message: None,
             image_preview: crate::image_preview::PreviewStatus::default(),
             chat_rows: None,
+            highlight_seek: None,
             inline_previews: crate::image_preview::inline::InlinePreviews::default(),
             image_clear_rect: None,
             upload_pending: false,

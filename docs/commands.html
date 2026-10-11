@@ -570,7 +570,11 @@ Numbers match the sidebar; 0 is Status. Unlike irssi, Alt+0 does not select 10
 unless explicitly rebound. Activity uses the highest unread priority, breaking
 ties by oldest unread activity, not by last visited window.</p>
 <p><code>change_window</code>, <code>active_window</code>, <code>previous_window</code>, and <code>next_window</code> navigate.
-<code>command</code> executes a command in the current window/network. <code>multi</code> runs action
+<code>seek_previous_highlight</code> and <code>seek_next_highlight</code> scroll the current window to
+the nearest highlight above or below the visible messages; repeated presses step
+from one highlight to the next, and seeking past the newest highlight returns to
+the live end. Only messages already loaded in the window are searched. They have
+no default keys. <code>command</code> executes a command in the current window/network. <code>multi</code> runs action
 names with arguments separated by semicolons; <code>nothing</code> consumes a key.
 Editing, history, completion, scrolling, <code>insert_text</code>, and <code>refresh_screen</code>
 actions are available through <code>-list</code>. Unsupported actions produce an error.</p>
@@ -604,6 +608,8 @@ only navigation bindings, with a bare Escape forwarded immediately.
 /bind meta-w key win2
 /bind win1-win2 change_window 12
 /bind meta-x multi erase_line;insert_text hello
+/bind meta-K seek_previous_highlight
+/bind meta-J seek_next_highlight
 /bind -delete meta-a
 /bind -reset meta-a
 </code></pre>

@@ -265,7 +265,73 @@ fn execute(state: AppState, binding: &Binding, bypass: &Cell<bool>) {
                 element.set_scroll_top(top);
             }
         }
+        "seek_previous_highlight" => seek_highlight(state, false),
+        "seek_next_highlight" => seek_highlight(state, true),
         action => edit(action, &binding.data),
+    }
+}
+
+thread_local! {
+    /// `data-mid` of the last seek target and the scroll position it produced;
+    /// it anchors the next seek only while the view has not moved since.
+    static SEEK_ANCHOR: RefCell<Option<(String, i32)>> = const { RefCell::new(None) };
+}
+
+/// Scroll the chat to the nearest highlight above (or below) the current view
+/// or the last seek target. Seeking down past the last highlight returns to the
+/// live end of the conversation.
+fn seek_highlight(state: AppState, forward: bool) {
+    let Some(container) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.query_selector(".chat-messages").ok().flatten())
+    else {
+        return;
+    };
+    let view_top = container.scroll_top();
+    let view_height = container.client_height();
+    let container_top = container.get_bounding_client_rect().top();
+    #[allow(clippy::cast_possible_truncation)]
+    let offset = |element: &web_sys::Element| {
+        (element.get_bounding_client_rect().top() - container_top) as i32 + view_top
+    };
+    let anchor = SEEK_ANCHOR
+        .with(|anchor| anchor.borrow_mut().take())
+        .filter(|(_, top)| *top == view_top)
+        .and_then(|(mid, _)| {
+            container
+                .query_selector(&format!("[data-mid=\"{mid}\"]"))
+                .ok()
+                .flatten()
+        })
+        .map(|element| offset(&element));
+    let Ok(nodes) = container.query_selector_all(".chat-line.mention") else {
+        return;
+    };
+    let mentions: Vec<web_sys::Element> = (0..nodes.length())
+        .filter_map(|index| nodes.item(index))
+        .filter_map(|node| node.dyn_into::<web_sys::Element>().ok())
+        .collect();
+    let target = if forward {
+        let from = anchor.map_or(view_top.saturating_add(view_height), |top| top.saturating_add(1));
+        mentions.into_iter().find(|element| offset(element) >= from)
+    } else {
+        let before = anchor.unwrap_or(view_top);
+        mentions.into_iter().rev().find(|element| offset(element) < before)
+    };
+    if let Some(element) = target {
+        state
+            .scroll_mode
+            .set(crate::state::ScrollMode::ReadingHistory);
+        container.set_scroll_top(offset(&element).saturating_sub(view_height / 3).max(0));
+        if let Some(mid) = element.get_attribute("data-mid") {
+            let top = container.scroll_top();
+            SEEK_ANCHOR.with(|anchor| *anchor.borrow_mut() = Some((mid, top)));
+        }
+    } else if forward {
+        state
+            .scroll_mode
+            .set(crate::state::ScrollMode::FollowingTail);
+        container.set_scroll_top(container.scroll_height());
     }
 }
 

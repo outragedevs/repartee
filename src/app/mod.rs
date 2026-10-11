@@ -22,6 +22,7 @@ mod oauthbearer_fixture;
 mod filehost_browser_fixture;
 pub mod input;
 mod bindings;
+pub mod highlight_seek;
 mod irc;
 mod irc_dispatch;
 mod labels;
@@ -466,6 +467,8 @@ pub struct App {
     pub quit_message: Option<String>,
     pub image_preview: crate::image_preview::PreviewStatus,
     pub chat_rows: Option<crate::ui::chat_view::ChatRows>,
+    /// Target and anchor of the last `seek_*_highlight` binding action.
+    pub highlight_seek: Option<crate::app::highlight_seek::HighlightSeek>,
     pub inline_previews: crate::image_preview::inline::InlinePreviews,
     pub image_clear_rect: Option<Rect>,
     upload_pending: bool,
@@ -953,6 +956,7 @@ impl App {
             quit_message: None,
             image_preview: crate::image_preview::PreviewStatus::default(),
             chat_rows: None,
+            highlight_seek: None,
             inline_previews: crate::image_preview::inline::InlinePreviews::default(),
             image_clear_rect: None,
             upload_pending: false,

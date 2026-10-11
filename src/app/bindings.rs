@@ -6,6 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crate::keybindings::{Binding, Dispatch, KeyboardConfig, Keymap, Sequence};
 
 use super::App;
+use super::highlight_seek::SeekDirection;
 
 pub struct NativeBindings {
     config: Option<KeyboardConfig>,
@@ -252,6 +253,7 @@ impl App {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn execute_binding(&mut self, binding: &Binding) {
         let direct_key = match binding.action.as_str() {
             "backward_character" => Some(KeyCode::Left),
@@ -316,6 +318,8 @@ impl App {
                 self.collapse_backlog_if_at_bottom();
             }
             "refresh_screen" => self.needs_full_redraw = true,
+            "seek_previous_highlight" => self.seek_highlight(SeekDirection::Previous),
+            "seek_next_highlight" => self.seek_highlight(SeekDirection::Next),
             "backward_word" => {
                 while self.input.cursor_pos > 0
                     && self.input.value[..self.input.cursor_pos]
