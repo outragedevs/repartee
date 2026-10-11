@@ -40,7 +40,7 @@ impl App {
         let input_before = self.input.value.clone();
         let buffer_before = self.state.active_buffer_id.clone();
         match event {
-            Event::FocusGained => { self.terminal_focused = true; self.needs_full_redraw = true; }
+            Event::FocusGained => self.terminal_focused = true,
             Event::FocusLost => self.terminal_focused = false,
             Event::Key(key) => {
                 if key.kind != crossterm::event::KeyEventKind::Release {
