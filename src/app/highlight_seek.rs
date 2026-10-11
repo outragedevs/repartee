@@ -152,7 +152,8 @@ impl App {
     }
 
     /// Resolve a deferred seek against the rows the chat view just rendered.
-    /// Returns whether a target is now pending and the view must be redrawn.
+    /// Returns whether the view must be redrawn: a target is now pending or
+    /// the seek returned to the live end.
     pub(crate) fn resolve_deferred_seek(&mut self) -> bool {
         let Some(HighlightSeek {
             buffer_id,
@@ -176,12 +177,13 @@ impl App {
         };
         let from = edge.and_then(|id| buffer.messages.iter().position(|message| message.id == id));
         self.apply_seek(direction, from.map(|index| (index, steps)));
-        self.highlight_seek.as_ref().is_some_and(HighlightSeek::is_pending)
+        self.scroll_offset != offset
+            || self.highlight_seek.as_ref().is_some_and(HighlightSeek::is_pending)
     }
 
     /// Step `steps` highlights from message index `from` (exclusive) in the
     /// active buffer and request the result, or return to the live end when
-    /// seeking down past the newest highlight.
+    /// any step seeks down past the newest highlight, as separate presses do.
     fn apply_seek(&mut self, direction: SeekDirection, from: Option<(usize, u32)>) {
         let Some(buffer) = self.state.active_buffer() else {
             return;
@@ -189,13 +191,14 @@ impl App {
         let (mut index, steps) = from.map_or((None, 1), |(index, steps)| (Some(index), steps));
         let mut target = None;
         for _ in 0..steps.max(1) {
-            match nearest_highlight(&buffer.messages, direction, index) {
-                Some(found) => {
-                    target = Some(found);
-                    index = Some(found);
+            let Some(found) = nearest_highlight(&buffer.messages, direction, index) else {
+                if direction == SeekDirection::Next {
+                    target = None;
                 }
-                None => break,
-            }
+                break;
+            };
+            target = Some(found);
+            index = Some(found);
         }
         match target {
             Some(index) => {
@@ -473,6 +476,28 @@ mod tests {
         assert_eq!(target(&app), 40);
         let (top, bottom) = visible(&app);
         assert!((top..=bottom).contains(&40), "{top}..{bottom}");
+    }
+
+    #[test]
+    fn queued_seeks_past_the_newest_highlight_return_to_the_live_end() {
+        let mut app = app_with(&[40]);
+        app.execute_binding(&crate::keybindings::Binding::new(
+            "multi",
+            "scroll_start;seek_next_highlight;seek_next_highlight",
+        ));
+        render(&mut app);
+        assert_eq!(app.scroll_offset, 0);
+        assert_eq!(visible(&app).1, 100);
+        assert!(app.highlight_seek.is_none());
+
+        let mut app = app_with(&[]);
+        app.execute_binding(&crate::keybindings::Binding::new(
+            "multi",
+            "scroll_start;seek_next_highlight",
+        ));
+        render(&mut app);
+        assert_eq!(app.scroll_offset, 0);
+        assert_eq!(visible(&app).1, 100);
     }
 
     #[test]
