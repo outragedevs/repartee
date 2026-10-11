@@ -304,8 +304,7 @@ fn seek_highlight(state: AppState, forward: bool) {
                 .flatten()
         })
         .map(|element| offset(&element));
-    // The mentions window renders its (all highlighted) lines as `mention-log`.
-    let Ok(nodes) = container.query_selector_all(".chat-line.mention, .chat-line.mention-log") else {
+    let Ok(nodes) = container.query_selector_all(".chat-line.highlighted") else {
         return;
     };
     let mentions: Vec<web_sys::Element> = (0..nodes.length())

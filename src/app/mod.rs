@@ -469,6 +469,8 @@ pub struct App {
     pub chat_rows: Option<crate::ui::chat_view::ChatRows>,
     /// Target and anchor of the last `seek_*_highlight` binding action.
     pub highlight_seek: Option<crate::app::highlight_seek::HighlightSeek>,
+    /// Visual lines the chat view walked in its last frame, per buffer.
+    pub chat_line_extent: Option<(String, usize)>,
     pub inline_previews: crate::image_preview::inline::InlinePreviews,
     pub image_clear_rect: Option<Rect>,
     upload_pending: bool,
@@ -957,6 +959,7 @@ impl App {
             image_preview: crate::image_preview::PreviewStatus::default(),
             chat_rows: None,
             highlight_seek: None,
+            chat_line_extent: None,
             inline_previews: crate::image_preview::inline::InlinePreviews::default(),
             image_clear_rect: None,
             upload_pending: false,

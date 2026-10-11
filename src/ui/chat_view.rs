@@ -168,12 +168,19 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             .and_then(|seek| seek.pending_target(&buf.id, app.scroll_offset))
             .filter(|id| buf.messages.iter().any(|msg| msg.id == *id));
         let mut seek_pending = seek_target.is_some();
-        // Keep the viewport a seek produced: its offset came from a real walk,
-        // so it may exceed the per-message estimate behind the budget cap.
-        if let Some(offset) = app.highlight_seek.as_ref().and_then(|seek| seek.shown_offset(&buf.id))
-            && offset == app.scroll_offset
+        // The per-message estimate behind the budget cap undercounts very long
+        // messages. Lines the previous frame actually walked are real, so the
+        // budget may extend one screen past them: scrolling from a deep
+        // position (e.g. after a seek) keeps working, while a pathological
+        // offset still grows the walk by at most a screen per frame.
+        if let Some((extent_buffer, extent)) = &app.chat_line_extent
+            && *extent_buffer == buf.id
         {
-            needed = needed.max(visible_height.saturating_add(offset));
+            needed = needed.max(
+                visible_height
+                    .saturating_add(app.scroll_offset)
+                    .min(extent.saturating_add(visible_height)),
+            );
         }
         let mut visual_lines: VecDeque<Line<'_>> = VecDeque::new();
         let mut image_rows = VecDeque::new();
@@ -250,6 +257,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         let walked_all = msgs.next().is_none();
 
         let total = visual_lines.len();
+        app.chat_line_extent = Some((buf.id.clone(), total));
         if let Some(target) = seek_target
             && let Some(row) = message_rows.iter().position(|id| *id == target)
         {

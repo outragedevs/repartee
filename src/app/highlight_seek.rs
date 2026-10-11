@@ -42,14 +42,6 @@ impl HighlightSeek {
             .then_some(self.message_id)
     }
 
-    /// Offset at which the renderer placed the target in `buffer_id`.
-    pub fn shown_offset(&self, buffer_id: &str) -> Option<usize> {
-        match self.state {
-            SeekState::Shown { offset } if self.buffer_id == buffer_id => Some(offset),
-            _ => None,
-        }
-    }
-
     pub const fn is_pending(&self) -> bool {
         matches!(self.state, SeekState::Pending { .. })
     }
@@ -242,6 +234,16 @@ mod tests {
             assert!((top..=bottom).contains(&10), "{top}..{bottom}");
         }
         assert!(app.scroll_offset > 100 * 16);
+        let (top, _) = visible(&app);
+        let offset = app.scroll_offset;
+        app.scroll_offset += 3;
+        render(&mut app);
+        assert_eq!(app.scroll_offset, offset + 3);
+        assert!(visible(&app).0 <= top);
+        app.scroll_offset -= 6;
+        render(&mut app);
+        assert_eq!(app.scroll_offset, offset - 3);
+        assert!(visible(&app).0 >= top);
     }
 
     #[test]

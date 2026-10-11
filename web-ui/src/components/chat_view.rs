@@ -1060,6 +1060,12 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
     } else {
         "chat-line"
     };
+    // Marks every highlighted line for the seek key bindings, whatever its look.
+    let line_class = if msg.highlight {
+        format!("{line_class} highlighted")
+    } else {
+        line_class.to_owned()
+    };
 
     if is_separator {
         return view! {
