@@ -120,8 +120,8 @@ impl App {
         }
     }
 
-    /// Explicit scroll actions decide the view, so they drop a seek that the
-    /// renderer has not applied yet.
+    /// Later input and binding actions decide the view, so they drop a seek
+    /// that the renderer has not applied yet.
     pub(crate) fn cancel_pending_highlight_seek(&mut self) {
         if self.highlight_seek.as_ref().is_some_and(HighlightSeek::is_pending) {
             self.highlight_seek = None;
@@ -278,6 +278,45 @@ mod tests {
         render(&mut app);
         assert_eq!(app.scroll_offset, 10);
         assert!(app.highlight_seek.is_none());
+
+        app.scroll_offset = 0;
+        render(&mut app);
+        app.execute_binding(&crate::keybindings::Binding::new(
+            "multi",
+            "seek_previous_highlight;insert_text x",
+        ));
+        render(&mut app);
+        assert_eq!(app.scroll_offset, 0);
+        assert!(app.highlight_seek.is_none());
+
+        app.seek_highlight(SeekDirection::Previous);
+        app.handle_event(crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('y'),
+            crossterm::event::KeyModifiers::NONE,
+        )));
+        render(&mut app);
+        assert_eq!(app.scroll_offset, 0);
+        assert!(app.highlight_seek.is_none());
+    }
+
+    #[test]
+    fn a_bound_key_seeks_even_with_its_own_release_in_the_same_batch() {
+        let mut app = app_with(&[10, 40, 70]);
+        app.config
+            .keyboard
+            .set("meta-K", crate::keybindings::Binding::new("seek_previous_highlight", ""))
+            .unwrap();
+        let mut press = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('K'),
+            crossterm::event::KeyModifiers::ALT | crossterm::event::KeyModifiers::SHIFT,
+        );
+        app.handle_event(crossterm::event::Event::Key(press));
+        press.kind = crossterm::event::KeyEventKind::Release;
+        app.handle_event(crossterm::event::Event::Key(press));
+        render(&mut app);
+        assert_eq!(target(&app), 70);
+        let (top, bottom) = visible(&app);
+        assert!((top..=bottom).contains(&70), "{top}..{bottom}");
     }
 
     #[test]

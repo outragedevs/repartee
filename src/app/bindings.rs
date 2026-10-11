@@ -255,7 +255,10 @@ impl App {
 
     #[allow(clippy::too_many_lines)]
     pub(super) fn execute_binding(&mut self, binding: &Binding) {
-        if binding.action.starts_with("scroll_") {
+        if !matches!(
+            binding.action.as_str(),
+            "seek_previous_highlight" | "seek_next_highlight" | "multi"
+        ) {
             self.cancel_pending_highlight_seek();
         }
         let direct_key = match binding.action.as_str() {

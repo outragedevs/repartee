@@ -39,6 +39,13 @@ impl App {
         // with no value change still needs to run it.
         let input_before = self.input.value.clone();
         let buffer_before = self.state.active_buffer_id.clone();
+        // Input after a seek but before its redraw decides the view instead;
+        // a seek triggered by this very event is requested afterwards.
+        if matches!(&event, Event::Key(key) if key.kind != crossterm::event::KeyEventKind::Release)
+            || matches!(event, Event::Mouse(_) | Event::Paste(_))
+        {
+            self.cancel_pending_highlight_seek();
+        }
         match event {
             Event::FocusGained => {
                 self.terminal_focused = true;
