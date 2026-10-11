@@ -25,10 +25,9 @@ pub struct BareDisplay {
     start: Option<u64>,
     /// Return to the normal layout at this time (`/bare <seconds>`).
     until: Option<Instant>,
-    /// The input line when the bare display was first drawn; changing it
-    /// leaves. Taken at the first frame rather than on entry, so the command
-    /// line that entered (`/bare`) being cleared does not count.
-    input: Option<String>,
+    /// The input line on entry; changing it leaves. Enter clears the line
+    /// before running a command, so `/bare` itself does not count.
+    input: String,
     /// Output last written. An unchanged screen is not written again, which
     /// would clear the user's selection.
     shown: Option<Vec<u8>>,
@@ -137,7 +136,7 @@ impl App {
             buffer_id,
             start,
             until,
-            input: None,
+            input: self.input.value.clone(),
             shown: None,
         });
         Ok(())
@@ -292,8 +291,7 @@ impl App {
     /// the frame went out (`false`: earlier output is still on its way).
     pub(super) fn render_bare_frame(&mut self) -> Option<bool> {
         let bare = self.bare_display.as_mut()?;
-        let input = bare.input.get_or_insert_with(|| self.input.value.clone());
-        if *input != self.input.value
+        if bare.input != self.input.value
             || self.state.active_buffer_id.as_deref() != Some(bare.buffer_id.as_str())
             || !self.state.buffers.contains_key(&bare.buffer_id)
             || self.bare_display_covered()
@@ -303,16 +301,14 @@ impl App {
         }
         let size = self.bare_size();
         let output = {
-            let bare = self.bare_display.as_ref()?;
+            let bare = self.bare_display.as_mut()?;
             let buffer = self.state.buffers.get(&bare.buffer_id)?;
-            BareView::new(
-                buffer,
-                message_index(buffer, bare.start),
-                size,
-                &self.theme,
-                &self.config,
-            )
-            .output(size)
+            let start = message_index(buffer, bare.start);
+            if start.is_none() {
+                // The top message left the scrollback; the view follows the end.
+                bare.start = None;
+            }
+            BareView::new(buffer, start, size, &self.theme, &self.config).output(size)
         };
         let first = self.bare_display.as_ref()?.shown.is_none();
         let at_end = self.bare_display.as_ref()?.start.is_none();
@@ -614,6 +610,34 @@ mod tests {
         harness.app.handle_event(Event::Resize(40, 6));
         harness.drain();
         assert!(harness.frame().contains("<@peer> line 20"));
+    }
+
+    #[tokio::test]
+    async fn a_key_in_the_same_batch_as_the_toggle_still_leaves() {
+        let mut harness = Harness::new(20);
+        harness.key(KeyCode::Char('l'), KeyModifiers::ALT);
+        harness.key(KeyCode::Char('a'), KeyModifiers::NONE);
+        harness.frame();
+        assert!(harness.app.bare_display.is_none());
+        assert_eq!(harness.app.input.value, "a");
+    }
+
+    #[tokio::test]
+    async fn an_evicted_top_message_returns_the_view_to_the_end() {
+        let mut harness = Harness::new(20);
+        harness.app.toggle_bare_display(None).unwrap();
+        harness.key(KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(harness.start(), Some(1));
+        harness
+            .app
+            .state
+            .buffers
+            .get_mut("net/#chan")
+            .unwrap()
+            .messages
+            .pop_front();
+        assert!(harness.frame().contains("<@peer> line 20"));
+        assert_eq!(harness.start(), None);
     }
 
     #[tokio::test]
