@@ -431,11 +431,13 @@ mod tests {
 
     struct GatedWriter {
         gate: std::sync::mpsc::Receiver<()>,
+        entered: std::sync::mpsc::Sender<()>,
         written: Arc<std::sync::Mutex<Vec<u8>>>,
     }
 
     impl Write for GatedWriter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let _ = self.entered.send(());
             let _ = self.gate.recv();
             self.written.lock().unwrap().extend_from_slice(bytes);
             Ok(bytes.len())
@@ -446,21 +448,30 @@ mod tests {
         }
     }
 
-    fn gated_writer() -> (GatedWriter, std::sync::mpsc::Sender<()>, Arc<std::sync::Mutex<Vec<u8>>>) {
+    struct Gate {
+        open: std::sync::mpsc::Sender<()>,
+        entered: std::sync::mpsc::Receiver<()>,
+        written: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    fn gated_writer() -> (GatedWriter, Gate) {
         let (open, gate) = std::sync::mpsc::channel();
+        let (entered_tx, entered) = std::sync::mpsc::channel();
         let written = Arc::new(std::sync::Mutex::new(Vec::new()));
-        (GatedWriter { gate, written: Arc::clone(&written) }, open, written)
+        let writer = GatedWriter { gate, entered: entered_tx, written: Arc::clone(&written) };
+        (writer, Gate { open, entered, written })
     }
 
     #[tokio::test]
     async fn input_reaches_the_daemon_while_terminal_output_is_stalled() {
-        let (writer, open, written) = gated_writer();
+        let (writer, Gate { open, entered, written }) = gated_writer();
         let (downstream_tx, downstream_rx) = mpsc::channel(2);
         let (control_tx, mut control_rx) = mpsc::unbounded_channel();
         let released = Arc::new(Mutex::new(false));
         let handle = spawn_output_writer(writer, downstream_rx, control_tx, released);
         downstream_tx.send(MainMessage::OutputAcks).await.unwrap();
         downstream_tx.send(MainMessage::Output(b"frame".to_vec())).await.unwrap();
+        entered.recv_timeout(Duration::from_secs(1)).unwrap();
 
         let (input_tx, mut input_rx) = mpsc::channel(8);
         let (mut socket, mut daemon) = tokio::io::duplex(4096);
@@ -498,14 +509,14 @@ mod tests {
 
     #[test]
     fn control_messages_wait_for_preceding_output() {
-        let (writer, open, written) = gated_writer();
+        let (writer, Gate { open, entered, written }) = gated_writer();
         let (downstream_tx, downstream_rx) = mpsc::channel(4);
         let (control_tx, mut control_rx) = mpsc::unbounded_channel();
         let released = Arc::new(Mutex::new(false));
         let handle = spawn_output_writer(writer, downstream_rx, control_tx, released);
         downstream_tx.try_send(MainMessage::Output(b"before".to_vec())).unwrap();
         downstream_tx.try_send(MainMessage::Quit).unwrap();
-        std::thread::sleep(Duration::from_millis(50));
+        entered.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(control_rx.try_recv().is_err());
         open.send(()).unwrap();
         assert!(matches!(control_rx.blocking_recv(), Some(Control::Quit)));
@@ -516,13 +527,13 @@ mod tests {
 
     #[test]
     fn releasing_the_terminal_waits_for_the_in_flight_write_and_blocks_later_output() {
-        let (writer, open, written) = gated_writer();
+        let (writer, Gate { open, entered, written }) = gated_writer();
         let (downstream_tx, downstream_rx) = mpsc::channel(4);
         let (control_tx, _control_rx) = mpsc::unbounded_channel();
         let released = Arc::new(Mutex::new(false));
         let handle = spawn_output_writer(writer, downstream_rx, control_tx, Arc::clone(&released));
         downstream_tx.try_send(MainMessage::Output(b"frame".to_vec())).unwrap();
-        std::thread::sleep(Duration::from_millis(50));
+        entered.recv_timeout(Duration::from_secs(1)).unwrap();
         let cleanup = {
             let written = Arc::clone(&written);
             std::thread::spawn(move || {
