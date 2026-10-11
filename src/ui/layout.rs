@@ -185,7 +185,7 @@ fn composite_emotes(frame: &mut Frame, app: &mut App) {
     if !app.emotes_graphical() || app.emote_placements.is_empty() {
         return;
     }
-    let elapsed = app.emote_anim_start.elapsed().as_millis();
+    let elapsed = app.emote_anim_clock.shown_ms();
     let emote_bg = crate::theme::hex_to_rgb_or(&app.theme.colors.bg, (0, 0, 0));
     // Move placements out so picker/animator field borrows stay disjoint.
     let placements = std::mem::take(&mut app.emote_placements);

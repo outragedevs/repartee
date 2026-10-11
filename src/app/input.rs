@@ -2944,6 +2944,7 @@ pub mod submit_typing_tests {
             emote_placements: Vec::new(),
             emote_animator: crate::app::emote_anim::EmoteAnimator::default(),
             emote_anim_start: Instant::now(),
+            emote_anim_clock: crate::app::emote_anim::AnimationClock::default(),
             emote_picker: crate::ui::emote_picker::EmotePickerState::default(),
             wizard: None,
             settings_panel: None,

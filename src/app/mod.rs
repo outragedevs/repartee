@@ -483,6 +483,8 @@ pub struct App {
     pub emote_animator: crate::app::emote_anim::EmoteAnimator,
     /// Animation clock origin; frame indices derive from `now - this`.
     pub emote_anim_start: std::time::Instant,
+    /// Paced animation time actually shown on screen.
+    pub emote_anim_clock: crate::app::emote_anim::AnimationClock,
     /// Emote picker overlay state (open/hidden + filter/selection).
     pub emote_picker: crate::ui::emote_picker::EmotePickerState,
     /// Open add/edit-server (or future) wizard overlay, if any.
@@ -964,6 +966,7 @@ impl App {
             emote_placements: Vec::new(),
             emote_animator: crate::app::emote_anim::EmoteAnimator::default(),
             emote_anim_start: Instant::now(),
+            emote_anim_clock: crate::app::emote_anim::AnimationClock::default(),
             emote_picker: crate::ui::emote_picker::EmotePickerState::default(),
             wizard: None,
             settings_panel: None,
@@ -1552,18 +1555,17 @@ impl App {
                         .emote_placements
                         .iter()
                         .any(|p| crate::app::emote_anim::EmoteAnimator::is_animated(p.emote_index));
-                let next = if animating {
-                    crate::app::emote_anim::frame_interval(
-                        self.socket_output
-                            .as_ref()
-                            .and_then(|output| output.drain_clock.last_drain()),
-                    )
-                } else {
-                    std::time::Duration::from_hours(24)
-                };
-                emote_anim_sleep
-                    .as_mut()
-                    .reset(tokio::time::Instant::now() + next);
+                let now = tokio::time::Instant::now();
+                let interval = crate::app::emote_anim::frame_interval(
+                    self.socket_output
+                        .as_ref()
+                        .and_then(|output| output.drain_clock.last_drain()),
+                );
+                let next = self
+                    .emote_anim_clock
+                    .schedule(animating, now, interval)
+                    .unwrap_or_else(|| now + std::time::Duration::from_hours(24));
+                emote_anim_sleep.as_mut().reset(next);
             }
 
             let binding_deadline = self.binding_deadline();
@@ -1781,10 +1783,11 @@ impl App {
                     self.drain_pending_web_events();
                 },
                 () = &mut emote_anim_sleep => {
-                    // Waking here re-enters the loop and redraws unconditionally;
-                    // the next draw recomputes each emote's frame index from the
-                    // animation clock. No `needs_full_redraw` (that would clear the
-                    // screen and flicker); the re-arm above schedules the next tick.
+                    // Advance the shown animation time; the redraw on re-entering
+                    // the loop picks each emote's frame from it. No
+                    // `needs_full_redraw` (that would clear the screen and
+                    // flicker); the re-arm above schedules the next tick.
+                    self.emote_anim_clock.advance(self.emote_anim_start.elapsed());
                 },
                 action = self.script_action_rx.recv() => {
                     if let Some(action) = action {

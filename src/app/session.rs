@@ -28,6 +28,11 @@ impl App {
                 self.handle_event(crossterm::event::Event::Resize(cols, rows));
             }
             ShimMessage::Detach => self.should_detach = true,
+            ShimMessage::OutputWritten(bytes) => {
+                if let Some(output) = &self.socket_output {
+                    output.drain_clock.terminal_written(bytes);
+                }
+            }
         }
     }
 
@@ -85,7 +90,7 @@ impl App {
 
         // Read the initial TerminalEnv message to get dimensions + env vars.
         let term_env =
-            match protocol::read_message::<_, protocol::TerminalEnv>(&mut read_half).await {
+            match protocol::read_terminal_env(&mut read_half).await {
                 Ok(env) => env,
                 Err(e) => {
                     tracing::warn!("failed to read initial shim message: {e}");
@@ -107,12 +112,16 @@ impl App {
         let output = socket_writer.output();
         let output_drained = Arc::clone(&output.drained);
         let drain_clock = output.drain_clock.clone();
+        if term_env.output_acks {
+            output.drain_clock.enable_terminal_acks();
+            let _ = output_tx.send(MainMessage::OutputAcks);
+        }
         let output_handle = tokio::spawn(async move {
             let mut write_half = write_half;
             while let Some(msg) = output_rx.recv().await {
                 let output_len = match &msg {
                     MainMessage::Output(data) => data.len(),
-                    MainMessage::Detached | MainMessage::Quit => 0,
+                    MainMessage::Detached | MainMessage::Quit | MainMessage::OutputAcks => 0,
                 };
                 let result = match &msg {
                     MainMessage::Output(data) => protocol::write_output(&mut write_half, data).await,
@@ -121,7 +130,7 @@ impl App {
                 if output_len > 0
                     && output_queued_bytes.fetch_sub(output_len, Ordering::AcqRel) == output_len
                 {
-                    drain_clock.mark_drained();
+                    drain_clock.socket_drained();
                     output_drained.notify_one();
                 }
                 if result.is_err() {
@@ -321,6 +330,43 @@ mod tests {
         let mut app = crate::app::input::submit_typing_tests::test_app();
         app.terminal = Some(crate::ui::setup_socket_terminal(Box::new(Vec::<u8>::new()), 80, 24).unwrap());
         app
+    }
+
+    #[tokio::test]
+    async fn acknowledging_shims_drive_the_terminal_drain_clock() {
+        use crate::session::protocol::{self, MainMessage, ShimMessage, TerminalEnv};
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        let (mut shim, daemon) = tokio::net::UnixStream::pair().unwrap();
+        let env = TerminalEnv {
+            cols: 80,
+            rows: 24,
+            font_size: None,
+            env_vars: std::collections::HashMap::new(),
+            output_acks: true,
+        };
+        protocol::write_message(&mut shim, &env).await.unwrap();
+        app.handle_shim_connect(daemon).await.unwrap();
+        assert!(matches!(
+            protocol::read_message::<_, MainMessage>(&mut shim).await.unwrap(),
+            MainMessage::OutputAcks
+        ));
+        assert!(app.render_terminal_frame());
+        let mut written = 0;
+        while app.socket_output.as_ref().unwrap().drain_clock.last_drain().is_none() {
+            let message = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                protocol::read_message::<_, MainMessage>(&mut shim),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let MainMessage::Output(bytes) = message else {
+                panic!("unexpected control message")
+            };
+            written += bytes.len();
+            app.handle_shim_messages(ShimMessage::OutputWritten(bytes.len() as u64));
+        }
+        assert!(written > 0);
     }
 
     #[tokio::test]

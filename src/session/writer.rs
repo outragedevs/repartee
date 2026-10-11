@@ -21,22 +21,52 @@ struct OutputBuffer {
 struct DrainTiming {
     queued_at: Option<Instant>,
     last: Option<Duration>,
+    terminal_acks: bool,
+    unacked: u64,
 }
 
-/// Measures how long queued output takes to reach the shim, so callers can
-/// pace optional redraws to what the link actually delivers.
+impl DrainTiming {
+    fn finish(&mut self) {
+        if let Some(queued_at) = self.queued_at.take() {
+            self.last = Some(queued_at.elapsed());
+        }
+    }
+}
+
+/// Measures how long queued output takes to reach the terminal, so callers can
+/// pace optional redraws to what the link actually delivers. With shim
+/// acknowledgements the measurement ends when the shim has written every byte;
+/// without them it falls back to the local socket accepting the output.
 #[derive(Clone, Default)]
 pub struct DrainClock(Arc<Mutex<DrainTiming>>);
 
 impl DrainClock {
-    fn start(&self) {
-        self.0.lock().unwrap().queued_at.get_or_insert_with(Instant::now);
+    pub fn enable_terminal_acks(&self) {
+        self.0.lock().unwrap().terminal_acks = true;
     }
 
-    pub fn mark_drained(&self) {
+    fn start(&self, bytes: usize) {
         let mut timing = self.0.lock().unwrap();
-        if let Some(queued_at) = timing.queued_at.take() {
-            timing.last = Some(queued_at.elapsed());
+        timing.queued_at.get_or_insert_with(Instant::now);
+        if timing.terminal_acks {
+            timing.unacked = timing
+                .unacked
+                .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+        }
+    }
+
+    pub fn socket_drained(&self) {
+        let mut timing = self.0.lock().unwrap();
+        if !timing.terminal_acks {
+            timing.finish();
+        }
+    }
+
+    pub fn terminal_written(&self, bytes: u64) {
+        let mut timing = self.0.lock().unwrap();
+        timing.unacked = timing.unacked.saturating_sub(bytes);
+        if timing.unacked == 0 {
+            timing.finish();
         }
     }
 
@@ -100,7 +130,7 @@ impl SocketOutput {
                     .filter(|next| *next <= self.max_queued_bytes)
             })
             .map_err(|current| queue_full_error(current, len, self.max_queued_bytes))?;
-        self.drain_clock.start();
+        self.drain_clock.start(len);
         let data = std::mem::take(&mut buffer.bytes);
         self.tx.send(MainMessage::Output(data)).map_err(|_| {
             self.queued_bytes.fetch_sub(len, Ordering::AcqRel);
@@ -187,20 +217,40 @@ mod tests {
         let mut writer = SocketWriter::new(tx, queued, 1024);
         let clock = writer.output().drain_clock;
         assert_eq!(clock.last_drain(), None);
-        clock.mark_drained();
+        clock.socket_drained();
         assert_eq!(clock.last_drain(), None);
         writer.write_all(b"first").unwrap();
         writer.flush().unwrap();
         std::thread::sleep(Duration::from_millis(20));
         writer.write_all(b"second").unwrap();
         writer.flush().unwrap();
-        clock.mark_drained();
+        clock.socket_drained();
         let first = clock.last_drain().unwrap();
         assert!(first >= Duration::from_millis(20));
         writer.write_all(b"third").unwrap();
         writer.flush().unwrap();
-        clock.mark_drained();
+        clock.socket_drained();
         assert!(clock.last_drain().unwrap() < first);
+    }
+
+    #[test]
+    fn terminal_acks_replace_the_socket_drain_measurement() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let queued = Arc::new(AtomicUsize::new(0));
+        let mut writer = SocketWriter::new(tx, queued, 1024);
+        let clock = writer.output().drain_clock;
+        clock.enable_terminal_acks();
+        writer.write_all(b"first").unwrap();
+        writer.flush().unwrap();
+        writer.write_all(b"second").unwrap();
+        writer.flush().unwrap();
+        clock.socket_drained();
+        assert_eq!(clock.last_drain(), None);
+        std::thread::sleep(Duration::from_millis(20));
+        clock.terminal_written(5);
+        assert_eq!(clock.last_drain(), None);
+        clock.terminal_written(6);
+        assert!(clock.last_drain().unwrap() >= Duration::from_millis(20));
     }
 
     #[test]

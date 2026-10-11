@@ -109,6 +109,42 @@ pub fn frame_interval(last_drain: Option<Duration>) -> Duration {
     })
 }
 
+/// Animation time shown on screen. It only advances when the paced animation
+/// deadline fires, so redraws caused by input or other events repeat the same
+/// frame instead of sending a new one.
+#[derive(Default)]
+pub struct AnimationClock {
+    shown_ms: u128,
+    due: Option<tokio::time::Instant>,
+}
+
+impl AnimationClock {
+    /// Deadline of the next animation frame. An already armed deadline is kept,
+    /// so frequent unrelated wakeups cannot postpone the animation forever.
+    pub fn schedule(
+        &mut self,
+        animating: bool,
+        now: tokio::time::Instant,
+        interval: Duration,
+    ) -> Option<tokio::time::Instant> {
+        if !animating {
+            self.due = None;
+            return None;
+        }
+        Some(*self.due.get_or_insert(now + interval))
+    }
+
+    pub const fn advance(&mut self, elapsed: Duration) {
+        self.shown_ms = elapsed.as_millis();
+        self.due = None;
+    }
+
+    #[must_use]
+    pub const fn shown_ms(&self) -> u128 {
+        self.shown_ms
+    }
+}
+
 /// Current frame index for an emote's `&'static` frame slice at `elapsed_ms`,
 /// without allocating a delay `Vec` (used on the per-frame render path).
 fn frame_index_of(frames: &[crate::emotes::Frame], elapsed_ms: u128) -> usize {
@@ -216,6 +252,24 @@ pub fn composite(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn animation_clock_keeps_its_deadline_across_unrelated_wakeups() {
+        let mut clock = AnimationClock::default();
+        let start = tokio::time::Instant::now();
+        let interval = Duration::from_millis(200);
+        let due = clock.schedule(true, start, interval).unwrap();
+        assert_eq!(due, start + interval);
+        let later = start + Duration::from_millis(150);
+        assert_eq!(clock.schedule(true, later, interval), Some(due));
+        assert_eq!(clock.shown_ms(), 0);
+        clock.advance(Duration::from_millis(210));
+        assert_eq!(clock.shown_ms(), 210);
+        assert_eq!(clock.schedule(true, later, interval), Some(later + interval));
+        assert_eq!(clock.schedule(false, later, interval), None);
+        assert_eq!(clock.schedule(true, start, interval), Some(start + interval));
+        assert_eq!(clock.shown_ms(), 210);
+    }
 
     #[test]
     fn frame_interval_follows_output_drain_time_within_bounds() {
