@@ -2,7 +2,7 @@
 //! chat view to the nearest loaded highlight above or below what is visible.
 
 use super::App;
-use crate::state::buffer::BufferType;
+use crate::state::buffer::{BufferType, Message};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeekDirection {
@@ -10,44 +10,95 @@ pub enum SeekDirection {
     Next,
 }
 
-/// The highlight the last seek targeted. It stays the anchor for the next seek
-/// only while the view has not been scrolled by anything else, so manual
-/// scrolling falls back to the visible edges.
+/// The last seek. It stays in effect only while the view has not been
+/// scrolled by anything else since: `offset` is the scroll offset the seek was
+/// requested at, or where the renderer placed its target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HighlightSeek {
     buffer_id: String,
-    message_id: u64,
+    offset: usize,
     state: SeekState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SeekState {
+    /// The view was scrolled since the last frame, so its edges are unknown;
+    /// the renderer resolves the seek against the frame it is drawing.
+    Deferred { direction: SeekDirection, steps: u32 },
     /// Waiting for the chat renderer, which knows the wrapped line counts, to
-    /// scroll the target into view. Requested at this scroll offset.
-    Pending { from: usize },
-    /// The renderer placed the target at this scroll offset.
-    Shown { offset: usize },
+    /// scroll this message into view.
+    Pending { message_id: u64 },
+    /// The renderer placed this message in view at `offset`.
+    Shown { message_id: u64 },
 }
 
 impl HighlightSeek {
-    fn anchors(&self, buffer_id: &str, scroll_offset: usize) -> bool {
-        let (SeekState::Pending { from: offset } | SeekState::Shown { offset }) = self.state;
-        self.buffer_id == buffer_id && offset == scroll_offset
+    fn valid(&self, buffer_id: &str, scroll_offset: usize) -> bool {
+        self.buffer_id == buffer_id && self.offset == scroll_offset
+    }
+
+    const fn anchor_message(&self) -> Option<u64> {
+        match self.state {
+            SeekState::Pending { message_id } | SeekState::Shown { message_id } => Some(message_id),
+            SeekState::Deferred { .. } => None,
+        }
     }
 
     /// Message the renderer should scroll to, unless the view moved since the
     /// seek was requested.
     pub fn pending_target(&self, buffer_id: &str, scroll_offset: usize) -> Option<u64> {
-        (matches!(self.state, SeekState::Pending { .. }) && self.anchors(buffer_id, scroll_offset))
-            .then_some(self.message_id)
+        match self.state {
+            SeekState::Pending { message_id } if self.valid(buffer_id, scroll_offset) => {
+                Some(message_id)
+            }
+            _ => None,
+        }
     }
 
+    /// Not applied by the renderer yet.
     pub const fn is_pending(&self) -> bool {
-        matches!(self.state, SeekState::Pending { .. })
+        !matches!(self.state, SeekState::Shown { .. })
+    }
+
+    pub const fn is_deferred(&self) -> bool {
+        matches!(self.state, SeekState::Deferred { .. })
+    }
+
+    /// The renderer clamped the scroll offset a deferred seek was requested at;
+    /// that is still the same view, so the seek follows the clamp.
+    pub const fn follow_clamp(&mut self, requested: usize, clamped: usize) {
+        if self.is_deferred() && self.offset == requested {
+            self.offset = clamped;
+        }
     }
 
     pub const fn shown_at(&mut self, offset: usize) {
-        self.state = SeekState::Shown { offset };
+        if let SeekState::Pending { message_id } = self.state {
+            self.state = SeekState::Shown { message_id };
+            self.offset = offset;
+        }
+    }
+}
+
+/// Index of the nearest highlight strictly before `before` (Previous) or
+/// strictly after `after` (Next).
+fn nearest_highlight(
+    messages: &std::collections::VecDeque<Message>,
+    direction: SeekDirection,
+    from: Option<usize>,
+) -> Option<usize> {
+    match direction {
+        SeekDirection::Previous => messages
+            .range(..from.unwrap_or(messages.len()))
+            .rposition(|message| message.highlight),
+        SeekDirection::Next => {
+            let start = from? + 1;
+            messages
+                .iter()
+                .skip(start)
+                .position(|message| message.highlight)
+                .map(|offset| start + offset)
+        }
     }
 }
 
@@ -60,56 +111,103 @@ impl App {
         if buffer.buffer_type == BufferType::Shell {
             return;
         }
-        let messages = &buffer.messages;
-        let index_of = |id: u64| messages.iter().position(|message| message.id == id);
-        let anchor = self
+        let buffer_id = buffer.id.clone();
+        let seek = self
             .highlight_seek
             .as_ref()
-            .filter(|seek| seek.anchors(&buffer.id, self.scroll_offset))
-            .and_then(|seek| index_of(seek.message_id));
-        let target = match direction {
-            SeekDirection::Previous => {
-                let end = anchor
-                    .or_else(|| {
-                        self.chat_rows
-                            .as_ref()
-                            .and_then(|rows| rows.top_message(&buffer.id))
-                            .and_then(index_of)
-                    })
-                    .unwrap_or(messages.len());
-                messages.range(..end).rposition(|message| message.highlight)
-            }
-            SeekDirection::Next => {
-                let Some(start) = anchor.or_else(|| {
-                    self.chat_rows
-                        .as_ref()
-                        .and_then(|rows| rows.bottom_message(&buffer.id))
-                        .and_then(index_of)
-                }) else {
-                    return;
-                };
-                messages
-                    .iter()
-                    .skip(start + 1)
-                    .position(|message| message.highlight)
-                    .map(|offset| start + 1 + offset)
-            }
+            .filter(|seek| seek.valid(&buffer_id, self.scroll_offset));
+        if let Some(message_id) = seek.and_then(HighlightSeek::anchor_message) {
+            let from = buffer.messages.iter().position(|message| message.id == message_id);
+            self.apply_seek(direction, from.map(|index| (index, 1)));
+            return;
+        }
+        if let Some(SeekState::Deferred { direction: queued, steps }) = seek.map(|seek| seek.state)
+        {
+            let steps = if queued == direction { steps.saturating_add(1) } else { 1 };
+            self.defer_seek(buffer_id, direction, steps);
+            return;
+        }
+        let fresh_rows = self
+            .chat_rows
+            .as_ref()
+            .filter(|rows| rows.rendered_at(&buffer_id, self.scroll_offset));
+        let Some(rows) = fresh_rows else {
+            self.defer_seek(buffer_id, direction, 1);
+            return;
         };
+        let edge = match direction {
+            SeekDirection::Previous => rows.top_message(&buffer_id),
+            SeekDirection::Next => rows.bottom_message(&buffer_id),
+        };
+        let from = edge.and_then(|id| buffer.messages.iter().position(|message| message.id == id));
+        self.apply_seek(direction, from.map(|index| (index, 1)));
+    }
+
+    fn defer_seek(&mut self, buffer_id: String, direction: SeekDirection, steps: u32) {
+        self.highlight_seek = Some(HighlightSeek {
+            buffer_id,
+            offset: self.scroll_offset,
+            state: SeekState::Deferred { direction, steps },
+        });
+    }
+
+    /// Resolve a deferred seek against the rows the chat view just rendered.
+    /// Returns whether a target is now pending and the view must be redrawn.
+    pub(crate) fn resolve_deferred_seek(&mut self) -> bool {
+        let Some(HighlightSeek {
+            buffer_id,
+            offset,
+            state: SeekState::Deferred { direction, steps },
+        }) = self.highlight_seek.clone()
+        else {
+            return false;
+        };
+        let fresh = self
+            .chat_rows
+            .as_ref()
+            .filter(|rows| offset == self.scroll_offset && rows.rendered_at(&buffer_id, offset));
+        let (Some(rows), Some(buffer)) = (fresh, self.state.buffers.get(&buffer_id)) else {
+            self.highlight_seek = None;
+            return false;
+        };
+        let edge = match direction {
+            SeekDirection::Previous => rows.top_message(&buffer_id),
+            SeekDirection::Next => rows.bottom_message(&buffer_id),
+        };
+        let from = edge.and_then(|id| buffer.messages.iter().position(|message| message.id == id));
+        self.apply_seek(direction, from.map(|index| (index, steps)));
+        self.highlight_seek.as_ref().is_some_and(HighlightSeek::is_pending)
+    }
+
+    /// Step `steps` highlights from message index `from` (exclusive) in the
+    /// active buffer and request the result, or return to the live end when
+    /// seeking down past the newest highlight.
+    fn apply_seek(&mut self, direction: SeekDirection, from: Option<(usize, u32)>) {
+        let Some(buffer) = self.state.active_buffer() else {
+            return;
+        };
+        let (mut index, steps) = from.map_or((None, 1), |(index, steps)| (Some(index), steps));
+        let mut target = None;
+        for _ in 0..steps.max(1) {
+            match nearest_highlight(&buffer.messages, direction, index) {
+                Some(found) => {
+                    target = Some(found);
+                    index = Some(found);
+                }
+                None => break,
+            }
+        }
         match target {
             Some(index) => {
-                let message_id = messages[index].id;
+                let message_id = buffer.messages[index].id;
+                let buffer_id = buffer.id.clone();
                 // Like PageUp: keep the loaded history while reading it, so
                 // `enforce_scrollback` does not drop the target or later anchors.
                 self.pin_active_backlog();
-                let Some(buffer_id) = self.state.active_buffer_id.clone() else {
-                    return;
-                };
                 self.highlight_seek = Some(HighlightSeek {
                     buffer_id,
-                    message_id,
-                    state: SeekState::Pending {
-                        from: self.scroll_offset,
-                    },
+                    offset: self.scroll_offset,
+                    state: SeekState::Pending { message_id },
                 });
             }
             None if direction == SeekDirection::Next => {
@@ -117,7 +215,11 @@ impl App {
                 self.scroll_offset = 0;
                 self.collapse_backlog_if_at_bottom();
             }
-            None => {}
+            None => {
+                if self.highlight_seek.as_ref().is_some_and(HighlightSeek::is_deferred) {
+                    self.highlight_seek = None;
+                }
+            }
         }
     }
 
@@ -184,7 +286,7 @@ mod tests {
     }
 
     fn target(app: &App) -> u64 {
-        app.highlight_seek.as_ref().unwrap().message_id
+        app.highlight_seek.as_ref().unwrap().anchor_message().unwrap()
     }
 
     fn visible(app: &App) -> (u64, u64) {
@@ -348,6 +450,29 @@ mod tests {
         }
         render(&mut app);
         assert_eq!(target(&app), 40);
+    }
+
+    #[test]
+    fn a_scroll_earlier_in_the_same_batch_is_the_reference_for_the_seek() {
+        let mut app = app_with(&[10, 40, 70]);
+        app.execute_binding(&crate::keybindings::Binding::new(
+            "multi",
+            "scroll_start;seek_previous_highlight",
+        ));
+        render(&mut app);
+        assert_eq!(visible(&app).0, 1);
+        assert!(app.highlight_seek.is_none());
+
+        app.scroll_offset = 0;
+        render(&mut app);
+        app.execute_binding(&crate::keybindings::Binding::new(
+            "multi",
+            "scroll_start;seek_next_highlight;seek_next_highlight",
+        ));
+        render(&mut app);
+        assert_eq!(target(&app), 40);
+        let (top, bottom) = visible(&app);
+        assert!((top..=bottom).contains(&40), "{top}..{bottom}");
     }
 
     #[test]

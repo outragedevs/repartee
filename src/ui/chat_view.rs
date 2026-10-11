@@ -8,11 +8,17 @@ use crate::theme::hex_to_color;
 
 pub struct ChatRows {
     buffer_id: String,
+    scroll_offset: usize,
     rows: Vec<(u64, Option<String>)>,
     walked_messages: usize,
 }
 
 impl ChatRows {
+    /// These rows show `buffer_id` at `scroll_offset`, i.e. they are current.
+    pub fn rendered_at(&self, buffer_id: &str, scroll_offset: usize) -> bool {
+        self.buffer_id == buffer_id && self.scroll_offset == scroll_offset
+    }
+
     /// Message shown in the topmost visible row of `buffer_id`.
     pub fn top_message(&self, buffer_id: &str) -> Option<u64> {
         (self.buffer_id == buffer_id).then(|| self.rows.first().map(|(id, _)| *id)).flatten()
@@ -95,8 +101,17 @@ const fn scroll_pinned_at_top(
     walked_all && scroll >= total.saturating_sub(visible_height)
 }
 
-#[allow(clippy::too_many_lines)]
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
+    render_once(frame, area, app);
+    // A seek requested after scrolling, before this frame, is resolved against
+    // the rows just drawn and then applied by drawing once more.
+    if app.resolve_deferred_seek() {
+        render_once(frame, area, app);
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_once(frame: &mut Frame, area: Rect, app: &mut App) {
     // Clear any emote placements up-front so early returns (shell buffer, zero
     // area) don't leave stale rects that would ghost-render over another view
     // and keep the animation clock spinning. The normal path overwrites this.
@@ -272,12 +287,15 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         // budget cut the line walk short, `total` exceeds
         // visible_height+offset and the offset passes through untouched, so
         // this only clamps at the true top boundary.
+        if let Some(seek) = app.highlight_seek.as_mut() {
+            seek.follow_clamp(app.scroll_offset, scroll);
+        }
         app.scroll_offset = scroll;
         if seek_target.is_some()
             && let Some(seek) = app.highlight_seek.as_mut()
         {
             seek.shown_at(scroll);
-        } else if app.highlight_seek.as_ref().is_some_and(crate::app::highlight_seek::HighlightSeek::is_pending) {
+        } else if app.highlight_seek.as_ref().is_some_and(|seek| seek.is_pending() && !seek.is_deferred()) {
             // The view moved after the seek was requested, or its message is
             // gone: the later action wins.
             app.highlight_seek = None;
@@ -294,6 +312,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         inline_placements = crate::image_preview::inline::placements(&visible_image_rows, area);
         app.chat_rows = Some(ChatRows {
             buffer_id: buf.id.clone(),
+            scroll_offset: scroll,
             walked_messages,
             rows: message_rows.into_iter().skip(skip).take(visible_height)
                 .zip(visible_image_rows.iter().map(|row| row.as_ref().map(|(key, _)| key.url.clone())))
