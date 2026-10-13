@@ -891,8 +891,16 @@ impl App {
 
         let (shell_mgr, shell_rx) = crate::shell::ShellManager::new();
 
+        let script_config = config.scripts.values.iter().flat_map(|(script, entries)| {
+            entries.iter().map(move |(key, value)| {
+                ((script.clone(), key.clone()), value.clone())
+            })
+        }).collect();
+        let mut initial_script_state = state.script_snapshot();
+        initial_script_state.script_config.clone_from(&script_config);
+
         let (script_action_tx, script_action_rx) = mpsc::channel(1024);
-        let script_state = Arc::new(std::sync::RwLock::new(state.script_snapshot()));
+        let script_state = Arc::new(std::sync::RwLock::new(initial_script_state));
         let next_timer_id = Arc::new(std::sync::atomic::AtomicU64::new(1));
         let script_api = Self::build_script_api(
             script_action_tx.clone(),
@@ -998,7 +1006,7 @@ impl App {
             script_state,
             script_action_rx,
             script_commands: HashMap::new(),
-            script_config: HashMap::new(),
+            script_config,
             active_timers: HashMap::new(),
             script_action_tx,
             wrap_indent: 0,

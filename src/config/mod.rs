@@ -455,6 +455,7 @@ impl Default for LoggingConfig {
 pub struct ScriptsConfig {
     pub autoload: Vec<String>,
     pub debug: bool,
+    pub values: HashMap<String, HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

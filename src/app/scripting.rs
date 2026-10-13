@@ -624,7 +624,18 @@ impl App {
                 self.active_timers.retain(|_, handle| !handle.is_finished());
             }
             ScriptAction::SetScriptConfig { script, key, value } => {
+                self.config.scripts.values.entry(script.clone()).or_default()
+                    .insert(key.clone(), value.clone());
                 self.script_config.insert((script, key), value);
+                self.cached_config_toml = None;
+                self.script_snapshot_dirty = true;
+                if let Err(error) = crate::config::save_config(&self.config_path, &self.config) {
+                    tracing::warn!("failed to save script config: {error}");
+                    crate::commands::helpers::add_local_event(
+                        self,
+                        &format!("Could not save script settings: {error}"),
+                    );
+                }
             }
         }
     }
@@ -785,6 +796,10 @@ impl App {
                 params.insert("ident".to_string(), extract_ident(msg.prefix.as_ref()));
                 params.insert("hostname".to_string(), extract_host(msg.prefix.as_ref()));
                 events::NICK
+            }
+            ::irc::proto::Command::Response(::irc::proto::Response::RPL_ISON, args) => {
+                params.insert("nicks".to_string(), args.last().cloned().unwrap_or_default());
+                events::ISON
             }
             ::irc::proto::Command::KICK(channel, kicked, reason) => {
                 params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
@@ -1006,5 +1021,66 @@ mod buffer_switch_tests {
         drop(rx);
         (api.switch_buffer)("a".into());
         assert_eq!((api.active_buffer_id)(()).as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn bundled_keepnick_reclaims_nick_after_empty_ison_reply() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let snap = snapshot();
+        snap.write().unwrap().script_config.insert(
+            ("keepnick".into(), "nicks".into()),
+            "a\tpreferred".into(),
+        );
+        let api = App::build_script_api(tx, snap, Arc::new(AtomicU64::new(0)));
+        let script = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(script.path(), include_str!("../../scripts/keepnick.lua")).unwrap();
+        let mut engine = LuaEngine::new().unwrap();
+        engine.load_script(script.path(), &api).unwrap();
+        engine.fire_timer(1);
+
+        let mut queried = false;
+        while let Ok(action) = rx.try_recv() {
+            if let ScriptAction::Raw { line, conn_id } = action {
+                queried = line == "ISON :preferred" && conn_id.as_deref() == Some("a");
+            }
+        }
+        assert!(queried);
+
+        assert_eq!(
+            engine.emit(&Event {
+                name: "irc.ison".into(),
+                params: HashMap::from([
+                    ("connection_id".into(), "a".into()),
+                    ("nicks".into(), String::new()),
+                ]),
+            }),
+            crate::scripting::event_bus::EventResult::Suppress
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ScriptAction::ChangeNick { nick, conn_id })
+                if nick == "preferred" && conn_id.as_deref() == Some("a")
+        ));
+    }
+}
+
+#[cfg(test)]
+mod script_config_persistence_tests {
+    #[test]
+    fn script_setting_is_saved_to_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        app.config_path = dir.path().join("config.toml");
+        app.handle_script_action(crate::scripting::ScriptAction::SetScriptConfig {
+            script: "keepnick".into(),
+            key: "nicks".into(),
+            value: "network\tpreferred".into(),
+        });
+
+        let saved = std::fs::read_to_string(&app.config_path).unwrap();
+        let config: crate::config::AppConfig = toml::from_str(&saved).unwrap();
+        assert_eq!(config.scripts.values["keepnick"]["nicks"], "network\tpreferred");
+
+        assert_eq!(app.script_config[&("keepnick".into(), "nicks".into())], "network\tpreferred");
     }
 }

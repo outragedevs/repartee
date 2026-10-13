@@ -388,6 +388,27 @@ end)
 <td></td>
 </tr>
 </tbody></table>
+<h3><code>irc.ison</code></h3>
+<p>The server&#39;s reply to an <code>ISON</code> query. Use <code>api.irc.raw(&quot;ISON :nickname&quot;, connection_id)</code> to send a query.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>connection_id</code></td>
+<td>string</td>
+<td>Network that sent the reply</td>
+</tr>
+<tr>
+<td><code>nicks</code></td>
+<td>string</td>
+<td>Space-separated nicknames currently online; empty if none</td>
+</tr>
+</tbody></table>
 <h3><code>irc.topic</code></h3>
 <table>
 <thead>
@@ -751,11 +772,11 @@ end)
 <p>Returns your current nick, or nil if not connected. If no <code>connection_id</code> is given, uses the active buffer&#39;s connection.</p>
 <h3><code>api.store.connections()</code></h3>
 <p>Returns a table of all connections. Each entry has: <code>id</code>, <code>label</code>, <code>nick</code>, <code>connected</code>, <code>user_modes</code>.</p>
-<h3><code>api.store.connection_info(connection_id)</code></h3>
+<h3><code>api.store.connection(connection_id)</code></h3>
 <p>Returns info for a specific connection, or nil.</p>
 <h3><code>api.store.buffers()</code></h3>
 <p>Returns a table of all buffers. Each entry has: <code>id</code>, <code>connection_id</code>, <code>name</code>, <code>buffer_type</code>, <code>topic</code>, <code>unread_count</code>.</p>
-<h3><code>api.store.buffer_info(buffer_id)</code></h3>
+<h3><code>api.store.buffer(buffer_id)</code></h3>
 <p>Returns info for a specific buffer, or nil.</p>
 <h3><code>api.store.nicks(buffer_id)</code></h3>
 <p>Returns a table of nicks in a buffer. Each entry has: <code>nick</code>, <code>prefix</code>, <code>modes</code>, <code>away</code>.</p>
@@ -764,7 +785,7 @@ end)
 <h3><code>api.config.get(key)</code></h3>
 <p>Get a per-script config value.</p>
 <h3><code>api.config.set(key, value)</code></h3>
-<p>Set a per-script config value at runtime.</p>
+<p>Set a per-script string value and save it in <code>config.toml</code> under <code>[scripts.values.&lt;script_name&gt;]</code>. Values remain available after script reloads and application restarts.</p>
 <h3><code>api.config.app_get(key_path)</code></h3>
 <p>Read an app-level config value using dot-separated path. Returns the value as a string, or nil.</p>
 <pre><code class="language-lua">local theme = api.config.app_get(&quot;general.theme&quot;)

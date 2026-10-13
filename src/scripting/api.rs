@@ -42,6 +42,7 @@ pub mod events {
     /// A user changed nick.
     /// Params: `connection_id`, nick, `new_nick`, ident, hostname
     pub const NICK: &str = "irc.nick";
+    pub const ISON: &str = "irc.ison";
 
     /// Channel topic changed.
     /// Params: `connection_id`, nick, channel, topic

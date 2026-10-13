@@ -261,6 +261,13 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v2.2.0
+
+- **Bare display and highlight navigation.** The terminal can show a clean, selectable view of chat text and long URLs, and new bindings seek to earlier or later highlights while retaining their history position.
+- **Smoother terminal output.** Animated emotes follow terminal output pacing, focus changes avoid unnecessary full redraws, and the shim writes output through a dedicated thread.
+- **Configurable status border.** The line above the status and input area can be hidden; reloading this setting resizes open shells.
+- **Lua scripting additions.** Scripts receive `irc.ison` replies, can persist their settings across restarts, and the bundled `keepnick.lua` script can reclaim a preferred nickname.
+
 ### v2.1.3
 
 - **Configurable keyboard bindings.** `/bind` now lists, assigns, deletes, and resets irssi-style key sequences and actions. Custom bindings persist across restarts and reloads, while invalid definitions and failed saves leave the active configuration intact.

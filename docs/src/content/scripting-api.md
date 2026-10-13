@@ -144,6 +144,15 @@ Same as `irc.join` plus `message` (part reason).
 | `ident` | string | |
 | `hostname` | string | |
 
+### `irc.ison`
+
+The server's reply to an `ISON` query. Use `api.irc.raw("ISON :nickname", connection_id)` to send a query.
+
+| Field | Type | Description |
+|---|---|---|
+| `connection_id` | string | Network that sent the reply |
+| `nicks` | string | Space-separated nicknames currently online; empty if none |
+
 ### `irc.topic`
 
 | Field | Type | Description |
@@ -398,7 +407,7 @@ Returns your current nick, or nil if not connected. If no `connection_id` is giv
 
 Returns a table of all connections. Each entry has: `id`, `label`, `nick`, `connected`, `user_modes`.
 
-### `api.store.connection_info(connection_id)`
+### `api.store.connection(connection_id)`
 
 Returns info for a specific connection, or nil.
 
@@ -406,7 +415,7 @@ Returns info for a specific connection, or nil.
 
 Returns a table of all buffers. Each entry has: `id`, `connection_id`, `name`, `buffer_type`, `topic`, `unread_count`.
 
-### `api.store.buffer_info(buffer_id)`
+### `api.store.buffer(buffer_id)`
 
 Returns info for a specific buffer, or nil.
 
@@ -424,7 +433,7 @@ Get a per-script config value.
 
 ### `api.config.set(key, value)`
 
-Set a per-script config value at runtime.
+Set a per-script string value and save it in `config.toml` under `[scripts.values.<script_name>]`. Values remain available after script reloads and application restarts.
 
 ### `api.config.app_get(key_path)`
 

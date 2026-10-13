@@ -160,6 +160,11 @@ pub(crate) fn apply_reloaded_config(app: &mut App, new_config: crate::config::Ap
     // `statusbar.*` is skipped above, but the border changes the chat height.
     let border_changed = app.config.statusbar.border != new_config.statusbar.border;
     app.config = new_config;
+    app.script_config = app.config.scripts.values.iter().flat_map(|(script, entries)| {
+        entries.iter().map(move |(key, value)| {
+            ((script.clone(), key.clone()), value.clone())
+        })
+    }).collect();
     app.publish_keyboard_bindings();
     app.cached_config_toml = None;
     app.inline_previews.invalidate_layout();
@@ -1255,9 +1260,6 @@ pub(crate) fn cmd_script(app: &mut App, args: &[String]) {
             };
             match manager.unload(name) {
                 Ok(()) => {
-                    // Clean up per-script config entries to prevent unbounded growth
-                    // across repeated load/unload/reload cycles.
-                    app.script_config.retain(|(script, _), _| script != name);
                     add_local_event(app, &format!("{C_OK}Unloaded script: {name}{C_RST}"));
                 }
                 Err(e) => {
