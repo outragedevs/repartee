@@ -38,10 +38,12 @@ codex review --base origin/main -c model=gpt-6.1-sol -c review_model=gpt-6.1-sol
 
 Branch: `chore/refresh-compatible-dependencies`
 
+Status: completed on 2026-10-15 — [PR #197](https://github.com/outragedevs/repartee/pull/197).
+
 Prerequisite: none. Keep manifest requirements and the ratatui-core pin.
 
-- [ ] Update Cargo.lock within existing requirements, including transitives.
-- [ ] Update these direct dependencies:
+- [x] Update Cargo.lock within existing requirements, including transitives.
+- [x] Update these direct dependencies:
 
 | Package | Baseline | Target |
 | --- | --- | --- |
@@ -67,12 +69,24 @@ Prerequisite: none. Keep manifest requirements and the ratatui-core pin.
 | wasm-bindgen-futures | 0.4.76 | 0.4.79 |
 | zeroize | 1.9.0 | 1.9.1 |
 
-- [ ] Verify removal of yanked chacha20 0.10.1 and spin 0.9.8; the resolver
+- [x] Verify removal of yanked chacha20 0.10.1 and spin 0.9.8; the resolver
       selected 0.10.2 and 0.9.9 respectively during the audit.
-- [ ] Inspect transitive additions, removals, duplicate versions, and MSRV.
-- [ ] Build native and WASM; smoke-test browser login, reconnect, buffer
+- [x] Inspect transitive additions, removals, duplicate versions, and MSRV.
+- [x] Build native and WASM; smoke-test browser login, reconnect, buffer
       switching, chat copy, and terminal paste.
-- [ ] Complete review/fix and open the PR.
+- [x] Complete review/fix and open the PR.
+
+Completion evidence: manifests and the ratatui-core 0.1.0 pin are unchanged.
+Clippy and all 2,996 application tests pass on Rust 1.97.1 and 1.91.0 with
+no warnings (34 existing native tests ignored on each compiler). Native
+release and WASM builds pass; WASM was also built on Rust 1.91.0 in an
+isolated workspace. Fixture-controlled browser checks cover login, buffer
+switching, chat copy, terminal paste, and WebSocket reconnect/resync. The
+retired-macro policy passes; all 678 registry entries are non-yanked, and
+both generated asset directories and their integrity hashes match. Three
+small source adjustments resolve older Clippy lints. Repository-wide
+formatting differences also exist on the unchanged main baseline and
+remain outside this update. Linux/FreeBSD validation was not performed.
 
 ## PR 2 — Update small utilities and browser dependencies
 
