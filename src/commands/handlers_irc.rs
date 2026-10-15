@@ -1312,7 +1312,7 @@ pub(crate) fn cmd_notice(app: &mut App, args: &[String]) {
 /// server; two args ask `<target>` directly — `/whois nick nick` is the
 /// remote form, the only one that returns 317 idle/signon for users on other
 /// servers.
-fn whois_request_parts(args: &[String]) -> Option<(Option<&str>, &str)> {
+const fn whois_request_parts(args: &[String]) -> Option<(Option<&str>, &str)> {
     match args {
         [] => None,
         [nick] => Some((None, nick.as_str())),

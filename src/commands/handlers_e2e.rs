@@ -2485,8 +2485,8 @@ mod tests {
 
     #[test]
     fn test_help_entries_nonempty_and_unique_names() {
-        assert!(!HELP_ENTRIES.is_empty());
         let mut names: Vec<&str> = HELP_ENTRIES.iter().map(|(n, _)| *n).collect();
+        assert!(!names.is_empty());
         names.sort_unstable();
         let before = names.len();
         names.dedup();

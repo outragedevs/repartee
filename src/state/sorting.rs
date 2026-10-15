@@ -139,7 +139,9 @@ mod tests {
 
         let input: Vec<&Buffer> = vec![&srv_b, &chan_b, &srv_a, &chan_a];
         let labels = std::collections::HashMap::from([("net1", "IRCnet2"), ("net2", "IRCnet")]);
-        let result = sort_buffers(&input, |id| labels.get(id).unwrap_or(&id).to_string());
+        let result = sort_buffers(&input, |id| {
+            labels.get(id).copied().unwrap_or(id).to_string()
+        });
 
         // IRCnet (net2) should come before IRCnet2 (net1)
         assert_eq!(result[0].connection_id, "net2");
