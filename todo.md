@@ -129,20 +129,46 @@ are non-yanked. Linux/FreeBSD and live IRC validation were not performed.
 
 Branch: `chore/update-native-runtime-dependencies`
 
+Status: completed on 2026-10-15 — [PR #199](https://github.com/outragedevs/repartee/pull/199).
+
 Prerequisite: PR 1. Group these native integrations into one bounded PR,
 with separate commits and validation for each dependency.
 
-- [ ] Update rusqlite 0.39.0 → 0.40.2, preserving `bundled-full`.
-- [ ] Inspect the bundled SQLite change and relevant release notes.
-- [ ] Validate opening an existing database copy, migrations, history
+- [x] Update rusqlite 0.39.0 → 0.40.2, preserving `bundled-full`.
+- [x] Inspect the bundled SQLite change and relevant release notes.
+- [x] Validate opening an existing database copy, migrations, history
       read/write, transactions, search, and restart persistence. Never use
       the live user database as a migration test fixture.
-- [ ] Update tikv-jemallocator 0.6.1 → 0.7.0, retaining Linux-only selection.
-- [ ] Validate the allocator on Linux, including native linking, application
+- [x] Update tikv-jemallocator 0.6.1 → 0.7.0, retaining Linux-only selection.
+- [x] Validate the allocator on Linux, including native linking, application
       startup, and a bounded allocation workload. macOS tests do not cover it.
-- [ ] Verify the existing Linux ARM64/AMD64 and FreeBSD release build paths;
+- [x] Verify the existing Linux ARM64/AMD64 and FreeBSD release build paths;
       explicitly record any platform validation that cannot be performed.
-- [ ] Build native; complete review/fix and open the PR.
+- [x] Build native; complete review/fix and open the PR.
+
+Completion evidence: rusqlite 0.40.2 keeps bundled-full and upgrades
+SQLite 3.51.3 to 3.53.2; tikv-jemallocator 0.7.0 uses jemalloc 5.3.1
+and remains Linux-only. The upgrades have separate commits. A fixed
+synthetic SQLite 3.51.3 file tests legacy read-only reads, application
+migrations, message-ID backfill, FTS, transaction commit/rollback, and
+reopen persistence. No live user database was used.
+
+Clippy and 2,997 application tests pass without warnings on macOS with
+Rust 1.97.1 and 1.91.0; Linux ARM64 / Rust 1.98.1 passes Clippy and
+2,998 tests, including the bounded threaded allocator workload. Each run
+ignores the same 34 existing native tests. Native debug/release builds
+and startup checks pass on Linux ARM64; the release daemon also starts
+offline and migrates the fixture database. The build retains 64 KiB
+jemalloc pages and runs on a 4 KiB-page kernel; larger-page kernels were
+not tested. Linking to jemalloc was verified. macOS release also passes.
+
+Target resolution and existing release workflow paths were checked for
+Linux ARM64/AMD64 and FreeBSD AMD64, with bundled SQLite throughout and
+no custom allocator on FreeBSD. AMD64 Linux and FreeBSD binaries were
+not built or run here. Two pre-existing Clippy warnings on the newer
+Linux compiler were fixed without behavior changes. The dependency
+policy passes; all 681 registry entries are non-yanked and none declares
+an MSRV above 1.91. Existing frontend assets are unchanged.
 
 ## PR 4 — Migrate the Lua integration
 

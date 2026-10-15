@@ -149,7 +149,7 @@ impl ShrinkClient {
 
         tokio::time::timeout(timeout, request_future)
             .await
-            .map_or(Err(ShrinkError::Timeout), |result| result)
+            .unwrap_or(Err(ShrinkError::Timeout))
     }
 
     /// 409 from the API means the slug we asked for is already taken.
