@@ -92,19 +92,38 @@ remain outside this update. Linux/FreeBSD validation was not performed.
 
 Branch: `chore/update-browser-utilities`
 
+Status: completed on 2026-10-15 — [PR #198](https://github.com/outragedevs/repartee/pull/198).
+
 Prerequisite: PR 1. Keep Leptos at its latest stable 0.8 line; do not adopt
 0.9 prereleases. Keep the terminal renderer unchanged in this PR.
 
-- [ ] Update base64 0.22.1 → 0.23.1.
-- [ ] Update gloo-net 0.6.0 → 0.7.0 and gloo-timers 0.3.0 → 0.4.0.
-- [ ] Update emojis 0.8.2 → 0.9.0.
-- [ ] Update marked 17.0.4 → 18.1.1 and docs/bun.lock.
-- [ ] Validate base64 round trips and existing protocol fixtures.
-- [ ] Exercise HTTP authentication, WebSocket reconnect, timers, emoji
+- [x] Update base64 0.22.1 → 0.23.1.
+- [x] Update gloo-net 0.6.0 → 0.7.0 and gloo-timers 0.3.0 → 0.4.0.
+- [x] Update emojis 0.8.2 → 0.9.0.
+- [x] Update marked 17.0.4 → 18.1.1 and docs/bun.lock.
+- [x] Validate base64 round trips and existing protocol fixtures.
+- [x] Exercise HTTP authentication, WebSocket reconnect, timers, emoji
       lookup, and the emoji picker in the compiled browser application.
-- [ ] Run `make docs`, inspect generated HTML changes, then `make docs-check`;
+- [x] Run `make docs`, inspect generated HTML changes, then `make docs-check`;
       check headings, tables, code blocks, links, and blank-line handling.
-- [ ] Build native and WASM; complete review/fix and open the PR.
+- [x] Build native and WASM; complete review/fix and open the PR.
+
+Completion evidence: base64 0.23.1, gloo-net 0.7.0, gloo-timers 0.4.0,
+emojis 0.9.0, and marked 18.1.1 are in use without application source
+changes. Leptos, beamterm, and the ratatui-core pin are unchanged; older
+transitive gloo and emoji versions remain where required by their parents.
+Clippy and all 2,996 application tests pass without warnings on Rust
+1.97.1 and 1.91.0 (34 existing native tests ignored on each compiler).
+Native release and both WASM compiler builds pass. Fixture-controlled
+browser checks cover rejected/successful HTTP authentication, emoji
+search/categories/insertion, heartbeat intervals, asynchronous reconnect,
+buffer switching, chat copy, and terminal paste. Existing E2E round trips
+and SASL SCRAM RFC vectors pass with the upgraded base64 dependency.
+Both documentation make targets pass; all 16 pages preserve semantic
+structure, links, text, and code whitespace, render correctly, and have
+valid local fragment links. Only block-element whitespace changed on
+two pages. The dependency policy passes and all 681 registry entries
+are non-yanked. Linux/FreeBSD and live IRC validation were not performed.
 
 ## PR 3 — Update SQLite and the Linux allocator
 
