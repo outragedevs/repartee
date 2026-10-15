@@ -219,7 +219,7 @@ fn substitute_vars_impl(input: &str, params: &[&str], literal: bool) -> String {
 // ---------------------------------------------------------------------------
 
 /// Find the matching closing brace, respecting nested braces.
-fn find_matching_brace(input: &[char], open_pos: usize) -> Option<usize> {
+const fn find_matching_brace(input: &[char], open_pos: usize) -> Option<usize> {
     let mut depth = 1;
     let mut i = open_pos + 1;
     while i < input.len() && depth > 0 {
