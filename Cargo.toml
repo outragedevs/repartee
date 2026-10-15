@@ -64,7 +64,7 @@ whatlang = "0.18"
 rusqlite = { version = "0.39", features = ["bundled-full"] }
 aes-gcm = "0.10"
 getrandom = "0.4"
-base64 = "0.22"
+base64 = "0.23.1"
 sha2 = "0.10"
 sha1 = "0.10"
 hmac = "0.12"
