@@ -4,7 +4,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum_extra::extract::cookie::CookieJar;
-use futures::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt};
 use tokio::time::{Duration, interval};
 
 use super::protocol::{WebCommand, WebEvent};
@@ -256,7 +256,7 @@ fn initial_active_buffer_from_snapshot(state: &AppHandle) -> Option<String> {
 
 /// Send a `WebEvent` as JSON text through the WebSocket.
 async fn send_json(
-    tx: &mut futures::stream::SplitSink<axum::extract::ws::WebSocket, axum::extract::ws::Message>,
+    tx: &mut futures_util::stream::SplitSink<axum::extract::ws::WebSocket, axum::extract::ws::Message>,
     event: &WebEvent,
 ) -> Result<(), ()> {
     match serde_json::to_string(event) {

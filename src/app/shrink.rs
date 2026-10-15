@@ -43,7 +43,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::FutureExt;
+use futures_util::FutureExt;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
@@ -262,7 +262,7 @@ fn spawn_outgoing_worker(
                     peer_handle: pending.peer_handle,
                 })
             });
-            // futures::FutureExt::catch_unwind wraps the future
+            // futures_util::FutureExt::catch_unwind wraps the future
             // so a panic becomes Err(payload) instead of unwinding
             // the worker task.
             match outcome.catch_unwind().await {
@@ -411,7 +411,7 @@ async fn resolve_shortenings(
         let chunk_futures = chunk
             .iter()
             .map(|(idx, url)| async move { (*idx, client.shorten(url, timeout).await) });
-        miss_results.extend(futures::future::join_all(chunk_futures).await);
+        miss_results.extend(futures_util::future::join_all(chunk_futures).await);
     }
 
     let mut resolved: Vec<(usize, UrlShortening)> = hits;

@@ -140,12 +140,11 @@ pub fn apply_translate_credentials(
 /// can decide whether to materialise a secret (server start) or not (config
 /// validation, dry runs).
 pub fn ensure_session_secret(web: &mut super::WebConfig, env_path: &Path) -> Result<()> {
-    use rand::RngExt;
     if web.session_secret.len() == 32 {
         return Ok(());
     }
     let mut bytes = [0u8; 32];
-    rand::rng().fill(&mut bytes);
+    getrandom::fill(&mut bytes).expect("OS random number generator failed");
     set_env_value(env_path, "WEB_SESSION_SECRET", &hex::encode(bytes))?;
     web.session_secret = bytes.to_vec();
     Ok(())

@@ -1106,7 +1106,7 @@ fn rekey_rejects_unknown_peer() {
         // We need stranger's secret — since we don't expose it, construct
         // a brand-new identity specifically for this forgery test.
         let mut seed = [0u8; 32];
-        rand::fill(&mut seed);
+        getrandom::fill(&mut seed).expect("OS random number generator failed");
         seed
     });
     let stranger_pub = stranger_id.public_bytes();

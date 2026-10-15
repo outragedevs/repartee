@@ -1,6 +1,7 @@
 use color_eyre::eyre::{Result, WrapErr as _, eyre};
 use irc::client::data::Config;
 use tokio_rustls::rustls;
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _};
 use zeroize::Zeroizing;
 
 pub(super) fn configure(config: &mut Config, configured: Option<&str>) -> Result<()> {
@@ -21,13 +22,15 @@ pub(super) fn configure(config: &mut Config, configured: Option<&str>) -> Result
     let pem = Zeroizing::new(std::fs::read_to_string(&path).wrap_err_with(|| {
         format!("cannot read client certificate {}: expected a UTF-8 PEM file containing the certificate chain and unencrypted private key", path.display())
     })?);
-    let certs = rustls_pemfile::certs(&mut pem.as_bytes())
-        .collect::<std::io::Result<Vec<_>>>()
+    let certs = CertificateDer::pem_slice_iter(pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
         .wrap_err_with(|| format!("invalid PEM certificate chain in {}", path.display()))?;
     if certs.is_empty() {
         return Err(eyre!("no CERTIFICATE block in {}", path.display()));
     }
-    let key = rustls_pemfile::private_key(&mut pem.as_bytes())
+    let key = PrivateKeyDer::pem_slice_iter(pem.as_bytes())
+        .next()
+        .transpose()
         .wrap_err_with(|| format!("invalid PEM private key in {}", path.display()))?
         .ok_or_else(|| eyre!("no unencrypted private key in {}; include a PKCS#8 PRIVATE KEY, RSA PRIVATE KEY or EC PRIVATE KEY block in the same PEM file", path.display()))?;
     rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
@@ -83,12 +86,10 @@ mod tests {
         let path = dir.path().join("identity.pem");
         let (cert, key) = identity();
         std::fs::write(&path, format!("{cert}{key}")).unwrap();
-        let chain = rustls_pemfile::certs(&mut cert.as_bytes())
-            .collect::<std::io::Result<Vec<_>>>()
+        let chain = CertificateDer::pem_slice_iter(cert.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        let private_key = rustls_pemfile::private_key(&mut key.as_bytes())
-            .unwrap()
-            .unwrap();
+        let private_key = PrivateKeyDer::from_pem_slice(key.as_bytes()).unwrap();
         let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
         let mut roots = rustls::RootCertStore::empty();
         roots.add(chain[0].clone()).unwrap();

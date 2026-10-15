@@ -1,6 +1,6 @@
 use base64::Engine as _;
 use color_eyre::eyre::{Result, eyre};
-use futures::StreamExt;
+use futures_util::StreamExt;
 use irc::proto::Command;
 
 use super::{AuthenticateAck, IrcSender, await_authenticate_plus, sasl_failure, sasl_success};

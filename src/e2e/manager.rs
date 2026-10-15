@@ -1208,7 +1208,7 @@ impl E2eManager {
     ) -> Result<KeyRekey> {
         // Fresh ephemeral X25519 from us (initiator of the distribution).
         let mut eph_sk_bytes = Zeroizing::new([0u8; 32]);
-        rand::fill(eph_sk_bytes.as_mut_slice());
+        getrandom::fill(eph_sk_bytes.as_mut_slice()).expect("OS random number generator failed");
         let eph_sk = StaticSecret::from(*eph_sk_bytes);
         let eph_pub = XPub::from(&eph_sk).to_bytes();
 
@@ -1231,7 +1231,7 @@ impl E2eManager {
         let (wrap_nonce, wrap_ct) = aead::encrypt(&wrap_key, info.as_bytes(), new_sk.as_slice())?;
 
         let mut nonce = [0u8; 16];
-        rand::fill(&mut nonce);
+        getrandom::fill(&mut nonce).expect("OS random number generator failed");
         let pubkey = self.identity.public_bytes();
         let sig_payload = signed_keyrekey_payload(
             wire_channel,
@@ -1610,10 +1610,10 @@ impl E2eManager {
         self.prune_expired_pending();
 
         let mut nonce = [0u8; 16];
-        rand::fill(&mut nonce);
+        getrandom::fill(&mut nonce).expect("OS random number generator failed");
 
         let mut eph_secret = Zeroizing::new([0u8; 32]);
-        rand::fill(eph_secret.as_mut_slice());
+        getrandom::fill(eph_secret.as_mut_slice()).expect("OS random number generator failed");
         let eph_pub = {
             let sec = StaticSecret::from(*eph_secret);
             XPub::from(&sec).to_bytes()
@@ -1899,7 +1899,7 @@ impl E2eManager {
         // Fresh ephemeral X25519 keypair for ECDH with the initiator's
         // ephemeral public.
         let mut our_eph_secret = Zeroizing::new([0u8; 32]);
-        rand::fill(our_eph_secret.as_mut_slice());
+        getrandom::fill(our_eph_secret.as_mut_slice()).expect("OS random number generator failed");
         let our_eph_sec = StaticSecret::from(*our_eph_secret);
         let our_eph_pub = XPub::from(&our_eph_sec).to_bytes();
 
@@ -1918,7 +1918,7 @@ impl E2eManager {
         // pubkey in one atomic step.
         let our_pubkey = self.identity.public_bytes();
         let mut rsp_nonce = [0u8; 16];
-        rand::fill(&mut rsp_nonce);
+        getrandom::fill(&mut rsp_nonce).expect("OS random number generator failed");
         let sig_payload = signed_keyrsp_payload(
             crate::e2e::wire_context(&req.channel),
             &our_pubkey,
@@ -2052,7 +2052,7 @@ impl E2eManager {
 
         // Fresh ephemeral X25519 keypair for ECDH.
         let mut our_eph_secret = Zeroizing::new([0u8; 32]);
-        rand::fill(our_eph_secret.as_mut_slice());
+        getrandom::fill(our_eph_secret.as_mut_slice()).expect("OS random number generator failed");
         let our_eph_sec = StaticSecret::from(*our_eph_secret);
         let our_eph_pub = XPub::from(&our_eph_sec).to_bytes();
 
@@ -2062,7 +2062,7 @@ impl E2eManager {
 
         let our_pubkey = self.identity.public_bytes();
         let mut rsp_nonce = [0u8; 16];
-        rand::fill(&mut rsp_nonce);
+        getrandom::fill(&mut rsp_nonce).expect("OS random number generator failed");
         let sig_payload = signed_keyrsp_payload(
             crate::e2e::wire_context(&req.channel),
             &our_pubkey,

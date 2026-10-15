@@ -1236,7 +1236,7 @@ mod tests {
     }
     #[tokio::test]
     async fn real_client_sends_one_private_reply_per_ctcp_request() {
-        use futures::StreamExt;
+        use futures_util::StreamExt;
         use std::fmt::Write as _;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::TcpListener;

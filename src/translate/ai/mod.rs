@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use futures::future::BoxFuture;
+use futures_util::future::BoxFuture;
 use thiserror::Error;
 
 use self::client::{FailureKind, ModelClient};

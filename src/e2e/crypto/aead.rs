@@ -59,7 +59,7 @@ pub fn decrypt(key: &[u8; KEY_LEN], nonce: &Nonce, aad: &[u8], ciphertext: &[u8]
 /// Generate a fresh 32-byte session key.
 pub fn generate_session_key() -> Result<SessionKey> {
     let mut key = Zeroizing::new([0u8; KEY_LEN]);
-    rand::fill(key.as_mut_slice());
+    getrandom::fill(key.as_mut_slice()).expect("OS random number generator failed");
     Ok(key)
 }
 

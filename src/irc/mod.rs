@@ -34,7 +34,7 @@ use std::collections::HashSet;
 
 use base64::Engine as _;
 use color_eyre::eyre::{Result, eyre};
-use futures::StreamExt;
+use futures_util::StreamExt;
 use irc::client::prelude::*;
 use tokio::sync::mpsc;
 

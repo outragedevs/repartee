@@ -212,9 +212,8 @@ impl SessionStore {
     /// Create a new session. Returns the **raw** token to send in the cookie;
     /// only its HMAC is stored.
     pub fn create(&mut self, user_agent: &str) -> String {
-        use rand::RngExt;
         let mut bytes = [0u8; 32];
-        rand::rng().fill(&mut bytes);
+        getrandom::fill(&mut bytes).expect("OS random number generator failed");
         let raw = hex::encode(bytes);
         let token_hash = self.hash(&raw);
         let now = unix_now();

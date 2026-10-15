@@ -381,7 +381,7 @@ impl ScriptManager {
     fn resolve_path(&self, name_or_path: &str) -> PathBuf {
         // Expand ~/  to the user's home directory
         if let Some(rest) = name_or_path.strip_prefix("~/")
-            && let Some(home) = dirs::home_dir()
+            && let Some(home) = std::env::home_dir()
         {
             return home.join(rest);
         }

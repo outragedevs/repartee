@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use color_eyre::eyre::{Result, eyre};
 use tokio_rustls::rustls::ServerConfig;
-use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _};
 
 use crate::constants;
 
@@ -64,9 +64,7 @@ pub fn generate_self_signed_to(dir: &Path) -> Result<(PathBuf, PathBuf)> {
 fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
     let file = std::fs::File::open(path)
         .map_err(|e| eyre!("failed to open cert {}: {e}", path.display()))?;
-    let mut reader = std::io::BufReader::new(file);
-
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(file)
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| eyre!("failed to parse cert PEM: {e}"))?;
 
@@ -79,15 +77,87 @@ fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
     let file = std::fs::File::open(path)
         .map_err(|e| eyre!("failed to open key {}: {e}", path.display()))?;
-    let mut reader = std::io::BufReader::new(file);
-
-    rustls_pemfile::private_key(&mut reader)?
+    PrivateKeyDer::pem_reader_iter(file)
+        .next()
+        .transpose()?
         .ok_or_else(|| eyre!("no private key found in {}", path.display()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_private_key_accepts_all_supported_pem_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key.pem");
+        for label in ["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY"] {
+            std::fs::write(
+                &path,
+                format!("-----BEGIN CERTIFICATE-----\nBAUG\n-----END CERTIFICATE-----\n-----BEGIN {label}-----\nAQID\n-----END {label}-----\n"),
+            ).unwrap();
+            let key = load_private_key(&path).unwrap();
+            assert_eq!(key.secret_der(), &[1, 2, 3]);
+            assert!(matches!(
+                (label, key),
+                ("PRIVATE KEY", PrivateKeyDer::Pkcs8(_))
+                    | ("RSA PRIVATE KEY", PrivateKeyDer::Pkcs1(_))
+                    | ("EC PRIVATE KEY", PrivateKeyDer::Sec1(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn load_pem_rejects_missing_and_malformed_material() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid.pem");
+        std::fs::write(&path, "not a PEM file").unwrap();
+        assert!(
+            load_certs(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("no certificates found")
+        );
+        assert!(
+            load_private_key(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("no private key found")
+        );
+        for label in ["CERTIFICATE", "PRIVATE KEY"] {
+            std::fs::write(
+                &path,
+                format!("-----BEGIN {label}-----\ninvalid!\n-----END {label}-----"),
+            )
+            .unwrap();
+            assert!(load_certs(&path).is_err());
+            assert!(load_private_key(&path).is_err());
+        }
+    }
+
+    #[test]
+    fn load_certs_preserves_chain_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chain.pem");
+        let key = rcgen::KeyPair::generate().unwrap();
+        let first = rcgen::CertificateParams::new(vec!["first.localhost".into()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let second = rcgen::CertificateParams::new(vec!["second.localhost".into()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        std::fs::write(
+            &path,
+            format!("{}{}{}", first.pem(), key.serialize_pem(), second.pem()),
+        )
+        .unwrap();
+        assert_eq!(
+            load_certs(&path).unwrap(),
+            vec![first.der().clone(), second.der().clone()]
+        );
+    }
 
     #[test]
     fn generate_self_signed_creates_valid_pem_files() {
