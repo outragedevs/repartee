@@ -184,14 +184,12 @@ pub fn ShellView() -> impl IntoView {
     };
 
     // F6: Paste handler using synchronous ClipboardEvent data (no async API needed).
-    let on_paste = move |ev: leptos::ev::Event| {
+    let on_paste = move |ev: web_sys::ClipboardEvent| {
         ev.prevent_default();
         let Some(buffer_id) = state.active_buffer.get_untracked() else {
             return;
         };
-        // Downcast to ClipboardEvent for clipboard_data() access.
-        let clip_ev: &web_sys::ClipboardEvent = ev.unchecked_ref();
-        let text = clip_ev
+        let text = ev
             .clipboard_data()
             .and_then(|dt| dt.get_data("text/plain").ok())
             .unwrap_or_default();

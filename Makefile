@@ -1,4 +1,4 @@
-.PHONY: all clean wasm build release package publish install test clippy check test-web clippy-web docs docs-check
+.PHONY: all clean wasm build release package publish install test clippy check test-web clippy-web docs docs-check dependency-check
 
 # Full clean rebuild: clean → WASM → native release
 all: clean wasm release
@@ -45,11 +45,11 @@ clippy: clippy-web
 	cargo clippy -p repartee --all-targets
 
 # Run web-ui unit tests (host-side; DOM-free helpers only)
-test-web:
+test-web: dependency-check
 	cargo test -p repartee-web
 
 # Run clippy on the web-ui crate
-clippy-web:
+clippy-web: dependency-check
 	cargo clippy -p repartee-web --all-targets
 
 # Regenerate the static docs site from docs/src/content/*.md and
@@ -83,3 +83,7 @@ docs-check: docs
 		exit 1; \
 	fi
 	@echo "docs/ is up to date"
+
+dependency-check:
+	python3 -m unittest discover -s scripts -p test_dependency_policy.py
+	python3 scripts/check_dependency_policy.py

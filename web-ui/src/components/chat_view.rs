@@ -805,10 +805,7 @@ pub fn ChatView() -> impl IntoView {
     // The guard `if !raw.contains('\n')` skips the override for
     // partial selections within a single span (where the default is
     // already correct).
-    let on_copy = move |ev: web_sys::Event| {
-        let Some(clip_ev) = ev.dyn_ref::<web_sys::ClipboardEvent>() else {
-            return;
-        };
+    let on_copy = move |ev: web_sys::ClipboardEvent| {
         let Some(window) = web_sys::window() else {
             return;
         };
@@ -848,11 +845,11 @@ pub fn ChatView() -> impl IntoView {
             return;
         }
         let formatted = out.join("\n");
-        let Some(clipboard) = clip_ev.clipboard_data() else {
+        let Some(clipboard) = ev.clipboard_data() else {
             return;
         };
         if clipboard.set_data("text/plain", &formatted).is_ok() {
-            clip_ev.prevent_default();
+            ev.prevent_default();
         }
     };
 
