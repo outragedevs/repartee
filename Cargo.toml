@@ -119,7 +119,7 @@ tempfile = "3.26"
 # jemalloc returns memory to the OS more aggressively and is already the
 # default system allocator on FreeBSD. macOS keeps libsystem_malloc.
 [target.'cfg(target_os = "linux")'.dependencies]
-tikv-jemallocator = "0.6"
+tikv-jemallocator = "0.7.0"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
