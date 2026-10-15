@@ -61,7 +61,7 @@ indexmap = { version = "2", features = ["serde"] }
 regex = "1"
 isolang = { version = "2.4", default-features = false }
 whatlang = "0.18"
-rusqlite = { version = "0.39", features = ["bundled-full"] }
+rusqlite = { version = "0.40.2", features = ["bundled-full"] }
 aes-gcm = "0.10"
 getrandom = "0.4"
 base64 = "0.23.1"

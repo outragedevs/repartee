@@ -495,6 +495,88 @@ mod tests {
     }
 
     #[test]
+    fn legacy_sqlite_file_migrates_and_preserves_history_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy history #1.db");
+        std::fs::write(
+            &path,
+            include_bytes!("../../fixtures/storage/sqlite-039.db"),
+        )
+        .unwrap();
+        let path = path.to_str().unwrap();
+
+        {
+            let db = open_readonly_at(path).unwrap();
+            assert!(!column_exists(&db, "messages", "ts_ms"));
+            let rows = crate::storage::query::get_messages(
+                &db, "fixture", "#history", None, 10, false, None,
+            )
+            .unwrap();
+            assert_eq!(rows[0].text, "preserved legacy history");
+            assert_eq!(rows[0].ts_ms, 1_700_000_000_000);
+        }
+
+        {
+            let db = open_database_at(path, false).unwrap();
+            assert!(column_exists(&db, "messages", "ts_ms"));
+            assert!(!index_exists(&db, "idx_messages_msg_id"));
+            let rows = crate::storage::query::search_messages(
+                &db,
+                "preserved legacy history",
+                Some("fixture"),
+                Some("#history"),
+                10,
+            )
+            .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].msg_id, "fixture-server-id");
+
+            let tx = db.unchecked_transaction().unwrap();
+            tx.execute(
+                "INSERT INTO messages(network, buffer, timestamp, type, text)
+                 VALUES ('fixture', '#history', 1700000001, 'message', 'rolledback')",
+                [],
+            )
+            .unwrap();
+            tx.rollback().unwrap();
+
+            let tx = db.unchecked_transaction().unwrap();
+            tx.execute(
+                "INSERT INTO messages(msg_id, network, buffer, timestamp, ts_ms, type, text)
+                 VALUES ('new-id', 'fixture', '#history', 1700000002, 1700000002001,
+                         'message', 'committed history')",
+                [],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+
+        for readonly in [false, true] {
+            let db = if readonly {
+                open_readonly_at(path).unwrap()
+            } else {
+                open_database_at(path, false).unwrap()
+            };
+            assert_eq!(crate::storage::query::get_message_count(&db).unwrap(), 2);
+            for (needle, expected) in [("committed history", 1), ("rolledback", 0)] {
+                let rows = crate::storage::query::search_messages(
+                    &db,
+                    needle,
+                    Some("fixture"),
+                    Some("#history"),
+                    10,
+                )
+                .unwrap();
+                assert_eq!(rows.len(), expected);
+            }
+            let result: String = db
+                .query_row("PRAGMA quick_check", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(result, "ok");
+        }
+    }
+
+    #[test]
     fn open_creates_tables() {
         let db = open_database(false).unwrap();
         assert!(table_exists(&db, "messages"));
