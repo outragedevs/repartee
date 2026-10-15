@@ -67,7 +67,7 @@ pub fn authcid_payload(user: &str) -> Vec<u8> {
 #[must_use]
 pub fn resolve_key_path(configured: &str) -> PathBuf {
     if let Some(rest) = configured.strip_prefix("~/") {
-        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(rest);
+        return std::env::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(rest);
     }
     let path = Path::new(configured);
     if path.is_absolute() {

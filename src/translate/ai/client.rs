@@ -839,7 +839,7 @@ mod tests {
 
     async fn oversized_response() -> Response {
         let chunks = (0..=MAX_RESPONSE_BYTES / 1024).map(|_| Ok::<_, Infallible>(vec![b'x'; 1024]));
-        Response::new(Body::from_stream(futures::stream::iter(chunks)))
+        Response::new(Body::from_stream(futures_util::stream::iter(chunks)))
     }
 
     async fn rate_limited_response() -> impl IntoResponse {

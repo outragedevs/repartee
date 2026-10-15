@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 
-use futures::{SinkExt, StreamExt, channel::mpsc, future};
+use futures_channel::mpsc;
+use futures_util::{SinkExt, StreamExt, future};
 use gloo_net::websocket::{Message, futures::WebSocket};
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
@@ -165,7 +166,7 @@ async fn run_ws_loop(ws: WebSocket, state: &AppState, mut cmd_rx: mpsc::Unbounde
     loop {
         let cmd_next = cmd_rx.next();
         let ws_next = ws_rx.next();
-        futures::pin_mut!(cmd_next, ws_next);
+        futures_util::pin_mut!(cmd_next, ws_next);
 
         match future::select(cmd_next, ws_next).await {
             // Outgoing command from UI.

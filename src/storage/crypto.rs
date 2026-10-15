@@ -23,7 +23,7 @@ pub struct EncryptedData {
 /// Generate a random 256-bit key and return it as a 64-character hex string.
 pub fn generate_key_hex() -> Zeroizing<String> {
     let mut key_bytes = Zeroizing::new([0u8; 32]);
-    rand::fill(key_bytes.as_mut_slice());
+    getrandom::fill(key_bytes.as_mut_slice()).expect("OS random number generator failed");
     Zeroizing::new(hex::encode(&key_bytes))
 }
 
@@ -39,7 +39,7 @@ pub fn encrypt(plaintext: &str, key: &Key<Aes256Gcm>) -> Result<EncryptedData, S
     let cipher = Aes256Gcm::new(key);
 
     let mut iv_bytes = [0u8; 12];
-    rand::fill(&mut iv_bytes);
+    getrandom::fill(&mut iv_bytes).expect("OS random number generator failed");
     let nonce = Nonce::from_slice(&iv_bytes);
 
     let ciphertext_bytes = cipher
@@ -170,7 +170,7 @@ fn read_named_key(path: &Path, key_name: &str) -> Result<Option<Zeroizing<String
 pub fn encrypt_bytes(plaintext: &[u8], key: &Key<Aes256Gcm>) -> Result<Vec<u8>, String> {
     let cipher = Aes256Gcm::new(key);
     let mut iv_bytes = [0u8; 12];
-    rand::fill(&mut iv_bytes);
+    getrandom::fill(&mut iv_bytes).expect("OS random number generator failed");
     let nonce = Nonce::from_slice(&iv_bytes);
     let ciphertext = cipher
         .encrypt(nonce, plaintext)

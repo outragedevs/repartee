@@ -34,7 +34,7 @@ impl std::fmt::Debug for EphemeralKeypair {
 impl EphemeralKeypair {
     pub fn generate() -> Result<Self> {
         let mut seed = Zeroizing::new([0u8; 32]);
-        rand::fill(seed.as_mut_slice());
+        getrandom::fill(seed.as_mut_slice()).expect("OS random number generator failed");
         let secret = StaticSecret::from(*seed);
         let public = PublicKey::from(&secret);
         Ok(Self { secret, public })

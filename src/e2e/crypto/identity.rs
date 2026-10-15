@@ -19,7 +19,7 @@ impl Identity {
     /// Generate a fresh identity using the OS CSPRNG.
     pub fn generate() -> Result<Self> {
         let mut seed = Zeroizing::new([0u8; SECRET_KEY_LENGTH]);
-        rand::fill(seed.as_mut_slice());
+        getrandom::fill(seed.as_mut_slice()).expect("OS random number generator failed");
         Ok(Self {
             signing: SigningKey::from_bytes(&seed),
         })

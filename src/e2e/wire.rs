@@ -175,7 +175,7 @@ pub fn build_aad(channel: &str, msgid: MsgId, ts: i64, part: u8, total: u8) -> V
 /// Generate a fresh 8-byte random message ID.
 pub fn fresh_msgid() -> MsgId {
     let mut id = [0u8; 8];
-    rand::fill(&mut id);
+    getrandom::fill(&mut id).expect("OS random number generator failed");
     id
 }
 

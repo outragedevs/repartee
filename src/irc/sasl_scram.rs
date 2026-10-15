@@ -15,7 +15,6 @@
 use base64::Engine as _;
 use color_eyre::eyre::{Result, eyre};
 use hmac::{Mac, SimpleHmac};
-use rand::RngExt;
 use sha1::Sha1;
 use sha2::digest::core_api::BlockSizeUser;
 use sha2::{Digest, Sha256, Sha512};
@@ -98,7 +97,7 @@ pub fn saslprep(value: &str) -> String {
 #[must_use]
 pub fn client_first(username: &str) -> (String, String, String) {
     let mut nonce_bytes = [0u8; 24];
-    rand::rng().fill(&mut nonce_bytes);
+    getrandom::fill(&mut nonce_bytes).expect("OS random number generator failed");
     let client_nonce = base64::engine::general_purpose::STANDARD.encode(nonce_bytes);
 
     // RFC 5802: SASLprep the username, then escape '=' and ',' — in that order,

@@ -1,5 +1,5 @@
 use color_eyre::eyre::{Result, eyre};
-use futures::StreamExt;
+use futures_util::StreamExt;
 use irc::proto::{Command, Message, Response};
 
 pub const NETWORKS_CAP: &str = "soju.im/bouncer-networks";

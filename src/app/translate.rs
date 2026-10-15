@@ -27,7 +27,7 @@
 
 use std::sync::Arc;
 
-use futures::FutureExt;
+use futures_util::FutureExt;
 use tokio::sync::{Semaphore, mpsc};
 
 use crate::state::buffer::BufferType;
@@ -8154,7 +8154,7 @@ mod tests {
         fn translate(
             &self,
             req: crate::translate::TranslateRequest,
-        ) -> futures::future::BoxFuture<'_, TranslateOutcome> {
+        ) -> futures_util::future::BoxFuture<'_, TranslateOutcome> {
             let text = self.0.clone();
             Box::pin(async move { TranslateOutcome::Translated { id: req.id, text } })
         }

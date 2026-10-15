@@ -52,7 +52,7 @@ const DEFAULT_THEME_FILE: &str = "default.theme";
 use std::path::{Path, PathBuf};
 
 pub fn home_dir() -> PathBuf {
-    let base = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let base = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
     base.join(format!(".{APP_NAME}"))
 }
 

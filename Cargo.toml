@@ -52,9 +52,8 @@ toml = "1.0"
 tracing = "0.1"
 tracing-log = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-futures = "0.3"
+futures-util = { version = "0.3", features = ["sink"] }
 chrono = { version = "0.4", features = ["serde"] }
-dirs = "6"
 unicode-width = "0.2"
 unicode-segmentation = "1"
 thiserror = "2.0"
@@ -64,7 +63,7 @@ isolang = { version = "2.4", default-features = false }
 whatlang = "0.18"
 rusqlite = { version = "0.39", features = ["bundled-full"] }
 aes-gcm = "0.10"
-rand = "0.10"
+getrandom = "0.4"
 base64 = "0.22"
 sha2 = "0.10"
 sha1 = "0.10"
@@ -100,7 +99,6 @@ axum-extra = { version = "0.12", features = ["cookie-signed"] }
 time = "0.3"
 tower = { version = "0.5", features = ["limit"] }
 rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
-rustls-pemfile = "2"
 tokio-rustls = "0.26"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 rust-embed = "8"

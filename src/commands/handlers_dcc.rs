@@ -234,7 +234,7 @@ fn initiate_dcc_chat(app: &mut App, nick: &str, passive: bool) {
     if passive {
         // Passive/reverse DCC: send CTCP with fake IP + port 0 + token.
         // The remote peer will set up a listener and reply with their address.
-        let start = rand::random::<u32>() % 63;
+        let start = getrandom::u32().expect("OS random number generator failed") % 63;
         let token = (0..63).map(|offset| (start + offset) % 63 + 1).find(|candidate| {
             app.dcc.records.values().all(|record| record.passive_token != Some(*candidate))
         });
@@ -401,12 +401,22 @@ fn resolve_own_ip(app: &App, conn_id: &str) -> Option<std::net::IpAddr> {
 /// Returns 0 for (0,0) (OS-assigned), the single port for (N,N),
 /// or a random port within the range.
 fn pick_bind_port(range: (u16, u16)) -> u16 {
-    match range {
-        (0, 0) => 0,
-        (lo, hi) if lo == hi => lo,
-        (lo, hi) => {
-            use rand::RngExt;
-            rand::rng().random_range(lo..=hi)
+    pick_bind_port_with(range, || {
+        getrandom::u32().expect("OS random number generator failed")
+    })
+}
+
+fn pick_bind_port_with((lo, hi): (u16, u16), mut random: impl FnMut() -> u32) -> u16 {
+    assert!(lo <= hi, "invalid DCC port range");
+    if lo == hi {
+        return lo;
+    }
+    let width = u32::from(hi) - u32::from(lo) + 1;
+    let threshold = width.wrapping_neg() % width;
+    loop {
+        let sample = random();
+        if sample >= threshold {
+            return lo + u16::try_from(sample % width).expect("port offset fits in u16");
         }
     }
 }
@@ -555,7 +565,33 @@ fn cmd_dcc_reject(app: &mut App, args: &[String]) {
 
 #[cfg(test)]
 mod tests {
-    use super::format_duration;
+    use super::{format_duration, pick_bind_port_with};
+
+    #[test]
+    fn fixed_bind_ports_do_not_need_randomness() {
+        for port in [0, 1, 65535] {
+            assert_eq!(
+                pick_bind_port_with((port, port), || panic!("unexpected random draw")),
+                port
+            );
+        }
+    }
+
+    #[test]
+    fn random_bind_port_includes_both_endpoints_and_rejects_biased_samples() {
+        let mut draws = [0, 6, 9].into_iter();
+        let mut random = || draws.next().expect("too many random draws");
+        assert_eq!(pick_bind_port_with((5000, 5002), &mut random), 5000);
+        assert_eq!(pick_bind_port_with((5000, 5002), || 8), 5002);
+        assert_eq!(draws.next(), Some(9));
+    }
+
+    #[test]
+    fn random_bind_port_handles_full_u16_range() {
+        assert_eq!(pick_bind_port_with((0, u16::MAX), || 0), 0);
+        assert_eq!(pick_bind_port_with((0, u16::MAX), || u32::MAX), u16::MAX);
+        assert_eq!(pick_bind_port_with((65534, 65535), || u32::MAX), 65535);
+    }
 
     #[test]
     fn format_duration_seconds_only() {
