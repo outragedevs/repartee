@@ -78,6 +78,23 @@ make release
 - A terminal with 256-color or truecolor support (iTerm2, Alacritty, kitty, WezTerm, Ghostty, Subterm, etc.)
 - A modern web browser for the web frontend (optional)
 
+### Dependency checks
+
+`make dependency-check` uses Python 3.9+ and Cargo to check the entire workspace
+with all optional features and all target platforms. It rejects the retired
+`proc-macro-error` and `proc-macro-error2` packages and their attribute helpers,
+even when renamed or introduced transitively. A stale lockfile fails the check.
+
+The check runs before `make clippy` and `make test`, on every pull request and
+push to `main`, and before release frontend builds. Regression fixtures verify
+that renamed, optional, target-specific dependencies cannot bypass the policy.
+
+The frontend uses the stable Leptos 0.8 line (minimum 0.8.22), whose macro and
+RSTML dependencies no longer need those packages. Keep `Cargo.lock` committed;
+validate framework updates with `make clippy`, `make test`, `make wasm`, and
+browser interaction tests. This policy blocks these known retired packages;
+it does not replace a general dependency security audit.
+
 ---
 
 ## Quick Start

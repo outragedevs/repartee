@@ -26,15 +26,8 @@ jobs:
       - name: Install trunk
         uses: jetli/trunk-action@v0.5.0
 
-      - name: Build WASM
-        run: |
-          cd web-ui
-          trunk build --release
-
-      - name: Stage WASM assets
-        run: |
-          rm -rf static/web && mkdir -p static/web
-          cp -r web-ui/dist/* static/web/
+      - name: Build WASM and check dependency policy
+        run: make dependency-check wasm
 
       - name: Upload WASM assets
         uses: actions/upload-artifact@v4
