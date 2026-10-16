@@ -275,16 +275,42 @@ live IRC, SASL, E2E, and web sessions were not exercised.
 
 Branch: `chore/update-beamterm`
 
+Status: completed on 2026-10-16 — [PR #202](https://github.com/outragedevs/repartee/pull/202).
+
 Prerequisites: PRs 1 and 2. Keep this separate from native TUI rendering.
 
-- [ ] Update beamterm-renderer 0.17.0 → 1.0.0 and its dependent packages.
-- [ ] Adapt renderer initialization, cells, font atlas, and resize APIs.
-- [ ] Validate WebGL initialization, font loading, resize, cursor rendering,
+- [x] Update beamterm-renderer 0.17.0 → 1.0.0 and its dependent packages.
+- [x] Adapt renderer initialization, cells, font atlas, and resize APIs.
+- [x] Validate WebGL initialization, font loading, resize, cursor rendering,
       colors, Unicode/wide glyphs, selection/copy, bracketed paste, and keys.
-- [ ] Exercise the shell with a real PTY/backend as well as deterministic
+- [x] Exercise the shell with a real PTY/backend as well as deterministic
       browser fixtures; synthetic transport alone is insufficient here.
-- [ ] Rebuild WASM and embedded assets, then the native release.
-- [ ] Complete review/fix and open the PR.
+- [x] Rebuild WASM and embedded assets, then the native release.
+- [x] Complete review/fix and open the PR.
+
+Completion evidence: beamterm-renderer, beamterm-core, and beamterm-data
+moved to 1.0.0, and beamterm-unicode 1.0.0 was added. The only API change
+in use is `terminal_size()`, which now returns a struct. `is_double_width`
+now relies on `unicode-width` alone. Comparing old and new over every
+Unicode scalar value found a single difference (U+17D8, width 3). The old
+`emojis` 0.8 copy left the tree, so Cargo.lock stays at 687 packages.
+
+A one-off side-by-side run compared the main build and this branch. Each
+used a real zsh PTY behind the web UI, and canvases were read back and
+hashed. Both builds produced pixel-identical output for a rendering
+fixture covering colors, styles, wide and emoji glyphs, Nerd Font glyphs,
+box drawing, and the cursor. They also matched on an interaction scenario
+covering bracketed paste, special keys, Alt, Ctrl+C, and font-zoom atlas
+replacement, on mouse selection with copy, and on PTY sizes after window
+resize and zoom.
+
+The run found two issues that predate this change and also occur on main.
+First, `/shell` typed in the browser does not start the web PTY until the
+user switches buffers, because the first `ShellResize` is ignored. Second,
+wide glyphs occupy three cells. Clippy and all application tests pass on
+Rust 1.97.1 and 1.91.0, and the WASM crate builds on 1.91.0. `make wasm`,
+`make release`, and the dependency policy pass. The beamterm packages are
+not yanked and declare MSRV 1.90.
 
 ## PR 7 — Migrate Ratatui and retire the rendering pin
 

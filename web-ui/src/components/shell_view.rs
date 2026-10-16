@@ -332,7 +332,8 @@ fn schedule_next_frame(cb: &RenderCb) {
 
 /// Full-screen refresh: convert shell screen data to a flat cell grid for beamterm.
 fn render_screen(terminal: &mut Terminal, data: &ShellScreenData) {
-    let (grid_cols, grid_rows) = terminal.terminal_size();
+    let size = terminal.terminal_size();
+    let (grid_cols, grid_rows) = (size.cols, size.rows);
     let pty_cols = data.cols;
     let cols = grid_cols.min(pty_cols);
     let total = grid_cols as usize * grid_rows as usize;
@@ -428,7 +429,8 @@ fn send_shell_resize(state: &AppState, terminal: &Terminal) {
     let Some(buffer_id) = state.active_buffer.get_untracked() else {
         return;
     };
-    let (cols, rows) = terminal.terminal_size();
+    let size = terminal.terminal_size();
+    let (cols, rows) = (size.cols, size.rows);
     if cols > 0 && rows > 0 {
         crate::ws::send_command(&WebCommand::ShellResize {
             buffer_id,
