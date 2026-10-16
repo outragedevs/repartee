@@ -4,8 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use beamterm_renderer::{
-    CellData, FontStyle, GlyphEffect, SelectionMode, Terminal, is_double_width,
-    mouse::MouseSelectOptions,
+    CellData, FontStyle, GlyphEffect, SelectionMode, Terminal, mouse::MouseSelectOptions,
 };
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
@@ -333,13 +332,44 @@ fn schedule_next_frame(cb: &RenderCb) {
 /// Full-screen refresh: convert shell screen data to a flat cell grid for beamterm.
 fn render_screen(terminal: &mut Terminal, data: &ShellScreenData) {
     let size = terminal.terminal_size();
-    let (grid_cols, grid_rows) = (size.cols, size.rows);
+    let cells = layout_screen(data, size.cols, size.rows);
+    let _ = terminal.update_cells(cells.into_iter().map(GridCell::into_cell_data));
+    let _ = terminal.render_frame();
+}
+
+/// One grid cell as handed to beamterm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GridCell<'a> {
+    symbol: &'a str,
+    style: FontStyle,
+    effect: GlyphEffect,
+    fg: u32,
+    bg: u32,
+}
+
+impl<'a> GridCell<'a> {
+    const fn new(symbol: &'a str, style: FontStyle, effect: GlyphEffect, fg: u32, bg: u32) -> Self {
+        Self { symbol, style, effect, fg, bg }
+    }
+
+    fn into_cell_data(self) -> CellData<'a> {
+        CellData::new(self.symbol, self.style, self.effect, self.fg, self.bg)
+    }
+}
+
+/// Lay the shell screen rows onto a `grid_cols` × `grid_rows` cell grid.
+///
+/// Each character of a row is one terminal column. The server already sends
+/// a wide glyph's continuation column as a space, and beamterm draws the
+/// glyph's right half over the cell that follows it, so no extra filler is
+/// added here.
+fn layout_screen(data: &ShellScreenData, grid_cols: u16, grid_rows: u16) -> Vec<GridCell<'_>> {
     let pty_cols = data.cols;
     let cols = grid_cols.min(pty_cols);
     let total = grid_cols as usize * grid_rows as usize;
-    let mut cells: Vec<CellData<'_>> = Vec::with_capacity(total);
+    let mut cells: Vec<GridCell<'_>> = Vec::with_capacity(total);
 
-    let blank = CellData::new(
+    let blank = GridCell::new(
         " ",
         FontStyle::Normal,
         GlyphEffect::None,
@@ -373,7 +403,7 @@ fn render_screen(terminal: &mut Terminal, data: &ShellScreenData) {
                         && col == data.cursor_col;
 
                     if is_cursor {
-                        cells.push(CellData::new(
+                        cells.push(GridCell::new(
                             symbol,
                             style,
                             effect,
@@ -381,20 +411,9 @@ fn render_screen(terminal: &mut Terminal, data: &ShellScreenData) {
                             CURSOR_COLOR,
                         ));
                     } else {
-                        cells.push(CellData::new(symbol, style, effect, fg, bg));
+                        cells.push(GridCell::new(symbol, style, effect, fg, bg));
                     }
                     col += 1;
-
-                    if is_double_width(symbol) && col < cols {
-                        cells.push(CellData::new(
-                            " ",
-                            FontStyle::Normal,
-                            GlyphEffect::None,
-                            fg,
-                            bg,
-                        ));
-                        col += 1;
-                    }
                 }
             }
         }
@@ -405,7 +424,7 @@ fn render_screen(terminal: &mut Terminal, data: &ShellScreenData) {
                 && row_idx == data.cursor_row as usize
                 && col == data.cursor_col;
             if is_cursor {
-                cells.push(CellData::new(
+                cells.push(GridCell::new(
                     " ",
                     FontStyle::Normal,
                     GlyphEffect::None,
@@ -419,8 +438,7 @@ fn render_screen(terminal: &mut Terminal, data: &ShellScreenData) {
         }
     }
 
-    let _ = terminal.update_cells(cells.into_iter());
-    let _ = terminal.render_frame();
+    cells
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -573,4 +591,61 @@ pub(crate) fn key_event_to_bytes(ev: &KeyboardEvent) -> Vec<u8> {
     }
 
     Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{ShellScreenRow, ShellSpan};
+
+    fn span(text: &str) -> ShellSpan {
+        ShellSpan {
+            text: text.into(),
+            fg: String::new(),
+            bg: String::new(),
+            bold: false,
+            italic: false,
+            underline: false,
+            inverse: false,
+        }
+    }
+
+    fn screen(rows: &[&str], cursor: (u16, u16)) -> ShellScreenData {
+        ShellScreenData {
+            cols: 12,
+            rows: rows.iter().map(|text| ShellScreenRow { spans: vec![span(text)] }).collect(),
+            cursor_row: cursor.0,
+            cursor_col: cursor.1,
+            cursor_visible: true,
+        }
+    }
+
+    fn symbols<'a>(cells: &[GridCell<'a>]) -> Vec<&'a str> {
+        cells.iter().map(|cell| cell.symbol).collect()
+    }
+
+    /// The server sends a wide glyph's continuation column as a space, so each
+    /// character is one column; beamterm draws the glyph's right half over
+    /// that following cell. Adding another filler shifted the rest of the row.
+    #[test]
+    fn wide_glyphs_keep_server_columns() {
+        let data = screen(&["中 a文 b|"], (0, 7));
+        let cells = layout_screen(&data, 12, 1);
+        assert_eq!(cells.len(), 12);
+        assert_eq!(
+            symbols(&cells),
+            ["中", " ", "a", "文", " ", "b", "|", " ", " ", " ", " ", " "]
+        );
+        // The cursor sits on the server's column 7, right after the bar.
+        assert_eq!(cells[7].bg, CURSOR_COLOR);
+        assert!(cells.iter().enumerate().all(|(i, cell)| (cell.bg == CURSOR_COLOR) == (i == 7)));
+    }
+
+    #[test]
+    fn rows_are_clipped_to_the_grid_and_padded() {
+        let data = screen(&["abcdefghijklmnop", "x"], (5, 5));
+        let cells = layout_screen(&data, 4, 3);
+        assert_eq!(symbols(&cells), ["a", "b", "c", "d", "x", " ", " ", " ", " ", " ", " ", " "]);
+        assert!(cells.iter().all(|cell| cell.bg != CURSOR_COLOR), "cursor outside the grid");
+    }
 }
