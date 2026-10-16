@@ -135,7 +135,7 @@ pub fn frame_key(app: &crate::app::App, size: (u16, u16)) -> u64 {
     app.scroll_offset.hash(&mut hash);
     app.wrap_indent.hash(&mut hash);
     app.input.value.matches('\n').count().min(5).hash(&mut hash);
-    app.picker.font_size().hash(&mut hash);
+    super::font_cells(&app.picker).hash(&mut hash);
     format!("{:?}", app.picker.protocol_type()).hash(&mut hash);
     app.in_tmux.hash(&mut hash);
     app.is_socket_attached.hash(&mut hash);
@@ -375,7 +375,7 @@ impl InlinePreviews {
                         cols: placement.rect.width,
                         rows: placement.rect.height,
                         first_row: placement.first_row,
-                        font: context.picker.font_size(),
+                        font: super::font_cells(context.picker),
                         protocol: context.picker.protocol_type(),
                         background: context.background,
                         tmux_direct: context.tmux_direct,
@@ -387,7 +387,7 @@ impl InlinePreviews {
                         let cropped = crop_thumbnail(
                             image,
                             placement,
-                            context.picker.font_size(),
+                            super::font_cells(context.picker),
                             context.background,
                         );
                         let mut png = Cursor::new(Vec::new());

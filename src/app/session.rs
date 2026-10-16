@@ -203,7 +203,7 @@ impl App {
                 "updating picker font_size from shim terminal"
             );
             #[expect(deprecated, reason = "only API to set font dimensions")]
-            let mut new_picker = ratatui_image::picker::Picker::from_fontsize(font_size);
+            let mut new_picker = ratatui_image::picker::Picker::from_fontsize(font_size.into());
             new_picker.set_protocol_type(self.picker.protocol_type());
             self.picker = new_picker;
         }

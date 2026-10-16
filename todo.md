@@ -317,29 +317,52 @@ not yanked and declare MSRV 1.90.
 
 Branch: `chore/update-ratatui-rendering`
 
+Status: completed on 2026-10-16 — [PR #204](https://github.com/outragedevs/repartee/pull/204).
+
 Prerequisite: PR 1. Highest regression risk; keep this independent and last.
 
-- [ ] Update ratatui 0.30.0 → 0.30.2 and ratatui-image 10.0.8 → 11.1.0.
-- [ ] Trial ratatui-core 0.1.0 → 0.1.2 together with those updates.
+- [x] Update ratatui 0.30.0 → 0.30.2 and ratatui-image 10.0.8 → 11.1.0.
+- [x] Trial ratatui-core 0.1.0 → 0.1.2 together with those updates.
       ratatui 0.30.2 requires core ^0.1.2, so updating only the umbrella
       package while retaining =0.1.0 is not possible.
-- [ ] Inspect the upstream skip-cell / forced-width changes and adapt the
+- [x] Inspect the upstream skip-cell / forced-width changes and adapt the
       image integration where necessary.
-- [ ] Reproduce the original blank-inline-image regression with a targeted
+- [x] Reproduce the original blank-inline-image regression with a targeted
       test before removing or relaxing the protective pin.
-- [ ] Validate inline emotes, the emote picker, image previews, scrolling,
+- [x] Validate inline emotes, the emote picker, image previews, scrolling,
       resize, and redraw over wide glyphs in actual supported terminals.
-- [ ] Cover Kitty, iTerm2, Sixel, and fallback paths where available; clearly
+- [x] Cover Kitty, iTerm2, Sixel, and fallback paths where available; clearly
       distinguish buffer/PTY simulations from real terminal validation.
-- [ ] Preserve the selected image decoders and the previous dependency
+- [x] Preserve the selected image decoders and the previous dependency
       reduction; inspect feature changes for reintroduced encoders.
-- [ ] Verify both locked source builds and dependency resolution without
+- [x] Verify both locked source builds and dependency resolution without
       the repository lockfile, since cargo-install previously exposed this
       regression. Use `make package` for the packaging check.
-- [ ] Remove or relax the explicit core pin only after the regression is
+- [x] Remove or relax the explicit core pin only after the regression is
       demonstrated fixed. If it remains broken, leave this PR unmerged and
       record the reproducer and upstream blocker.
-- [ ] Build native; complete review/fix and open the PR.
+- [x] Build native; complete review/fix and open the PR.
+
+Progress: ratatui 0.30.2, ratatui-core 0.1.2, and ratatui-image 11.1.0 are
+in place, and the explicit core pin is removed. A new test drives Kitty,
+iTerm2, and Sixel images through the real output backend and checks the
+`vt100` screen. It passes on main and fails with core 0.1.2 plus
+ratatui-image 10, because text beside the image is never written. It passes
+again with ratatui-image 11, which forces the escape cell to width 1.
+
+ratatui-core 0.1.2 also queries cursor position and screen size during
+`clear` and `resize` on fixed viewports, which failed in the tty-less
+daemon and would have detached the session on every full redraw.
+`GlyphBackend` now answers those queries for socket terminals.
+
+Image codec features are unchanged. `make package` passes, and the packaged
+crate resolved without a lockfile picks the fixed versions. Clippy and all
+application tests pass on Rust 1.97.1 and 1.91.0. Everything so far is a
+buffer, `vt100`, or PTY simulation. Inline emotes, the emote picker, image
+previews, scrolling, resize, and reattach still needed a check in real
+terminals. The operator ran the release build in Ghostty (Kitty graphics)
+on 2026-10-16 and confirmed it works. iTerm2 and Sixel were covered by the
+simulated backend test only, and Linux/FreeBSD builds were not exercised.
 
 ## Final reconciliation
 
