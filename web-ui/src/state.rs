@@ -895,7 +895,7 @@ impl AppState {
                     });
                 }
             },
-            WebEvent::ActiveBufferChanged { buffer_id } => {
+            WebEvent::ActiveBufferChanged { buffer_id, session_id } => {
                 // Skip if the client already switched to this buffer locally
                 // (the click handler sets active_buffer before the server echoes).
                 // Without this guard:
@@ -909,7 +909,9 @@ impl AppState {
                 // `web_follow_tui_buffer=false` to make this tab
                 // ignore TUI-driven buffer changes. Default is to
                 // follow (the single-tab + TUI workflow expects sync).
-                if !follow_tui_active_buffer() {
+                // A switch addressed to this tab alone (its own `/shell`) is
+                // not TUI-driven and always applies.
+                if session_id.is_none() && !follow_tui_active_buffer() {
                     return;
                 }
                 if self.active_buffer.get_untracked().as_deref() != Some(&buffer_id) {

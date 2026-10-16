@@ -322,6 +322,7 @@ impl AppState {
             self.pending_web_events
                 .push(crate::web::protocol::WebEvent::ActiveBufferChanged {
                     buffer_id: id.to_string(),
+                    session_id: None,
                 });
         }
     }

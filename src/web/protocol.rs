@@ -194,8 +194,13 @@ pub enum WebEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
     },
-    /// Active buffer changed (syncs TUI ↔ Web).
-    ActiveBufferChanged { buffer_id: String },
+    /// Active buffer changed (syncs TUI ↔ Web). With `session_id`, only that
+    /// session switches — a web command that moved its own tab into a shell.
+    ActiveBufferChanged {
+        buffer_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
     /// Web settings changed (`timestamp_format`, `line_height`, theme, nick sizing).
     SettingsChanged {
         timestamp_format: String,
