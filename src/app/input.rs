@@ -77,7 +77,7 @@ impl App {
                 self.cached_term_cols = cols;
                 self.cached_term_rows = rows;
                 if let Some(terminal) = &mut self.terminal {
-                    if let Err(error) = terminal.resize(ratatui::layout::Rect::new(0, 0, cols, rows)) {
+                    if let Err(error) = crate::ui::resize_terminal(terminal, cols, rows) {
                         tracing::debug!("terminal resize deferred to redraw: {error}");
                     }
                     self.needs_full_redraw = true;
@@ -122,7 +122,7 @@ impl App {
         else {
             return;
         };
-        if new_size == self.picker.font_size() {
+        if new_size == crate::image_preview::font_cells(&self.picker) {
             return;
         }
         tracing::debug!(
@@ -131,7 +131,7 @@ impl App {
             "refreshing picker font_size after resize"
         );
         #[expect(deprecated, reason = "only API to set font dimensions on a Picker")]
-        let mut new_picker = ratatui_image::picker::Picker::from_fontsize(new_size);
+        let mut new_picker = ratatui_image::picker::Picker::from_fontsize(new_size.into());
         new_picker.set_protocol_type(self.picker.protocol_type());
         self.picker = new_picker;
         self.emote_animator.clear();

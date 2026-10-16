@@ -36,10 +36,7 @@ exclude = [
 ]
 
 [dependencies]
-ratatui = "0.30"
-# Pin: ratatui-core 0.1.1 regressed wide-grapheme/skip-cell rendering
-# (emoji/image cells render blank). Held at 0.1.0 until upstream fix.
-ratatui-core = "=0.1.0"
+ratatui = "0.30.2"
 crossterm = { version = "0.29", features = ["event-stream", "serde"] }
 postcard = { version = "1.1", features = ["use-std"] }
 libc = "0.2"
@@ -88,7 +85,7 @@ hkdf = "0.13.0"
 bip39 = "3.0.0"
 zeroize = { version = "1", features = ["derive", "serde"] }
 mlua = { version = "0.12.2", features = ["lua54", "vendored", "send"] }
-ratatui-image = { version = "10.0", default-features = false, features = ["crossterm"] }
+ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
 spellbook = "0.4"
 image = { version = "0.25", default-features = false, features = [
     "rayon", "bmp", "dds", "exr", "ff", "gif", "hdr", "ico",

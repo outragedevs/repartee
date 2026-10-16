@@ -61,7 +61,7 @@ pub fn setup_socket_terminal(
         EnableFocusChange,
         EnableBracketedPaste
     )?;
-    let backend = glyph_backend::GlyphBackend::new(writer);
+    let backend = glyph_backend::GlyphBackend::remote(writer, ratatui::layout::Size::new(cols, rows));
     // Use Fixed viewport — Fullscreen would call backend.size() every frame,
     // which queries ioctl on stdout (= /dev/null in the daemon) and gets garbage.
     // Fixed viewport uses the stored area, updated via terminal.resize() on SIGWINCH.
@@ -72,6 +72,15 @@ pub fn setup_socket_terminal(
         },
     )?;
     Ok(terminal)
+}
+
+/// Resize a socket-attached terminal to the shim's new screen size.
+///
+/// The backend learns the size first: clearing the resized viewport asks it
+/// for the screen size, which the daemon cannot read from a tty.
+pub fn resize_terminal(terminal: &mut Tui, cols: u16, rows: u16) -> std::io::Result<()> {
+    terminal.backend_mut().set_remote_size(ratatui::layout::Size::new(cols, rows));
+    terminal.resize(ratatui::layout::Rect::new(0, 0, cols, rows))
 }
 
 /// Restore the terminal to normal mode.

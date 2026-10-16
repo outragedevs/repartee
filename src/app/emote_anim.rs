@@ -189,7 +189,7 @@ fn render_frame_on_bg(
     cols: u16,
     rows: u16,
 ) -> image::RgbaImage {
-    let (fw, fh) = picker.font_size();
+    let (fw, fh) = crate::image_preview::font_cells(picker);
     let cw = u32::from(cols.max(1)) * u32::from(fw.max(1));
     let ch = u32::from(rows.max(1)) * u32::from(fh.max(1));
 

@@ -125,7 +125,7 @@ mod tests {
             queued.fetch_sub(bytes.len(), Ordering::AcqRel);
         }
         app.is_socket_attached = true;
-        app.picker = Picker::from_fontsize((20, 40));
+        app.picker = Picker::from_fontsize((20, 40).into());
         app.picker.set_protocol_type(ProtocolType::Kitty);
         app.image_preview = PreviewStatus::Ready {
             url: "https://example.org/test.png".into(),

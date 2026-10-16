@@ -140,7 +140,7 @@ fn render_once(frame: &mut Frame, area: Rect, app: &mut App) {
     // Per-frame emote sizing from the live terminal cell size + config caps.
     // `None` in text mode.
     let emote_sizing = graphical.then(|| {
-        let (font_w, font_h) = app.picker.font_size();
+        let (font_w, font_h) = crate::image_preview::font_cells(&app.picker);
         crate::ui::emote_layout::EmoteSizing {
             font_w,
             font_h,

@@ -19,6 +19,16 @@ use tracing::{error, warn};
 
 use crate::config::ImagePreviewConfig;
 
+/// The picker's cell size in pixels as `(width, height)`.
+///
+/// ratatui-image's `FontSize` has neither equality nor hashing, which the
+/// image layout and frame-change keys rely on, so the rest of the client
+/// works with a plain pair.
+pub fn font_cells(picker: &Picker) -> (u16, u16) {
+    let font = picker.font_size();
+    (font.width, font.height)
+}
+
 // ---------------------------------------------------------------------------
 // Preview status (lives on App, driven by events from background tasks)
 // ---------------------------------------------------------------------------
@@ -236,7 +246,7 @@ fn decode_and_encode(
 
     // 6. Calculate display dimensions using the picker's font_size so the
     //    popup matches what ratatui-image's StatefulImage will actually render.
-    let font_size = picker.font_size();
+    let font_size = font_cells(picker);
     tracing::debug!(
         img_w = dyn_img.width(),
         img_h = dyn_img.height(),

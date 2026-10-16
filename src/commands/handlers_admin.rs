@@ -1442,7 +1442,7 @@ fn image_debug(app: &mut App) {
     ));
     lines.push(format!(
         "  {C_DIM}Font size:{C_RST}       {C_CMD}{}x{}{C_RST}",
-        font.0, font.1
+        font.width, font.height
     ));
     lines.push(format!(
         "  {C_DIM}Capabilities:{C_RST}    {C_CMD}{caps:?}{C_RST}"
