@@ -278,6 +278,14 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v2.2.1
+
+- **Dependency cleanup and updates.** Remove redundant dependency wrappers, disable unused image and IRC configuration features, use AWS-LC for certificate generation, and replace retired macro dependencies with maintained releases.
+- **Compatible data and scripting upgrades.** Refresh the cryptographic libraries, bundled SQLite, Linux allocator, and Lua integration, with fixed fixtures for existing encrypted data and database migrations. Lua remains on 5.4 and preserves fractional integer argument handling.
+- **Terminal rendering updates.** Update Ratatui, ratatui-image, and the browser terminal renderer. Retire the old rendering pin while preserving inline images, and handle redraw and resize queries in the detached daemon.
+- **Web shell fixes.** Start a browser shell in the tab that opened it and keep wide characters aligned with the server's terminal columns.
+- **Ad-hoc network labels.** Connections opened with `/connect` adopt the server's network name again.
+
 ### v2.2.0
 
 - **Bare display and highlight navigation.** The terminal can show a clean, selectable view of chat text and long URLs, and new bindings seek to earlier or later highlights while retaining their history position.
