@@ -174,15 +174,38 @@ an MSRV above 1.91. Existing frontend assets are unchanged.
 
 Branch: `chore/update-mlua`
 
+Status: completed on 2026-10-16 — [PR #200](https://github.com/outragedevs/repartee/pull/200).
+
 Prerequisite: PR 1. Isolate scripting API changes from the other migrations.
 
-- [ ] Update mlua 0.11.6 → 0.12.2.
-- [ ] Preserve Lua 5.4, vendored builds, and the current threading model;
+- [x] Update mlua 0.11.6 → 0.12.2.
+- [x] Preserve Lua 5.4, vendored builds, and the current threading model;
       do not silently switch to Lua 5.5.
-- [ ] Review API, callback, ownership, and error propagation changes.
-- [ ] Validate script loading/reloading, command registration, callbacks,
+- [x] Review API, callback, ownership, and error propagation changes.
+- [x] Validate script loading/reloading, command registration, callbacks,
       timers, error handling, and representative existing scripts.
-- [ ] Build native; complete review/fix and open the PR.
+- [x] Build native; complete review/fix and open the PR.
+
+Completion evidence: mlua 0.12.2 and mlua-sys 0.13.0 keep the `lua54`,
+`vendored`, and `send` features; the vendored interpreter moves from Lua
+5.4.8 to 5.4.9, and a new test pins `_VERSION` to Lua 5.4. The code
+compiles without API changes. mlua 0.12.2 rejects fractional numbers for
+Rust integer arguments where 0.11 truncated them; a `TruncatedInt`
+argument type restores truncation for the five integer parameters of the
+script API, while NaN, infinities, out-of-range values, and non-numbers
+are still rejected. The failing test for this was written before the fix.
+
+New tests cover timers and their cleanup on unload, fractional and string
+arguments, rejected arguments, failing timer callbacks, and reload through
+`ScriptManager`; the bundled keepnick integration test passes. Clippy and
+all application tests (158 web + 2,845 native, 34 existing native tests
+ignored) pass without warnings on Rust 1.97.1 and 1.91.0. Native release
+passes. A one-off A/B run of the seven complete documentation scripts on
+mlua 0.11.6 and 0.12.2 produced identical API call traces, apart from one
+example's `math.random` choice, which also varies between runs on main.
+The dependency policy passes; the changed packages are not yanked and
+declare MSRV 1.88 at most. Linux/FreeBSD builds and live IRC sessions with
+user scripts were not exercised.
 
 ## PR 5 — Migrate the cryptographic dependency family
 
