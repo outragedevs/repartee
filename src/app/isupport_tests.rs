@@ -168,6 +168,24 @@ async fn isupport_final_network_label_is_applied_once_and_disconnect_discards_op
     assert_eq!(value(&app, "NICKLEN"), None);
 }
 
+/// `/connect host` labels the connection `host:port` until the server names
+/// its network; that provisional label must give way to `NETWORK` just like
+/// a bare address does.
+#[tokio::test]
+async fn isupport_network_replaces_the_endpoint_label_of_an_adhoc_connection() {
+    for (address, port, label) in [("irc.example.test", 6667, "irc.example.test:6667"), ("2001:db8::1", 6697, "[2001:db8::1]:6697")] {
+        let mut app = app();
+        let mut config = app.state.connections["fixture"].origin_config.clone();
+        config.address = address.into();
+        config.port = port;
+        config.label = label.into();
+        app.setup_connection("fixture", &config);
+        receive(&mut app, ":s 005 me NETWORK=ExampleNet :supported tokens");
+        assert_eq!(app.state.connections["fixture"].label, "ExampleNet", "{label}");
+        assert!(app.state.buffers.contains_key("fixture/examplenet"), "{label}");
+    }
+}
+
 #[tokio::test]
 async fn isupport_preserves_explicit_dotted_labels() {
     let mut app = app();
