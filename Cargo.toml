@@ -80,7 +80,10 @@ shell-words = "1.1"
 # E2E encryption (RPE2E v1.0)
 ed25519-dalek = "3.0.0"
 x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }
-chacha20poly1305 = "0.11.0"
+chacha20poly1305 = { version = "0.11.0", features = ["zeroize"] }
+# Not used directly: wipes the keystream buffer of the stream cipher inside
+# chacha20poly1305, which 0.10 enabled implicitly and 0.11 does not forward.
+cipher = { version = "0.5.2", default-features = false, features = ["zeroize"] }
 hkdf = "0.13.0"
 bip39 = "3.0.0"
 zeroize = { version = "1", features = ["derive", "serde"] }

@@ -80,6 +80,8 @@ mod tests {
         assert_eq!(plaintext.as_slice(), b"secret");
         plaintext.zeroize();
         assert!(plaintext.is_empty());
+        // The cipher keeps its own copy of the key; it must be wiped too.
+        guarded(&XChaCha20Poly1305::new((&*original).into()));
         let seed = crate::e2e::crypto::identity::Identity::generate().unwrap().secret_bytes();
         guarded(&seed);
         guarded(&crate::e2e::crypto::ecdh::ed25519_seed_to_x25519(&seed));
