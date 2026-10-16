@@ -413,6 +413,19 @@ pub struct ServerConfig {
     pub bouncer_control: bool,
 }
 
+impl ServerConfig {
+    /// The provisional label of an ad-hoc `/connect`: `host:port`, with an
+    /// IPv6 address in brackets. The server's `NETWORK` name replaces it.
+    #[must_use]
+    pub fn endpoint_label(address: &str, port: u16) -> String {
+        if address.contains(':') {
+            format!("[{address}]:{port}")
+        } else {
+            format!("{address}:{port}")
+        }
+    }
+}
+
 fn deserialize_bouncer_network_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Option<String>, D::Error> {
     let value = Option::<String>::deserialize(deserializer)?;
     value.map(|id| crate::irc::bouncer::normalize_network_id(&id).map_err(serde::de::Error::custom)).transpose()

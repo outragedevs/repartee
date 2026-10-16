@@ -4716,7 +4716,8 @@ pub fn refresh_isupport_label(state: &mut AppState, conn_id: &str) {
 }
 
 /// Update connection label and server buffer name from NETWORK token.
-/// Only applies to ad-hoc connections where the label still matches the address.
+/// Only applies while the label is still provisional (the address, or an
+/// ad-hoc connection's `host:port`).
 fn update_label_from_network(state: &mut AppState, conn_id: &str, network_name: &str) {
     let current_label = match state.connections.get(conn_id) {
         Some(conn) if conn.network_scope.is_some() => return,
@@ -4725,8 +4726,12 @@ fn update_label_from_network(state: &mut AppState, conn_id: &str, network_name: 
         None => return,
     };
 
+    // Only a provisional label gives way: the bare address, or the
+    // `host:port` an ad-hoc `/connect` starts with. A configured label stays.
+    let origin = &state.connections[conn_id].origin_config;
     if state.connections[conn_id].network_label.is_none()
-        && current_label != state.connections[conn_id].origin_config.address
+        && current_label != origin.address
+        && current_label != crate::config::ServerConfig::endpoint_label(&origin.address, origin.port)
     {
         return;
     }
