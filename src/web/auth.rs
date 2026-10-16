@@ -418,6 +418,17 @@ mod tests {
         vec![0x42; 32]
     }
 
+    /// Saved sessions store only this hash, so it must not change across
+    /// HMAC/SHA-2 crate upgrades. Recorded with hmac 0.12 and sha2 0.10.
+    #[test]
+    fn session_token_hash_matches_recorded_value() {
+        let store = SessionStore::with_days(test_secret(), 90);
+        assert_eq!(
+            hex::encode(store.hash("0123456789abcdef")),
+            "59b402da7e4fe2c5fb2a3bb25edd57ee4a6592d638b6c2d05d2a54f6b5a4a031"
+        );
+    }
+
     #[test]
     fn rate_limiter_allows_first_attempt() {
         let limiter = RateLimiter::new();
