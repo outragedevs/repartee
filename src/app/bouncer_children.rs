@@ -416,12 +416,8 @@ mod tests {
         assert_eq!(app.state.active_buffer_id.as_deref(), Some(new.as_str()));
         assert_eq!(app.connection_attempts[&first], generation);
         assert_eq!(app.state.connections[&first].network_key(), scope);
-        assert!(
-            app.state.connections[&first]
-                .origin_config
-                .channels
-                .is_empty()
-        );
+        let channels = &app.state.connections[&first].origin_config.channels;
+        assert!(channels.is_empty(), "{channels:?}");
         assert!(!app.state.connections[&first].origin_config.bouncer_control);
         assert!(app.state.pending_web_events.iter().any(|event| matches!(event, crate::web::protocol::WebEvent::BufferRenamed { old_id, new_id, .. } if old_id == &old && new_id == &new)));
         receive(&mut app, "first", "BOUNCER NETWORK 42 *");

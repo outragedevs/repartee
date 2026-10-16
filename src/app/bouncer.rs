@@ -357,7 +357,7 @@ mod tests {
                 assert_eq!(manager.keyring().cached_dm_handle("bob", &network).unwrap().as_deref(), Some("~bob@host"));
                 let (lines, _) = sent.unwrap_or_else(|_| panic!("explicit decision must resolve the send gate"));
                 if decision == "on" {
-                    assert!(!lines.is_empty());
+                    assert!(!lines.is_empty(), "`lines` is empty");
                     assert!(lines.iter().all(|line| !line.contains("private content")));
                 } else {
                     assert_eq!(lines, vec!["private content"]);

@@ -449,10 +449,10 @@ mod tests {
     fn chanmodes_default_when_absent() {
         let is = Isupport::new();
         let (a, b, c, d) = is.chanmode_types();
-        assert!(a.is_empty());
-        assert!(b.is_empty());
-        assert!(c.is_empty());
-        assert!(d.is_empty());
+        assert!(a.is_empty(), "{a:?}");
+        assert!(b.is_empty(), "{b:?}");
+        assert!(c.is_empty(), "{c:?}");
+        assert!(d.is_empty(), "{d:?}");
     }
 
     #[test]
@@ -655,7 +655,7 @@ mod tests {
     #[test]
     fn msgreftypes_parsing() {
         let mut is = Isupport::new();
-        assert!(is.msgreftypes().is_empty());
+        assert!(is.msgreftypes().is_empty(), "{:?}", is.msgreftypes());
 
         is.parse_tokens(&["MSGREFTYPES=timestamp,msgid"]);
         assert_eq!(is.msgreftypes(), vec!["timestamp", "msgid"]);

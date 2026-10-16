@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn extract_no_urls() {
         let results = extract_urls("just a normal message with no links");
-        assert!(results.is_empty());
+        assert!(results.is_empty(), "{results:?}");
     }
 
     #[test]

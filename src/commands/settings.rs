@@ -911,7 +911,7 @@ mod tests {
         assert!(server.auto_reconnect.unwrap_or(true));
         assert!(server.reconnect_delay.is_none());
         assert!(server.reconnect_max_retries.is_none());
-        assert!(server.channels.is_empty());
+        assert!(server.channels.is_empty(), "{:?}", server.channels);
         assert!(server.nick.is_none());
         assert!(server.username.is_none());
         assert!(server.bind_ip.is_none());
@@ -923,8 +923,8 @@ mod tests {
         for path in ["dcc.autochat_masks", "spellcheck.languages"] {
             set_config_value(&mut config, path, "").unwrap();
         }
-        assert!(config.dcc.autochat_masks.is_empty());
-        assert!(config.spellcheck.languages.is_empty());
+        assert!(config.dcc.autochat_masks.is_empty(), "{:?}", config.dcc.autochat_masks);
+        assert!(config.spellcheck.languages.is_empty(), "{:?}", config.spellcheck.languages);
         for path in [
             "general.nick".to_string(),
             format!("servers.{id}.address"),

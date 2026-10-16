@@ -524,7 +524,7 @@ mod tests {
         harness.key(KeyCode::Up, KeyModifiers::NONE);
         harness.key(KeyCode::Down, KeyModifiers::NONE);
         assert_eq!(harness.start(), None);
-        assert!(harness.app.input.value.is_empty());
+        assert!(harness.app.input.value.is_empty(), "{:?}", harness.app.input.value);
         assert!(harness.app.bare_display.is_some());
     }
 

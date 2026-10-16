@@ -960,7 +960,7 @@ mod tests {
         .await
         .unwrap();
         assert!(app.state.buffers["account/peer"].unread_count > 0);
-        assert!(app.irc_handles["account"].sender().captured().is_empty());
+        assert!(app.irc_handles["account"].sender().captured().is_empty(), "{:?}", app.irc_handles["account"].sender().captured());
         app.handle_event(crossterm::event::Event::FocusGained);
         assert!(!app.needs_full_redraw);
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -1182,7 +1182,7 @@ mod tests {
             app.state.buffers["account/peer"].activity,
             crate::state::buffer::ActivityLevel::None
         );
-        assert!(app.irc_handles["account"].sender().captured().is_empty());
+        assert!(app.irc_handles["account"].sender().captured().is_empty(), "{:?}", app.irc_handles["account"].sender().captured());
         let mut receiver = app.web_broadcaster.subscribe();
         assert!(app.render_terminal_frame());
         assert!(receiver.try_recv().is_err());
@@ -1202,7 +1202,7 @@ mod tests {
         server_message(&mut app, 2456);
         app.mark_visible_message_read("account/peer", seen);
         assert_eq!(app.state.buffers["account/peer"].unread_count, 1);
-        assert!(app.irc_handles["account"].sender().captured().is_empty());
+        assert!(app.irc_handles["account"].sender().captured().is_empty(), "{:?}", app.irc_handles["account"].sender().captured());
     }
 
     #[tokio::test]
@@ -1264,7 +1264,7 @@ mod tests {
         server_message(&mut app, 2456);
         app.mark_terminal_read();
         assert_eq!(app.state.buffers["account/peer"].unread_count, 2);
-        assert!(app.irc_handles["account"].sender().captured().is_empty());
+        assert!(app.irc_handles["account"].sender().captured().is_empty(), "{:?}", app.irc_handles["account"].sender().captured());
     }
 
     #[tokio::test]
@@ -1302,7 +1302,7 @@ mod tests {
         assert!(app.render_terminal_frame());
         assert_eq!(app.state.buffers["account/peer"].messages.back().unwrap().id, id);
         assert_ne!(app.state.buffers["account/peer"].unread_count, 0);
-        assert!(app.irc_handles["account"].sender().captured().is_empty());
+        assert!(app.irc_handles["account"].sender().captured().is_empty(), "{:?}", app.irc_handles["account"].sender().captured());
     }
 
     #[tokio::test]
@@ -1417,7 +1417,7 @@ mod tests {
         app.handle_event(crossterm::event::Event::FocusLost);
         assert!(app.render_terminal_frame());
         assert_eq!(app.state.buffers["account/peer"].unread_count, 1);
-        assert!(app.irc_handles["account"].sender().captured().is_empty());
+        assert!(app.irc_handles["account"].sender().captured().is_empty(), "{:?}", app.irc_handles["account"].sender().captured());
         app.handle_event(crossterm::event::Event::FocusGained);
         assert!(app.render_terminal_frame());
         assert_eq!(app.state.buffers["account/peer"].unread_count, 0);

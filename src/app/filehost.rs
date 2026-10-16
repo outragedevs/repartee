@@ -149,7 +149,7 @@ mod tests {
         let (mut app, result) = setup();
         app.state.set_active_buffer("test/#two");
         app.finish_upload(result);
-        assert!(app.input.value.is_empty());
+        assert!(app.input.value.is_empty(), "{:?}", app.input.value);
         assert!(!app.upload_pending);
         assert!(app.state.buffers["test/#one"].messages.back().unwrap().text.contains("https://example.invalid/file.png"));
     }
@@ -161,7 +161,7 @@ mod tests {
         let before = app.state.buffers["test/#one"].messages.len();
         app.finish_upload(result);
         assert_eq!(app.state.buffers["test/#one"].messages.len(), before);
-        assert!(app.input.value.is_empty());
+        assert!(app.input.value.is_empty(), "{:?}", app.input.value);
     }
     #[test]
     fn encoded_upload_url_is_escaped_in_event_but_kept_raw_in_composer() {

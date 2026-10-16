@@ -475,7 +475,8 @@ mod tests {
             for (units, second) in "pqwertyuio".chars().enumerate() {
                 let mut state = Sequence::default();
                 for token in ["^[".into(), first.to_string(), "^[".into()] {
-                    assert!(state.feed(&map, token, 1).is_empty());
+                    let outcome = state.feed(&map, token, 1);
+                    assert!(outcome.is_empty(), "{outcome:?}");
                 }
                 assert_eq!(
                     state.feed(&map, second.to_string(), 1),
@@ -502,17 +503,20 @@ mod tests {
             .unwrap();
         let map = config.compile().unwrap();
         let mut state = Sequence::default();
-        assert!(state.feed(&map, "g".into(), 0).is_empty());
+        let outcome = state.feed(&map, "g".into(), 0);
+        assert!(outcome.is_empty(), "{outcome:?}");
         assert_eq!(
             state.expire(&map, 100),
             vec![Dispatch::Action(Binding::new("insert_text", "short"))]
         );
-        assert!(state.feed(&map, "g".into(), 200).is_empty());
+        let outcome = state.feed(&map, "g".into(), 200);
+        assert!(outcome.is_empty(), "{outcome:?}");
         assert_eq!(
             state.feed(&map, "❤".into(), 201),
             vec![Dispatch::Replay("g".into()), Dispatch::Replay("❤".into())]
         );
-        assert!(state.feed(&map, "^[".into(), 300).is_empty());
+        let outcome = state.feed(&map, "^[".into(), 300);
+        assert!(outcome.is_empty(), "{outcome:?}");
         assert_eq!(state.expire(&map, 800), vec![Dispatch::Replay("^[".into())]);
     }
 

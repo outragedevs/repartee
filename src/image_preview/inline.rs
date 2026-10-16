@@ -491,7 +491,7 @@ mod tests {
         });
         app.drain_pending_web_events();
         assert!(app.inline_previews.entries.is_empty());
-        assert!(app.inline_previews.direct.is_empty());
+        assert!(app.inline_previews.direct.is_empty(), "{:?}", app.inline_previews.direct);
         assert!(app.inline_previews.prepare_frame(0, false));
         assert!(app.inline_previews.pending.contains(&42));
         app.inline_previews.accept(42, Ok(Box::new(thumbnail())));
@@ -684,7 +684,7 @@ mod tests {
                     terminal.draw(|frame| previews.render(frame, std::slice::from_ref(&placement), &context)).unwrap();
                     let mut unchanged = Vec::new();
                     previews.write_direct(&mut unchanged, protocol);
-                    assert!(unchanged.is_empty());
+                    assert!(unchanged.is_empty(), "{unchanged:?}");
                     previews.finish_frame(123);
                 }
                 assert!(previews.prepare_frame(456, false));

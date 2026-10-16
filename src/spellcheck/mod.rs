@@ -543,7 +543,7 @@ mod tests {
             computing_dict: None,
         };
         let suggestions = checker.suggest("hello");
-        assert!(suggestions.is_empty());
+        assert!(suggestions.is_empty(), "{suggestions:?}");
     }
 
     #[test]

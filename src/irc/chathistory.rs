@@ -659,7 +659,7 @@ mod tests {
         let mut st = HistoryState::new();
         st.mark_in_flight("#chan", Direction::After, 200);
         let cleared = st.clear_stale(std::time::Duration::from_secs(90));
-        assert!(cleared.is_empty());
+        assert!(cleared.is_empty(), "{cleared:?}");
         assert!(!st.should_request("#chan", Direction::After, true));
     }
 

@@ -197,7 +197,7 @@ mod tests {
     fn sasl_not_advertised_returns_empty() {
         let caps = ServerCaps::parse("multi-prefix server-time");
         let mechs = caps.sasl_mechanisms();
-        assert!(mechs.is_empty());
+        assert!(mechs.is_empty(), "{mechs:?}");
     }
 
     #[test]
@@ -235,8 +235,9 @@ mod tests {
         let caps = ServerCaps::parse("");
         assert!(!caps.has("anything"));
         assert_eq!(caps.value("anything"), None);
-        assert!(caps.negotiate(DESIRED_CAPS).is_empty());
-        assert!(caps.sasl_mechanisms().is_empty());
+        let outcome = caps.negotiate(DESIRED_CAPS);
+        assert!(outcome.is_empty(), "{outcome:?}");
+        assert!(caps.sasl_mechanisms().is_empty(), "{:?}", caps.sasl_mechanisms());
     }
 
     #[test]

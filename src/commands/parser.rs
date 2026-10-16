@@ -154,14 +154,14 @@ mod tests {
         assert_eq!(command.args, ["/tmp/escaped space.txt", "text/plain"]);
         let command = parse_command(r"/upload '/tmp/#file $HOME ; name.txt'").unwrap();
         assert_eq!(command.args, ["/tmp/#file $HOME ; name.txt"]);
-        assert!(parse_command("/upload \"unterminated").unwrap().args.is_empty());
+        assert!(parse_command("/upload \"unterminated").unwrap().args.is_empty(), "{:?}", parse_command("/upload \"unterminated").unwrap().args);
     }
 
     #[test]
     fn quit_no_args() {
         let cmd = parse_command("/quit").unwrap();
         assert_eq!(cmd.name, "quit");
-        assert!(cmd.args.is_empty());
+        assert!(cmd.args.is_empty(), "{:?}", cmd.args);
     }
 
     #[test]

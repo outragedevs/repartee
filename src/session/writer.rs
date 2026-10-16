@@ -141,13 +141,19 @@ impl SocketOutput {
             return Ok(());
         }
         let len = buffer.bytes.len();
-        self.queued_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current
-                    .checked_add(len)
-                    .filter(|next| *next <= self.max_queued_bytes)
-            })
-            .map_err(|current| queue_full_error(current, len, self.max_queued_bytes))?;
+        // The loop `fetch_update` runs, written out: Rust 1.99 deprecates it in
+        // favour of `try_update`, which is not yet stable on the 1.91 floor.
+        let mut current = self.queued_bytes.load(Ordering::Acquire);
+        loop {
+            let next = current
+                .checked_add(len)
+                .filter(|next| *next <= self.max_queued_bytes)
+                .ok_or_else(|| queue_full_error(current, len, self.max_queued_bytes))?;
+            match self.queued_bytes.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
         self.drain_clock.start(len);
         let data = std::mem::take(&mut buffer.bytes);
         self.tx.send(MainMessage::Output(data)).map_err(|_| {

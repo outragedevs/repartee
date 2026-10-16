@@ -101,7 +101,7 @@ async fn webpush_rejects_untrusted_transport_auth_and_stale_configuration() {
             _ => app.state.connections.get_mut("test").unwrap().network_scope = Some("other".into()),
         }
         app.handle_webpush_request(&request, "one");
-        assert!(app.irc_handles["test"].sender().captured().is_empty());
+        assert!(app.irc_handles["test"].sender().captured().is_empty(), "{:?}", app.irc_handles["test"].sender().captured());
         assert!(matches!(web.try_recv().unwrap(), WebEvent::WebPush { status: Status::Unavailable, .. }));
     }
 }
@@ -134,7 +134,7 @@ async fn webpush_get_is_read_only_and_replacement_cancels_uncertain_request() {
     let request = WebRequest { connection_id: "test".into(), request_id: uuid::Uuid::new_v4().to_string(), action: Action::Get };
     app.handle_webpush_request(&request, "one");
     assert!(matches!(web.try_recv().unwrap(), WebEvent::WebPush { status: Status::Ready, scope: Some(_), vapid: Some(_), .. }));
-    assert!(app.irc_handles["test"].sender().captured().is_empty());
+    assert!(app.irc_handles["test"].sender().captured().is_empty(), "{:?}", app.irc_handles["test"].sender().captured());
     app.handle_webpush_request(&unregister(&app), "one");
     receive(&mut app, ":Mallory!user@host WEBPUSH UNREGISTER https://push.test/disposable-endpoint");
     assert!(!app.bouncer_webpush["test"].acknowledged);
@@ -151,7 +151,7 @@ async fn malformed_request_id_receives_correlated_invalid_response() {
     app.handle_webpush_request(&request, "one");
     assert!(matches!(web.try_recv().unwrap(), WebEvent::WebPush { status: Status::Invalid, request_id, session_id, .. }
         if request_id == "not-a-uuid" && session_id == "one"));
-    assert!(app.irc_handles["test"].sender().captured().is_empty());
+    assert!(app.irc_handles["test"].sender().captured().is_empty(), "{:?}", app.irc_handles["test"].sender().captured());
 }
 
 #[tokio::test]
@@ -165,7 +165,7 @@ async fn webpush_control_sessions_cannot_register_undeliverable_subscriptions() 
         let mut web = app.web_broadcaster.subscribe();
         app.handle_webpush_request(&request, "one");
         assert!(matches!(web.try_recv().unwrap(), WebEvent::WebPush { status: Status::Unavailable, .. }));
-        assert!(app.irc_handles["test"].sender().captured().is_empty());
+        assert!(app.irc_handles["test"].sender().captured().is_empty(), "{:?}", app.irc_handles["test"].sender().captured());
     }
 }
 

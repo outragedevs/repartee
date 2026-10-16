@@ -2464,7 +2464,7 @@ pub mod submit_typing_tests {
 
         w.submit("hello");
 
-        assert!(w.wire().is_empty());
+        assert!(w.wire().is_empty(), "{:?}", w.wire());
         assert_eq!(w.owed("net/#rust"), Some(TypingState::Active));
         assert!(!w.suppressed("net/#rust"));
     }

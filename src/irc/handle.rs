@@ -1051,10 +1051,8 @@ mod tests {
                 "the application stays quiet for {query:?}"
             );
         }
-        assert!(
-            echo.ctcp_frames(&Command::PRIVMSG("#rust".into(), "hello".into()).into())
-                .is_empty()
-        );
+        let frames = echo.ctcp_frames(&Command::PRIVMSG("#rust".into(), "hello".into()).into());
+        assert!(frames.is_empty(), "{frames:?}");
     }
 
     #[test]
@@ -1080,7 +1078,7 @@ mod tests {
         for line in messages {
             echo.handle_inbound(&line.parse().unwrap(), &sender, Instant::now()).unwrap();
         }
-        assert!(sender.captured().is_empty());
+        assert!(sender.captured().is_empty(), "{:?}", sender.captured());
         assert_eq!(sender.penalty_ms(), 0);
         echo.handle_inbound(&":server 005 [bob] CASEMAPPING=ascii :are supported".parse().unwrap(), &sender, Instant::now()).unwrap();
         echo.handle_inbound(&":{bob}!u@host PRIVMSG [bob] :\x01VERSION\x01".parse().unwrap(), &sender, Instant::now()).unwrap();
@@ -1127,10 +1125,8 @@ mod tests {
         // ERR_NOMOTD is the crate's other trigger for the same batch.
         assert_eq!(echo.frames_for(&response(Response::ERR_NOMOTD)).len(), 1);
         // Nothing else in the stream moves the budget.
-        assert!(
-            echo.frames_for(&response(Response::RPL_WELCOME))
-                .is_empty()
-        );
+        let frames = echo.frames_for(&response(Response::RPL_WELCOME));
+        assert!(frames.is_empty(), "{frames:?}");
     }
 
     #[test]
@@ -1166,7 +1162,7 @@ mod tests {
         assert_eq!(batches[0].0.len(), 499);
         assert_eq!(batches[1].0.split(',').count(), 10);
 
-        assert!(build_batched_joins(&[], &HashMap::new()).is_empty());
+        assert!(build_batched_joins(&[], &HashMap::new()).is_empty(), "{:?}", build_batched_joins(&[], &HashMap::new()));
     }
 
     #[test]

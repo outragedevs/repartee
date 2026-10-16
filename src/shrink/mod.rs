@@ -198,7 +198,7 @@ mod tests {
         assert_eq!(urls.len(), 1);
         // threshold one higher → excluded
         let urls = find_long_urls(url, 51);
-        assert!(urls.is_empty());
+        assert!(urls.is_empty(), "{urls:?}");
     }
 
     #[test]
@@ -216,7 +216,7 @@ mod tests {
     fn find_long_urls_excludes_non_http() {
         let text = "ftp://server/very_long_path_that_exceeds_the_threshold_easily";
         let urls = find_long_urls(text, 30);
-        assert!(urls.is_empty());
+        assert!(urls.is_empty(), "{urls:?}");
     }
 
     #[test]

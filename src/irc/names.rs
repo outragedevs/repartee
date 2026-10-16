@@ -137,7 +137,7 @@ mod tests {
     async fn implicit_names_and_history_join_do_not_trigger_queries() {
         let mut app = app(None);
         receive(&mut app, ":me!u@h JOIN #normal");
-        assert!(app.irc_handles["fixture"].sender().captured().is_empty());
+        assert!(app.irc_handles["fixture"].sender().captured().is_empty(), "{:?}", app.irc_handles["fixture"].sender().captured());
         app.state
             .connections
             .get_mut("fixture")

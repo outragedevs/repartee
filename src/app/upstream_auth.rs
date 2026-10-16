@@ -260,11 +260,11 @@ mod tests {
         let (mut app, sender) = app();
         app.handle_upstream_auth("libera", &":bouncer CAP * DEL :sasl".parse().unwrap());
         login(&mut app);
-        assert!(sender.captured().is_empty());
+        assert!(sender.captured().is_empty(), "{:?}", sender.captured());
         app.handle_upstream_auth("libera", &":bouncer CAP * NEW :sasl=PLAIN,ANONYMOUS".parse().unwrap());
         app.state.connections.get_mut("libera").unwrap().origin_config.tls_verify = false;
         login(&mut app);
-        assert!(sender.captured().is_empty());
+        assert!(sender.captured().is_empty(), "{:?}", sender.captured());
     }
 
     #[tokio::test]
@@ -286,7 +286,7 @@ mod tests {
     async fn clear_requires_explicit_confirmation_and_sends_empty_trace() {
         let (mut app, sender) = app();
         command_with_secret(&mut app, &["clear".into()], |_| panic!("must not load secret"));
-        assert!(sender.captured().is_empty());
+        assert!(sender.captured().is_empty(), "{:?}", sender.captured());
         command_with_secret(&mut app, &["clear".into(), "-YES".into()], |_| panic!("must not load secret"));
         assert!(matches!(&sender.captured()[0].command, Command::AUTHENTICATE(mechanism) if mechanism == "ANONYMOUS"));
         app.handle_upstream_auth("libera", &"AUTHENTICATE +".parse().unwrap());
@@ -384,7 +384,7 @@ mod tests {
             attributes.remove("tls");
             if let Some(tls) = tls { attributes.insert("tls".into(), tls.into()); }
             command_with_secret(&mut app, &["login".into(), "account".into(), "SECRET".into()], |_| panic!("must not load a secret"));
-            assert!(sender.captured().is_empty());
+            assert!(sender.captured().is_empty(), "{:?}", sender.captured());
             command_with_secret(&mut app, &["login".into(), "-allow-insecure-upstream".into(), "account".into(), "SECRET".into()], |_| Some("password".into()));
             assert_eq!(sender.captured().len(), 1);
         }

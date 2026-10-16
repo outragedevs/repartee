@@ -1494,7 +1494,7 @@ mod close_tests {
 
     #[test]
     fn part_targets_of_nothing_send_nothing() {
-        assert!(chunk_part_targets(&[], "bye", None).is_empty());
+        assert!(chunk_part_targets(&[], "bye", None).is_empty(), "{:?}", chunk_part_targets(&[], "bye", None));
     }
 
     // === Range resolution ===

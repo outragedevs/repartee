@@ -1208,7 +1208,7 @@ mod tests {
             .e2e_send_plan_for_target("test", "bob", "meet at 5")
             .unwrap_or_else(|e| panic!("expected ciphertext plan, got refusal: {}", e.user_message()));
         assert!(plan.encrypted);
-        assert!(!plan.wire_lines.is_empty());
+        assert!(!plan.wire_lines.is_empty(), "`plan.wire_lines` is empty");
         assert!(plan.wire_lines.iter().all(|w| w.starts_with("+RPE2E01")));
         assert!(
             plan.wire_lines.iter().all(|w| !w.contains("meet at 5")),

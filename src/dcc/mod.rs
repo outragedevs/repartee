@@ -509,6 +509,6 @@ mod tests {
         );
 
         let purged = mgr.purge_expired();
-        assert!(purged.is_empty());
+        assert!(purged.is_empty(), "{purged:?}");
     }
 }

@@ -1856,7 +1856,7 @@ mod tests {
                 engine.load_script(f.path(), &api).is_err(),
                 "api.timer({arg}) should be rejected"
             );
-            assert!(calls.lock().unwrap().intervals.is_empty());
+            assert!(calls.lock().unwrap().intervals.is_empty(), "{:?}", calls.lock().unwrap().intervals);
         }
 
         let mut engine = LuaEngine::new().unwrap();

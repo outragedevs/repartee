@@ -213,7 +213,7 @@ mod tests {
         let now = t0();
         tr.set("net/#rust", "alice", TypingState::Active, now);
         assert!(tr.set("net/#rust", "alice", TypingState::Done, now));
-        assert!(tr.nicks("net/#rust").is_empty());
+        assert!(tr.nicks("net/#rust").is_empty(), "{:?}", tr.nicks("net/#rust"));
         // Done for someone who was not typing is not a visible change.
         assert!(!tr.set("net/#rust", "carol", TypingState::Done, now));
     }
@@ -225,14 +225,15 @@ mod tests {
         tr.set("net/#rust", "alice", TypingState::Active, now);
         tr.set("net/#rust", "bob", TypingState::Paused, now);
 
-        assert!(tr.expire(now + Duration::from_secs(5)).is_empty());
+        let outcome = tr.expire(now + Duration::from_secs(5));
+        assert!(outcome.is_empty(), "{outcome:?}");
         assert_eq!(tr.nicks("net/#rust"), vec!["alice", "bob"]);
 
         assert_eq!(tr.expire(now + Duration::from_secs(6)), vec!["net/#rust"]);
         assert_eq!(tr.nicks("net/#rust"), vec!["bob"]);
 
         assert_eq!(tr.expire(now + Duration::from_secs(30)), vec!["net/#rust"]);
-        assert!(tr.nicks("net/#rust").is_empty());
+        assert!(tr.nicks("net/#rust").is_empty(), "{:?}", tr.nicks("net/#rust"));
     }
 
     #[test]
@@ -277,7 +278,7 @@ mod tests {
         let mut tr = TypingTracker::default();
         tr.set("net/alice", "alice", TypingState::Paused, t0());
         assert!(tr.remove_buffer("net/alice"));
-        assert!(tr.nicks("net/alice").is_empty());
+        assert!(tr.nicks("net/alice").is_empty(), "{:?}", tr.nicks("net/alice"));
         assert!(!tr.remove_buffer("net/alice"));
     }
 
@@ -295,13 +296,14 @@ mod tests {
         let mut cleared = tr.clear_connection("libera");
         cleared.sort();
         assert_eq!(cleared, vec!["libera/#rust", "libera/bob"]);
-        assert!(tr.nicks("libera/#rust").is_empty());
-        assert!(tr.nicks("libera/bob").is_empty());
+        assert!(tr.nicks("libera/#rust").is_empty(), "{:?}", tr.nicks("libera/#rust"));
+        assert!(tr.nicks("libera/bob").is_empty(), "{:?}", tr.nicks("libera/bob"));
         // Another network is untouched — one connection dropping says nothing
         // about the others.
         assert_eq!(tr.nicks("oftc/#rust"), vec!["carol"]);
         // And a second call has nothing left to report.
-        assert!(tr.clear_connection("libera").is_empty());
+        let outcome = tr.clear_connection("libera");
+        assert!(outcome.is_empty(), "{outcome:?}");
     }
 
     #[test]
@@ -320,7 +322,7 @@ mod tests {
         assert_eq!(tr.nicks("net/#rust").len(), 1);
 
         assert!(tr.clear("net/#rust", "alice"));
-        assert!(tr.nicks("net/#rust").is_empty());
+        assert!(tr.nicks("net/#rust").is_empty(), "{:?}", tr.nicks("net/#rust"));
     }
 
     #[test]
@@ -331,7 +333,7 @@ mod tests {
             tr.clear_nick_on_connection("libera", "aLiCe"),
             vec!["libera/#rust"]
         );
-        assert!(tr.nicks("libera/#rust").is_empty());
+        assert!(tr.nicks("libera/#rust").is_empty(), "{:?}", tr.nicks("libera/#rust"));
     }
 
     #[test]
@@ -373,6 +375,6 @@ mod tests {
         let mut cleared = tr.clear_all();
         cleared.sort();
         assert_eq!(cleared, vec!["net/#rust", "net/#tokio"]);
-        assert!(tr.nicks("net/#rust").is_empty());
+        assert!(tr.nicks("net/#rust").is_empty(), "{:?}", tr.nicks("net/#rust"));
     }
 }
