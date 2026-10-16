@@ -307,7 +307,8 @@ resize and zoom.
 The run found two issues that predate this change and also occur on main.
 First, `/shell` typed in the browser does not start the web PTY until the
 user switches buffers, because the first `ShellResize` is ignored. Second,
-wide glyphs occupy three cells. Clippy and all application tests pass on
+wide glyphs occupy three cells. Both are fixed separately in
+[PR #203](https://github.com/outragedevs/repartee/pull/203). Clippy and all application tests pass on
 Rust 1.97.1 and 1.91.0, and the WASM crate builds on 1.91.0. `make wasm`,
 `make release`, and the dependency policy pass. The beamterm packages are
 not yanked and declare MSRV 1.90.
