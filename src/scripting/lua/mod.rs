@@ -10,6 +10,35 @@ use super::event_bus::{Event, EventResult, Priority};
 
 // ─── Internal Types ─────────────────────────────────────────
 
+/// Integer argument that truncates fractional numbers toward zero, as
+/// scripts have always seen. mlua 0.12 rejects them on Lua 5.4, which would
+/// break computed values such as `api.timer(interval * 1.5, f)`. Numeric
+/// strings are coerced first; anything else keeps mlua's own validation, so
+/// NaN, infinities, out-of-range values and non-numbers are still errors.
+struct TruncatedInt<T>(T);
+
+impl<T: FromLua> FromLua for TruncatedInt<T> {
+    fn from_lua(value: LuaValue, lua: &Lua) -> LuaResult<Self> {
+        let value = match value {
+            LuaValue::String(_) if lua.coerce_integer(value.clone())?.is_none() => lua
+                .coerce_number(value.clone())?
+                .map_or(value, LuaValue::Number),
+            other => other,
+        };
+        let value = match value {
+            LuaValue::Number(n) => LuaValue::Number(n.trunc()),
+            other => other,
+        };
+        T::from_lua(value, lua).map(Self)
+    }
+}
+
+/// Arguments of `api.on` and `api.once`: event name, handler, optional priority.
+type HandlerArgs = (String, LuaFunction, Option<TruncatedInt<i32>>);
+
+/// Arguments of `api.timer` and `api.timeout`: delay in milliseconds, callback.
+type TimerArgs = (TruncatedInt<u64>, LuaFunction);
+
 struct LuaHandler {
     event_name: String,
     registry_key: String,
@@ -197,7 +226,7 @@ impl LuaEngine {
         api_table.set(
             "on",
             lua.create_function(
-                move |lua, (event_name, callback, priority): (String, LuaFunction, Option<i32>)| {
+                move |lua, (event_name, callback, priority): HandlerArgs| {
                     let mut inner = st.lock().map_err(|e| {
                         mlua::Error::RuntimeError(format!("handler state poisoned: {e}"))
                     })?;
@@ -207,7 +236,7 @@ impl LuaEngine {
                     inner.handlers.push(LuaHandler {
                         event_name,
                         registry_key: key,
-                        priority: priority.unwrap_or(Priority::Normal as i32),
+                        priority: priority.map_or(Priority::Normal as i32, |TruncatedInt(p)| p),
                         once: false,
                         script_name: sn.clone(),
                         id,
@@ -225,7 +254,7 @@ impl LuaEngine {
         api_table.set(
             "once",
             lua.create_function(
-                move |lua, (event_name, callback, priority): (String, LuaFunction, Option<i32>)| {
+                move |lua, (event_name, callback, priority): HandlerArgs| {
                     let mut inner = st.lock().map_err(|e| {
                         mlua::Error::RuntimeError(format!("handler state poisoned: {e}"))
                     })?;
@@ -235,7 +264,7 @@ impl LuaEngine {
                     inner.handlers.push(LuaHandler {
                         event_name,
                         registry_key: key,
-                        priority: priority.unwrap_or(Priority::Normal as i32),
+                        priority: priority.map_or(Priority::Normal as i32, |TruncatedInt(p)| p),
                         once: true,
                         script_name: sn.clone(),
                         id,
@@ -251,7 +280,7 @@ impl LuaEngine {
         let st = Arc::clone(state);
         api_table.set(
             "off",
-            lua.create_function(move |lua, id: u64| {
+            lua.create_function(move |lua, TruncatedInt(id): TruncatedInt<u64>| {
                 let mut inner = st.lock().map_err(|e| {
                     mlua::Error::RuntimeError(format!("handler state poisoned: {e}"))
                 })?;
@@ -644,7 +673,7 @@ impl LuaEngine {
         api_table.set(
             "timer",
             lua.create_function(
-                move |lua, (ms, callback): (u64, LuaFunction)| -> LuaResult<u64> {
+                move |lua, (TruncatedInt(ms), callback): TimerArgs| -> LuaResult<u64> {
                     let id = start_timer(ms);
                     let key = format!("timer_{id}");
                     lua.set_named_registry_value(&key, callback)?;
@@ -669,7 +698,7 @@ impl LuaEngine {
         api_table.set(
             "timeout",
             lua.create_function(
-                move |lua, (ms, callback): (u64, LuaFunction)| -> LuaResult<u64> {
+                move |lua, (TruncatedInt(ms), callback): TimerArgs| -> LuaResult<u64> {
                     let id = start_timeout(ms);
                     let key = format!("timer_{id}");
                     lua.set_named_registry_value(&key, callback)?;
@@ -691,10 +720,12 @@ impl LuaEngine {
         let cancel_timer = Arc::clone(&api.cancel_timer);
         api_table.set(
             "cancel_timer",
-            lua.create_function(move |_, timer_id: u64| -> LuaResult<()> {
-                cancel_timer(timer_id);
-                Ok(())
-            })?,
+            lua.create_function(
+                move |_, TruncatedInt(timer_id): TruncatedInt<u64>| -> LuaResult<()> {
+                    cancel_timer(timer_id);
+                    Ok(())
+                },
+            )?,
         )?;
 
         Ok(())
@@ -1692,5 +1723,224 @@ mod tests {
         );
 
         engine.load_script(f.path(), &api).unwrap();
+    }
+
+    #[test]
+    fn engine_runs_lua_5_4() {
+        let engine = LuaEngine::new().unwrap();
+        let version: String = engine.lua.globals().get("_VERSION").unwrap();
+        assert_eq!(version, "Lua 5.4");
+    }
+
+    /// Calls recorded by `timer_api`: timer delays, cancelled ids, log messages.
+    #[derive(Default)]
+    struct TimerCalls {
+        intervals: Vec<u64>,
+        timeouts: Vec<u64>,
+        cancelled: Vec<u64>,
+        log: Vec<String>,
+    }
+
+    /// `ScriptAPI` whose timer hooks hand out sequential ids starting at 1 and
+    /// record every call, and whose `api.log` collects messages.
+    fn timer_api() -> (ScriptAPI, Arc<Mutex<TimerCalls>>) {
+        let calls = Arc::new(Mutex::new(TimerCalls::default()));
+        let next_id = Arc::new(AtomicU64::new(1));
+        let mut api = mock_api();
+
+        let (c, n) = (Arc::clone(&calls), Arc::clone(&next_id));
+        api.start_timer = Arc::new(move |ms| {
+            c.lock().unwrap().intervals.push(ms);
+            n.fetch_add(1, Ordering::SeqCst)
+        });
+        let (c, n) = (Arc::clone(&calls), Arc::clone(&next_id));
+        api.start_timeout = Arc::new(move |ms| {
+            c.lock().unwrap().timeouts.push(ms);
+            n.fetch_add(1, Ordering::SeqCst)
+        });
+        let c = Arc::clone(&calls);
+        api.cancel_timer = Arc::new(move |id| c.lock().unwrap().cancelled.push(id));
+        let c = Arc::clone(&calls);
+        api.log = Arc::new(move |(_name, msg)| c.lock().unwrap().log.push(msg));
+
+        (api, calls)
+    }
+
+    #[test]
+    fn timers_fire_and_are_dropped_on_unload() {
+        let mut engine = LuaEngine::new().unwrap();
+        let (api, calls) = timer_api();
+        let f = write_script(
+            r#"
+            meta = { name = "timers" }
+            function setup(api)
+                local interval = api.timer(250, function() api.log("tick") end)
+                api.timeout(1000, function() api.log("once") end)
+                return function()
+                    api.cancel_timer(interval)
+                end
+            end
+        "#,
+        );
+
+        engine.load_script(f.path(), &api).unwrap();
+        let recorded = calls.lock().unwrap();
+        assert_eq!(recorded.intervals, vec![250]);
+        assert_eq!(recorded.timeouts, vec![1000]);
+        drop(recorded);
+
+        engine.fire_timer(1);
+        engine.fire_timer(1);
+        engine.fire_timer(2);
+        engine.fire_timer(99);
+        assert_eq!(calls.lock().unwrap().log, vec!["tick", "tick", "once"]);
+
+        engine.unload_script("timers").unwrap();
+        assert_eq!(calls.lock().unwrap().cancelled, vec![1]);
+        engine.fire_timer(1);
+        engine.fire_timer(2);
+        assert_eq!(calls.lock().unwrap().log.len(), 3);
+    }
+
+    #[test]
+    fn fractional_integer_arguments_are_truncated() {
+        let mut engine = LuaEngine::new().unwrap();
+        let (api, calls) = timer_api();
+        let f = write_script(
+            r#"
+            meta = { name = "fractions" }
+            function setup(api)
+                api.timer(1500.7, function() end)
+                api.timeout("250.9", function() end)
+                api.timeout(" 40 ", function() end)
+                api.timeout(-0.5, function() end)
+                api.cancel_timer(7.9)
+                local removed = api.on("test", function() api.log("removed") end)
+                api.off(removed + 0.5)
+                api.on("test", function() api.log("low") end, api.PRIORITY_LOW + 0.9)
+                api.on("test", function() api.log("high") end, api.PRIORITY_HIGH + 0.5)
+                api.on("test", function() api.log("normal") end, "50.5")
+            end
+        "#,
+        );
+
+        engine.load_script(f.path(), &api).unwrap();
+        engine.emit(&Event {
+            name: "test".to_string(),
+            params: HashMap::new(),
+        });
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.intervals, vec![1500]);
+        assert_eq!(calls.timeouts, vec![250, 40, 0]);
+        assert_eq!(calls.cancelled, vec![7]);
+        assert_eq!(calls.log, vec!["high", "normal", "low"]);
+        drop(calls);
+    }
+
+    #[test]
+    fn invalid_integer_arguments_are_rejected() {
+        for arg in ["\"soon\"", "-1", "-1.5", "0/0", "1/0", "{}", "2^64"] {
+            let mut engine = LuaEngine::new().unwrap();
+            let (api, calls) = timer_api();
+            let f = write_script(&format!(
+                r#"
+                meta = {{ name = "invalid" }}
+                function setup(api)
+                    api.timer({arg}, function() end)
+                end
+            "#
+            ));
+
+            assert!(
+                engine.load_script(f.path(), &api).is_err(),
+                "api.timer({arg}) should be rejected"
+            );
+            assert!(calls.lock().unwrap().intervals.is_empty());
+        }
+
+        let mut engine = LuaEngine::new().unwrap();
+        let (api, _calls) = timer_api();
+        let f = write_script(
+            r#"
+            meta = { name = "invalid_priority" }
+            function setup(api)
+                api.on("test", function() end, 2^40)
+            end
+        "#,
+        );
+        assert!(engine.load_script(f.path(), &api).is_err());
+    }
+
+    #[test]
+    fn timer_callback_error_keeps_engine_usable() {
+        let mut engine = LuaEngine::new().unwrap();
+        let (api, calls) = timer_api();
+        let f = write_script(
+            r#"
+            meta = { name = "failing_timer" }
+            function setup(api)
+                api.timeout(10, function() error("intentional timer error") end)
+                api.timeout(20, function() local t = nil; return t.missing end)
+                api.on("test", function() api.log("still alive") end)
+            end
+        "#,
+        );
+
+        engine.load_script(f.path(), &api).unwrap();
+        engine.fire_timer(1);
+        engine.fire_timer(2);
+        engine.fire_timer(1);
+        engine.emit(&Event {
+            name: "test".to_string(),
+            params: HashMap::new(),
+        });
+        assert_eq!(calls.lock().unwrap().log, vec!["still alive"]);
+        engine.unload_script("failing_timer").unwrap();
+    }
+
+    #[test]
+    fn reload_replaces_handlers_commands_and_timers() {
+        use crate::scripting::engine::ScriptManager;
+
+        let (mut api, calls) = timer_api();
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let c = Arc::clone(&commands);
+        api.register_command = Arc::new(move |(name, _, _)| c.lock().unwrap().push(name));
+        let f = write_script(
+            r#"
+            meta = { name = "reloadable" }
+            function setup(api)
+                api.on("test", function() api.log("event") end)
+                api.command("ping", {
+                    handler = function(args) api.log("ping " .. (args[1] or "")) end,
+                })
+                api.timer(100, function() api.log("tick") end)
+                return function() api.log("cleanup") end
+            end
+        "#,
+        );
+
+        let mut manager = ScriptManager::new(f.path().parent().unwrap().to_path_buf());
+        manager.register_engine(Box::new(LuaEngine::new().unwrap()));
+        manager.load(f.path().to_str().unwrap(), &api).unwrap();
+        manager.reload("reloadable", &api).unwrap();
+        assert_eq!(manager.loaded_scripts().len(), 1);
+
+        assert!(!manager.emit(&Event {
+            name: "test".to_string(),
+            params: HashMap::new(),
+        }));
+        let handled = manager.handle_command("ping", &["pong".to_string()], None);
+        assert_eq!(handled, Some(EventResult::Continue));
+        manager.fire_timer(1);
+        manager.fire_timer(2);
+
+        assert_eq!(calls.lock().unwrap().intervals, vec![100, 100]);
+        assert_eq!(*commands.lock().unwrap(), vec!["ping", "ping"]);
+        assert_eq!(
+            calls.lock().unwrap().log,
+            vec!["cleanup", "event", "ping pong", "tick"]
+        );
     }
 }
