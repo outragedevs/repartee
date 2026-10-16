@@ -470,14 +470,14 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "beamterm-core"
-version = "0.17.0"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ede1fea2497ca8e830cfef6e12476cef80fe9fdb5a4088a7d61a2eb24a69b67"
+checksum = "0375f7f3df163a52a06807f2150bac9a5da1933864ed40d52dda7dcd7cfa193b"
 dependencies = [
  "beamterm-data",
+ "beamterm-unicode",
  "bitflags 2.13.2",
  "compact_str",
- "emojis 0.8.2",
  "glow",
  "lru",
  "rustc-hash",
@@ -487,9 +487,9 @@ dependencies = [
 
 [[package]]
 name = "beamterm-data"
-version = "0.17.0"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "807afb61cd85b78f4218c8f10c8a2ee12ee22b4504ac99b1ac7c4d11412336b8"
+checksum = "f21ff1fc630079352bae9b024f85519bf1f641cf7f326623f4c0b59f7ea834fd"
 dependencies = [
  "compact_str",
  "miniz_oxide 0.9.1",
@@ -498,9 +498,9 @@ dependencies = [
 
 [[package]]
 name = "beamterm-renderer"
-version = "0.17.0"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9bf24d97fcf8104c12e4e394c8fac55576bca0ee25bd70d9eac87ac72987d3e5"
+checksum = "d8db76d04d575a0534ad5dba63acc05ccbe69597f977f11c59a612cbea199112"
 dependencies = [
  "beamterm-core",
  "beamterm-data",
@@ -514,6 +514,15 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "beamterm-unicode"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f44155933cdd0625a699c554c504aab30a571e4df68f3532fb95bf9cf53b935"
+dependencies = [
+ "unicode-width",
 ]
 
 [[package]]
@@ -1512,15 +1521,6 @@ name = "embedded-io"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
-
-[[package]]
-name = "emojis"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a4d5d50b0b58df5173d8ff1192b4d1422ceae5d981b30d4b6f8ed1d673a2bc4"
-dependencies = [
- "phf 0.13.1",
-]
 
 [[package]]
 name = "emojis"
@@ -4651,7 +4651,7 @@ dependencies = [
  "beamterm-renderer",
  "chrono",
  "console_error_panic_hook",
- "emojis 0.9.0",
+ "emojis",
  "futures-channel",
  "futures-util",
  "gloo-net 0.7.0",
