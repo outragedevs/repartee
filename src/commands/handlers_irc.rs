@@ -144,11 +144,7 @@ pub(crate) fn cmd_connect(app: &mut App, args: &[String]) {
         return;
     }
 
-    let label = if address.contains(':') {
-        format!("[{address}]:{port}")
-    } else {
-        format!("{address}:{port}")
-    };
+    let label = crate::config::ServerConfig::endpoint_label(&address, port);
     let adhoc_config = crate::config::ServerConfig {
         label,
         address,
