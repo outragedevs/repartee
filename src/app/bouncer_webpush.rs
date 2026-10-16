@@ -32,7 +32,7 @@ impl super::App {
                 || matches!(&handle.bouncer_identity, Some(crate::irc::bouncer::Identity::Network(_)))) { return None; }
         let vapid = conn.isupport_parsed.get("VAPID")?;
         if !webpush::valid_public_key(vapid) { return None; }
-        let scope = format!("{:x}", Sha256::digest(conn.network_key().as_bytes()));
+        let scope = hex::encode(Sha256::digest(conn.network_key().as_bytes()));
         Some((scope, vapid.to_string()))
     }
 

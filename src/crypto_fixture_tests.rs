@@ -156,7 +156,7 @@ fn hkdf_and_hmac_published_vectors() {
         "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
     );
 
-    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(b"Jefe").unwrap();
+    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::KeyInit>::new_from_slice(b"Jefe").unwrap();
     mac.update(b"what do ya want for nothing?");
     assert_eq!(
         hex::encode(mac.finalize().into_bytes()),
@@ -320,7 +320,7 @@ fn recorded_ecdsa_challenge_signature() {
         -----END EC PRIVATE KEY-----\n";
     let key = crate::irc::sasl_ecdsa::load_key(pem).unwrap();
     assert_eq!(
-        hex::encode(key.verifying_key().to_encoded_point(true).as_bytes()),
+        hex::encode(key.verifying_key().to_sec1_point(true).as_bytes()),
         "020739c6ef6555daffdd118bc97afac1027856faea1052d556b855d7486c5958c9"
     );
     let challenge: Vec<u8> = (0..32).collect();

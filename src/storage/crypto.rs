@@ -31,7 +31,7 @@ pub fn generate_key_hex() -> Zeroizing<String> {
 pub fn import_key(hex_key: &str) -> Result<Key<Aes256Gcm>, String> {
     let mut bytes = Zeroizing::new([0u8; 32]);
     hex::decode_to_slice(hex_key, bytes.as_mut_slice()).map_err(|e| format!("invalid hex key: {e}"))?;
-    Ok(*Key::<Aes256Gcm>::from_slice(bytes.as_slice()))
+    Ok(Key::<Aes256Gcm>::from(*bytes))
 }
 
 /// Encrypt `plaintext` with AES-256-GCM using a random 12-byte IV.
@@ -40,7 +40,7 @@ pub fn encrypt(plaintext: &str, key: &Key<Aes256Gcm>) -> Result<EncryptedData, S
 
     let mut iv_bytes = [0u8; 12];
     getrandom::fill(&mut iv_bytes).expect("OS random number generator failed");
-    let nonce = Nonce::from_slice(&iv_bytes);
+    let nonce = &Nonce::from(iv_bytes);
 
     let ciphertext_bytes = cipher
         .encrypt(nonce, plaintext.as_bytes())
@@ -60,7 +60,7 @@ pub fn decrypt(ciphertext_b64: &str, iv: &[u8], key: &Key<Aes256Gcm>) -> Result<
         .decode(ciphertext_b64)
         .map_err(|e| format!("invalid base64: {e}"))?;
 
-    let nonce = Nonce::from_slice(iv);
+    let nonce = &Nonce::try_from(iv).map_err(|_| format!("invalid IV length {}", iv.len()))?;
 
     let plaintext_bytes = cipher
         .decrypt(nonce, ciphertext_bytes.as_ref())
@@ -171,7 +171,7 @@ pub fn encrypt_bytes(plaintext: &[u8], key: &Key<Aes256Gcm>) -> Result<Vec<u8>, 
     let cipher = Aes256Gcm::new(key);
     let mut iv_bytes = [0u8; 12];
     getrandom::fill(&mut iv_bytes).expect("OS random number generator failed");
-    let nonce = Nonce::from_slice(&iv_bytes);
+    let nonce = &Nonce::from(iv_bytes);
     let ciphertext = cipher
         .encrypt(nonce, plaintext)
         .map_err(|e| format!("encryption failed: {e}"))?;
@@ -190,7 +190,7 @@ pub fn decrypt_bytes(ciphertext: &[u8], key: &Key<Aes256Gcm>) -> Result<Vec<u8>,
     if ciphertext[0] != SECRET_BLOB_VERSION {
         return Err(format!("unsupported secret blob version {}", ciphertext[0]));
     }
-    let nonce = Nonce::from_slice(&ciphertext[1..13]);
+    let nonce = &Nonce::try_from(&ciphertext[1..13]).expect("length checked above");
     let cipher = Aes256Gcm::new(key);
     cipher
         .decrypt(nonce, &ciphertext[13..])
@@ -245,6 +245,16 @@ mod tests {
         let result = decrypt(&encrypted.ciphertext, &encrypted.iv, &key2);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn malformed_iv_is_an_error_not_a_panic() {
+        let key = import_key(&generate_key_hex()).unwrap();
+        let encrypted = encrypt("secret message", &key).unwrap();
+        for iv in [&encrypted.iv[..11], &[0; 13][..], &[][..]] {
+            let err = decrypt(&encrypted.ciphertext, iv, &key).unwrap_err();
+            assert_eq!(err, format!("invalid IV length {}", iv.len()));
+        }
     }
 
     #[test]

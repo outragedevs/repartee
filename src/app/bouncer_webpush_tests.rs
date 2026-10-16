@@ -1,11 +1,11 @@
 use super::*;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+use p256::elliptic_curve::sec1::ToSec1Point as _;
 use crate::irc::{IrcEvent, IrcHandle, IrcSender};
 use crate::web::protocol::WebCommand;
 
 fn key() -> String {
-    URL_SAFE_NO_PAD.encode(p256::SecretKey::from_slice(&[1; 32]).unwrap().public_key().to_encoded_point(false).as_bytes())
+    URL_SAFE_NO_PAD.encode(p256::SecretKey::from_slice(&[1; 32]).unwrap().public_key().to_sec1_point(false).as_bytes())
 }
 
 fn app() -> super::super::App {

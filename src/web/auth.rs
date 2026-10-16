@@ -315,7 +315,7 @@ impl SessionStore {
     }
 
     fn hash(&self, raw_token: &str) -> [u8; 32] {
-        use hmac::Mac;
+        use hmac::{KeyInit as _, Mac as _};
         type HmacSha256 = hmac::Hmac<sha2::Sha256>;
         let mut mac = HmacSha256::new_from_slice(&self.secret).expect("HMAC accepts any key");
         mac.update(raw_token.as_bytes());
@@ -391,7 +391,7 @@ pub fn session_cookie_name() -> String {
 /// the strings first differ.
 #[must_use]
 pub fn verify_password(provided: &str, expected: &str) -> bool {
-    use hmac::Mac;
+    use hmac::{KeyInit as _, Mac as _};
     type HmacSha256 = hmac::Hmac<sha2::Sha256>;
 
     if expected.is_empty() {
