@@ -211,6 +211,8 @@ user scripts were not exercised.
 
 Branch: `chore/update-crypto-dependencies`
 
+Status: completed on 2026-10-16 — [PR #201](https://github.com/outragedevs/repartee/pull/201).
+
 Prerequisites: PRs 1 and 2. Keep mutually dependent digest, HMAC, and KDF
 trait migrations together. Preserve the existing algorithms and parameters.
 
@@ -228,19 +230,46 @@ trait migrations together. Preserve the existing algorithms and parameters.
 | pbkdf2 | 0.12.2 | 0.13.0 |
 | bip39 | 2.2.2 | 3.0.0 |
 
-- [ ] Remove PBKDF2's obsolete `simple` feature; select features from actual
+- [x] Remove PBKDF2's obsolete `simple` feature; select features from actual
       usage rather than enabling the replacement high-level API by default.
-- [ ] Adapt digest and random-source APIs without weakening randomness,
+- [x] Adapt digest and random-source APIs without weakening randomness,
       zeroization, authentication checks, or error handling.
-- [ ] Use fixed pre-upgrade fixtures for stored keys, encrypted data,
+- [x] Use fixed pre-upgrade fixtures for stored keys, encrypted data,
       recovery phrases, and protocol messages; a new-version self-round-trip
       alone does not prove backward compatibility.
-- [ ] Test E2E encryption/decryption, signatures, tamper rejection, recovery,
+- [x] Test E2E encryption/decryption, signatures, tamper rejection, recovery,
       SASL SCRAM, and ECDSA challenge responses using known vectors.
-- [ ] Verify old/new client interoperability where the protocol permits it.
-- [ ] Inspect remaining old transitive crypto versions; do not force
+- [x] Verify old/new client interoperability where the protocol permits it.
+- [x] Inspect remaining old transitive crypto versions; do not force
       incompatible replacements into upstream libraries.
-- [ ] Build native; complete review/fix and open the PR.
+- [x] Build native; complete review/fix and open the PR.
+
+Completion evidence: all eleven packages reached their targets with
+unchanged algorithms, parameters, and formats. Fixtures were recorded with
+the old crates and committed before the upgrade. They cover an encrypted
+log line, a keyring secret blob, identity derivation with the six SAS
+words, a KEYRSP wrap and signature, a REKEY plus a channel message from an
+old peer (accepted through `handle_rekey` and `decrypt_incoming`), a
+SCRAM-SHA-512 exchange, the deterministic ECDSA challenge signature (also
+verified with OpenSSL), and the web session token hash. Published RFC 8032,
+XChaCha20-Poly1305, RFC 5869, and RFC 4231 vectors are pinned alongside.
+
+PBKDF2 now uses `default-features = false`, and ed25519-dalek drops
+`rand_core`. Nonces still come from the OS CSPRNG. A malformed stored IV is
+now an error instead of a panic. chacha20poly1305 0.11 no longer wipes its
+key and keystream buffer by default, so `zeroize` and `cipher/zeroize` are
+declared explicitly. The enabled zeroize features are a superset of the
+previous set.
+
+A one-off cross-version run between a main build and this branch passed:
+handshakes, messages, and REKEY in both directions with both role
+assignments. sha1/sha2/hmac/digest 0.10-era copies remain only through
+cookie, axum, and tungstenite, whose latest compatible releases still use
+them. Clippy and all application tests (158 web and 2,858 native, 34
+existing native tests ignored) pass without warnings on Rust 1.97.1 and
+1.91.0. Native release and the dependency policy pass. No new package is
+yanked, and the highest declared MSRV is 1.89. Linux/FreeBSD builds and
+live IRC, SASL, E2E, and web sessions were not exercised.
 
 ## PR 6 — Migrate the browser terminal renderer
 

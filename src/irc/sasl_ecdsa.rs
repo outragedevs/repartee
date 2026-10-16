@@ -162,8 +162,8 @@ a7PDoBeuvxeRKq87hjQR4M2w4HKhRANCAAQHOcbvZVXa/90Ri8l6+sECeFb66hBS
         let sec1 = load_key(SEC1_PEM).expect("SEC1 PEM must load");
         let pkcs8 = load_key(PKCS8_PEM).expect("PKCS#8 PEM must load");
         assert_eq!(
-            sec1.verifying_key().to_encoded_point(true).as_bytes(),
-            pkcs8.verifying_key().to_encoded_point(true).as_bytes(),
+            sec1.verifying_key().to_sec1_point(true).as_bytes(),
+            pkcs8.verifying_key().to_sec1_point(true).as_bytes(),
             "ecdsatool's SEC1 and OpenSSL 3's PKCS#8 are the same key"
         );
     }
@@ -265,11 +265,11 @@ a7PDoBeuvxeRKq87hjQR4M2w4HKhRANCAAQHOcbvZVXa/90Ri8l6+sECeFb66hBS
         std::fs::write(&path, SEC1_PEM).unwrap();
         let from_file = load_key_file(&path).expect("a real PEM on disk must load");
         assert_eq!(
-            from_file.verifying_key().to_encoded_point(true).as_bytes(),
+            from_file.verifying_key().to_sec1_point(true).as_bytes(),
             load_key(SEC1_PEM)
                 .unwrap()
                 .verifying_key()
-                .to_encoded_point(true)
+                .to_sec1_point(true)
                 .as_bytes()
         );
     }

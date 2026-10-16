@@ -62,27 +62,30 @@ regex = "1"
 isolang = { version = "2.4", default-features = false }
 whatlang = "0.18"
 rusqlite = { version = "0.40.2", features = ["bundled-full"] }
-aes-gcm = "0.10"
+aes-gcm = "0.11.1"
 getrandom = "0.4"
 base64 = "0.23.1"
-sha2 = "0.10"
-sha1 = "0.10"
-hmac = "0.12"
-pbkdf2 = { version = "0.12", features = ["simple"] }
+sha2 = "0.11.1"
+sha1 = "0.11.0"
+hmac = "0.13.0"
+pbkdf2 = { version = "0.13.0", default-features = false }
 # SASLprep (RFC 4013) for SASL credentials.
 stringprep = "0.1"
 # NIST P-256 for SASL ECDSA-NIST256P-CHALLENGE. `pem` pulls in SEC1 + PKCS#8
 # PEM parsing so both key encodings in the wild are accepted.
-p256 = { version = "0.13", features = ["pem"] }
+p256 = { version = "0.14.0", features = ["pem"] }
 uuid = { version = "1.21", features = ["v4"] }
 hex = "0.4"
 shell-words = "1.1"
 # E2E encryption (RPE2E v1.0)
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-x25519-dalek = { version = "2", features = ["static_secrets"] }
-chacha20poly1305 = "0.10"
-hkdf = "0.12"
-bip39 = "2"
+ed25519-dalek = "3.0.0"
+x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }
+chacha20poly1305 = { version = "0.11.0", features = ["zeroize"] }
+# Not used directly: wipes the keystream buffer of the stream cipher inside
+# chacha20poly1305, which 0.10 enabled implicitly and 0.11 does not forward.
+cipher = { version = "0.5.2", default-features = false, features = ["zeroize"] }
+hkdf = "0.13.0"
+bip39 = "3.0.0"
 zeroize = { version = "1", features = ["derive", "serde"] }
 mlua = { version = "0.12.2", features = ["lua54", "vendored", "send"] }
 ratatui-image = { version = "10.0", default-features = false, features = ["crossterm"] }

@@ -212,7 +212,7 @@ impl WebPreviewExtractor {
 
     /// HMAC-SHA256 the URL under the server secret and hex-encode.
     fn hash_url(&self, url: &str) -> String {
-        use hmac::Mac;
+        use hmac::{KeyInit as _, Mac as _};
         type HmacSha256 = hmac::Hmac<sha2::Sha256>;
         let mut mac = HmacSha256::new_from_slice(&self.secret).expect("HMAC accepts any key");
         mac.update(url.as_bytes());

@@ -59,10 +59,7 @@ fn ensure_cache_dir(dir: &Path) -> Result<()> {
 fn url_hash(url: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(url.as_bytes());
-    let result = hasher.finalize();
-    // Format as lowercase hex without pulling in the `hex` crate — sha2's
-    // GenericArray implements LowerHex.
-    format!("{result:x}")
+    hex::encode(hasher.finalize())
 }
 
 /// Map a `Content-Type` header value to a file extension.
@@ -343,6 +340,15 @@ mod tests {
         let h1 = url_hash("https://example.com/image.png");
         let h2 = url_hash("https://example.com/image.png");
         assert_eq!(h1, h2);
+    }
+
+    /// Cached files are named by this hash, so it must stay lowercase hex SHA-256.
+    #[test]
+    fn url_hash_matches_sha256_hex() {
+        assert_eq!(
+            url_hash("https://example.com/a.png"),
+            "494a30704d4f32ac0b81739d18a66d3638d440cbc6f5669f6af66f840edee5ab"
+        );
     }
 
     #[test]

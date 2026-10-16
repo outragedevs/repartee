@@ -14,9 +14,9 @@
 
 use base64::Engine as _;
 use color_eyre::eyre::{Result, eyre};
-use hmac::{Mac, SimpleHmac};
+use hmac::{KeyInit as _, Mac, SimpleHmac};
 use sha1::Sha1;
-use sha2::digest::core_api::BlockSizeUser;
+use sha2::digest::block_api::BlockSizeUser;
 use sha2::{Digest, Sha256, Sha512};
 
 /// Maximum allowed PBKDF2 iteration count to prevent denial-of-service via absurdly

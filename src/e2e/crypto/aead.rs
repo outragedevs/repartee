@@ -3,7 +3,7 @@
 
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
-    aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
+    aead::{Aead, KeyInit, Payload},
 };
 
 use zeroize::Zeroizing;
@@ -25,28 +25,26 @@ pub type Nonce = [u8; NONCE_LEN];
 /// where `ciphertext` includes the Poly1305 tag.
 pub fn encrypt(key: &[u8; KEY_LEN], aad: &[u8], plaintext: &[u8]) -> Result<(Nonce, Vec<u8>)> {
     let cipher = XChaCha20Poly1305::new(key.into());
-    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let mut n = [0u8; NONCE_LEN];
+    getrandom::fill(&mut n).expect("OS random number generator failed");
     let ct = cipher
         .encrypt(
-            &nonce,
+            &XNonce::from(n),
             Payload {
                 msg: plaintext,
                 aad,
             },
         )
         .map_err(|e| E2eError::Crypto(format!("aead encrypt: {e}")))?;
-    let mut n = [0u8; NONCE_LEN];
-    n.copy_from_slice(nonce.as_slice());
     Ok((n, ct))
 }
 
 /// Decrypt `ciphertext` using `nonce` and `aad`.
 pub fn decrypt(key: &[u8; KEY_LEN], nonce: &Nonce, aad: &[u8], ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     let cipher = XChaCha20Poly1305::new(key.into());
-    let xnonce = XNonce::from_slice(nonce);
     cipher
         .decrypt(
-            xnonce,
+            &XNonce::from(*nonce),
             Payload {
                 msg: ciphertext,
                 aad,
@@ -82,6 +80,8 @@ mod tests {
         assert_eq!(plaintext.as_slice(), b"secret");
         plaintext.zeroize();
         assert!(plaintext.is_empty());
+        // The cipher keeps its own copy of the key; it must be wiped too.
+        guarded(&XChaCha20Poly1305::new((&*original).into()));
         let seed = crate::e2e::crypto::identity::Identity::generate().unwrap().secret_bytes();
         guarded(&seed);
         guarded(&crate::e2e::crypto::ecdh::ed25519_seed_to_x25519(&seed));

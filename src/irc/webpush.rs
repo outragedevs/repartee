@@ -88,10 +88,10 @@ mod tests {
     use super::*;
 
     fn subscription() -> Subscription {
-        use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+        use p256::elliptic_curve::sec1::ToSec1Point as _;
         let key = p256::SecretKey::from_slice(&[1; 32]).unwrap();
         Subscription { endpoint: "https://push.example.test/subscription".into(),
-            p256dh: URL_SAFE_NO_PAD.encode(key.public_key().to_encoded_point(false).as_bytes()),
+            p256dh: URL_SAFE_NO_PAD.encode(key.public_key().to_sec1_point(false).as_bytes()),
             auth: URL_SAFE_NO_PAD.encode([2; 16]) }
     }
 
