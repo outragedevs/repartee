@@ -636,7 +636,7 @@ mod tests {
             let field = fields.iter().find(|f| f.path == path).unwrap();
             assert!(field.configured);
             assert_eq!(field.kind, SettingKind::Secret);
-            assert!(field.value.is_empty());
+            assert!(field.value.is_empty(), "{:?}", field.value);
             assert!(field.default_value.is_none());
         }
     }

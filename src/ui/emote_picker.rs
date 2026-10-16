@@ -190,7 +190,7 @@ mod tests {
     fn picker_filters_by_substring() {
         let all = EmotePickerState::filtered_indices("");
         let some = EmotePickerState::filtered_indices("usm");
-        assert!(!all.is_empty());
+        assert!(!all.is_empty(), "`all` is empty");
         assert!(some.len() <= all.len());
         assert!(!some.is_empty(), "expected at least :usmiech:");
     }
@@ -205,7 +205,7 @@ mod tests {
     fn filter_matches_english_alias() {
         let by_en = EmotePickerState::filtered_indices("smile");
         let by_pl = EmotePickerState::filtered_indices("usmiech");
-        assert!(!by_en.is_empty());
+        assert!(!by_en.is_empty(), "`by_en` is empty");
         assert!(
             by_en.iter().any(|i| by_pl.contains(i)),
             "EN and PL filters hit the same emote"

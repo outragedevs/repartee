@@ -6039,7 +6039,7 @@ mod app_tests {
         let mut app = app_with_outgoing(Some("de"));
         app.submit_origin = SubmitOrigin::Script;
         app.refuse_untranslatable_send("payload from a script", "the translation queue is full");
-        assert!(app.input.value.is_empty());
+        assert!(app.input.value.is_empty(), "{:?}", app.input.value);
     }
 
     #[test]

@@ -891,7 +891,7 @@ mod activity_rename_tests {
         assert_eq!(conn.bouncer_network_id(), Some("42"));
         assert_eq!(conn.origin_config.username, original.username);
         assert!(conn.origin_config.bouncer_network_id.is_none());
-        assert!(conn.joined_channels.is_empty());
+        assert!(conn.joined_channels.is_empty(), "{:?}", conn.joined_channels);
         let scope = conn.network_key().to_string();
         app.state.add_buffer(Buffer::for_test("libera", BufferType::Channel, "#old-network"));
         let origin = &mut app.state.connections.get_mut("libera").unwrap().origin_config;

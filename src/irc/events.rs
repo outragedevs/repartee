@@ -5596,7 +5596,6 @@ fn try_dispatch_rpe2e_ctcp(
                             ),
                         );
                     }
-                    Some(RpEe2eOutcome::Handled)
                 }
                 Ok(None) => {
                     emit_e2e_debug(
@@ -5608,7 +5607,6 @@ fn try_dispatch_rpe2e_ctcp(
                             req.channel
                         ),
                     );
-                    Some(RpEe2eOutcome::Handled)
                 }
                 Err(e) => {
                     tracing::warn!("handle_keyreq error: {e}");
@@ -5621,9 +5619,9 @@ fn try_dispatch_rpe2e_ctcp(
                             req.channel
                         ),
                     );
-                    Some(RpEe2eOutcome::Handled)
                 }
             }
+            Some(RpEe2eOutcome::Handled)
         }
         HandshakeMsg::Rsp(rsp) => {
             emit_e2e_debug(
@@ -7403,7 +7401,7 @@ mod tests {
 
         handle_disconnected(&mut state, "test", None);
 
-        assert!(state.typing.nicks("test/#rust").is_empty());
+        assert!(state.typing.nicks("test/#rust").is_empty(), "{:?}", state.typing.nicks("test/#rust"));
         assert_eq!(
             state.typing.nicks("other/#rust"),
             vec!["bob"],
@@ -11210,7 +11208,7 @@ mod tests {
 
         let buf = state.buffers.get(&chan_id).unwrap();
         assert!(buf.users.is_empty(), "users should be wiped on disconnect");
-        assert!(buf.last_speakers.is_empty());
+        assert!(buf.last_speakers.is_empty(), "{:?}", buf.last_speakers);
         // Channel name still recorded for rejoin
         let conn = state.connections.get("test").unwrap();
         assert!(conn.joined_channels.iter().any(|c| c == "#test"));
@@ -11701,7 +11699,7 @@ mod tests {
         state.add_buffer(make_channel_buffer("test", "#rust"));
         handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+typing", "active"));
         handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+typing", "done"));
-        assert!(state.typing.nicks("test/#rust").is_empty());
+        assert!(state.typing.nicks("test/#rust").is_empty(), "{:?}", state.typing.nicks("test/#rust"));
     }
 
     #[test]
@@ -11715,7 +11713,7 @@ mod tests {
         // so the assertion below only reflects what `handle_irc_message` did.
         state.pending_web_events.clear();
         handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+typing", "active"));
-        assert!(state.typing.nicks("test/#rust").is_empty());
+        assert!(state.typing.nicks("test/#rust").is_empty(), "{:?}", state.typing.nicks("test/#rust"));
         assert!(state.pending_web_events.is_empty());
     }
 
@@ -11726,7 +11724,7 @@ mod tests {
         state.add_buffer(make_channel_buffer("test", "#rust"));
         let our_nick = state.connections["test"].nick.clone();
         handle_irc_message(&mut state, "test", &tagmsg(&our_nick, "#rust", "+typing", "active"));
-        assert!(state.typing.nicks("test/#rust").is_empty());
+        assert!(state.typing.nicks("test/#rust").is_empty(), "{:?}", state.typing.nicks("test/#rust"));
     }
 
     #[test]
@@ -11738,7 +11736,7 @@ mod tests {
             .parse()
             .expect("valid");
         handle_irc_message(&mut state, "test", &msg);
-        assert!(state.typing.nicks("test/#rust").is_empty());
+        assert!(state.typing.nicks("test/#rust").is_empty(), "{:?}", state.typing.nicks("test/#rust"));
     }
 
     #[test]
@@ -11746,7 +11744,7 @@ mod tests {
         let mut state = make_test_state();
         state.add_buffer(make_channel_buffer("test", "#rust"));
         handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+example-tag", "x"));
-        assert!(state.typing.nicks("test/#rust").is_empty());
+        assert!(state.typing.nicks("test/#rust").is_empty(), "{:?}", state.typing.nicks("test/#rust"));
     }
 
     #[test]
@@ -11756,7 +11754,7 @@ mod tests {
         let our_nick = state.connections["test"].nick.clone();
         handle_irc_message(&mut state, "test", &tagmsg("stranger", &our_nick, "+typing", "active"));
         assert!(!state.buffers.contains_key("test/stranger"));
-        assert!(state.typing.nicks("test/stranger").is_empty());
+        assert!(state.typing.nicks("test/stranger").is_empty(), "{:?}", state.typing.nicks("test/stranger"));
     }
 
     #[test]
@@ -11811,7 +11809,7 @@ mod tests {
 
         let privmsg: IrcMessage = ":alice!u@h PRIVMSG #rust :done typing\r\n".parse().expect("valid");
         handle_irc_message(&mut state, "test", &privmsg);
-        assert!(state.typing.nicks("test/#rust").is_empty());
+        assert!(state.typing.nicks("test/#rust").is_empty(), "{:?}", state.typing.nicks("test/#rust"));
     }
 
     #[test]
@@ -11855,7 +11853,7 @@ mod tests {
 
         let quit: IrcMessage = ":alice!u@h QUIT :bye\r\n".parse().expect("valid");
         handle_irc_message(&mut state, "test", &quit);
-        assert!(state.typing.nicks("test/#rust").is_empty());
+        assert!(state.typing.nicks("test/#rust").is_empty(), "{:?}", state.typing.nicks("test/#rust"));
         assert_eq!(
             state.typing.nicks("other/#rust"),
             vec!["alice"],
@@ -11933,7 +11931,7 @@ mod tests {
         });
         let quit: IrcMessage = ":alice!u@h QUIT :bye\r\n".parse().expect("valid");
         handle_irc_message(&mut state, "test", &quit);
-        assert!(state.typing.nicks("test/#rust").is_empty());
+        assert!(state.typing.nicks("test/#rust").is_empty(), "{:?}", state.typing.nicks("test/#rust"));
     }
 
     fn ignore(state: &mut AppState, mask: &str, levels: Vec<IgnoreLevel>) {
@@ -12034,7 +12032,7 @@ mod tests {
         ignore(&mut state, "alice", vec![IgnoreLevel::Msgs]);
 
         handle_irc_message(&mut state, "test", &tagmsg("alice", &our_nick, "+typing", "active"));
-        assert!(state.typing.nicks("test/alice").is_empty());
+        assert!(state.typing.nicks("test/alice").is_empty(), "{:?}", state.typing.nicks("test/alice"));
     }
 
     #[test]
@@ -12088,7 +12086,7 @@ mod tests {
             .expect("valid");
         handle_irc_message(&mut state, "test", &notice);
 
-        assert!(state.typing.nicks("test/alice").is_empty());
+        assert!(state.typing.nicks("test/alice").is_empty(), "{:?}", state.typing.nicks("test/alice"));
         assert!(
             state.buffers["test/alice"]
                 .messages
@@ -12111,7 +12109,7 @@ mod tests {
 
         let kick: IrcMessage = ":bob!u@h KICK #rust aLiCe :out\r\n".parse().expect("valid");
         handle_irc_message(&mut state, "test", &kick);
-        assert!(state.typing.nicks("test/#rust").is_empty());
+        assert!(state.typing.nicks("test/#rust").is_empty(), "{:?}", state.typing.nicks("test/#rust"));
     }
 
     // === The `irc.typing` script event ===

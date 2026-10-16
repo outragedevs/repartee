@@ -2414,7 +2414,7 @@ mod tests {
             channel: "#secret".into(), enabled: true, mode: ChannelMode::Normal,
         }).unwrap();
         kr.set_configured_networks([label.to_string()]);
-        assert!(kr.adopt_legacy_contexts().unwrap().is_empty());
+        assert!(kr.adopt_legacy_contexts().unwrap().is_empty(), "{:?}", kr.adopt_legacy_contexts().unwrap());
         assert!(kr.get_channel_config(&crate::e2e::scoped_context(label, "#secret")).unwrap().unwrap().enabled);
     }
 

@@ -680,9 +680,11 @@ mod tests {
         flush(&mut s, &due, now);
 
         let t1 = now + Duration::from_millis(500);
-        assert!(s.on_activity(tui(), "net/#rust", true, t1).is_empty());
+        let outcome = s.on_activity(tui(), "net/#rust", true, t1);
+        assert!(outcome.is_empty(), "{outcome:?}");
         let t2 = now + Duration::from_secs(2);
-        assert!(s.on_activity(tui(), "net/#rust", true, t2).is_empty());
+        let outcome = s.on_activity(tui(), "net/#rust", true, t2);
+        assert!(outcome.is_empty(), "{outcome:?}");
     }
 
     #[test]
@@ -696,16 +698,19 @@ mod tests {
         flush(&mut s, &due, now);
 
         let cleared = now + Duration::from_millis(200);
-        assert!(s.on_activity(tui(), "net/#rust", false, cleared).is_empty());
+        let outcome = s.on_activity(tui(), "net/#rust", false, cleared);
+        assert!(outcome.is_empty(), "{outcome:?}");
         // Still throttled at 2s.
-        assert!(s.on_tick(now + Duration::from_secs(2)).is_empty());
+        let outcome = s.on_tick(now + Duration::from_secs(2));
+        assert!(outcome.is_empty(), "{outcome:?}");
         // At 3s the window opens and the pending `done` goes out.
         let at3 = now + Duration::from_secs(3);
         let due = s.on_tick(at3);
         assert_eq!(due, vec![("net/#rust".to_string(), TypingState::Done)]);
         flush(&mut s, &due, at3);
         // And only once.
-        assert!(s.on_tick(now + Duration::from_secs(10)).is_empty());
+        let outcome = s.on_tick(now + Duration::from_secs(10));
+        assert!(outcome.is_empty(), "{outcome:?}");
     }
 
     #[test]
@@ -777,7 +782,8 @@ mod tests {
         flush(&mut s, &due, now);
 
         // 1s: inside the throttle, nothing.
-        assert!(s.on_tick(now + Duration::from_secs(1)).is_empty());
+        let outcome = s.on_tick(now + Duration::from_secs(1));
+        assert!(outcome.is_empty(), "{outcome:?}");
         // Keystroke at 2s keeps it fresh; tick at 3s resends `active`.
         s.on_activity(tui(), "net/#rust", true, now + Duration::from_secs(2));
         assert_eq!(
@@ -799,8 +805,10 @@ mod tests {
         assert_eq!(due, vec![("net/#rust".to_string(), TypingState::Paused)]);
         flush(&mut s, &due, at3);
 
-        assert!(s.on_tick(now + Duration::from_secs(7)).is_empty());
-        assert!(s.on_tick(now + Duration::from_secs(30)).is_empty());
+        let outcome = s.on_tick(now + Duration::from_secs(7));
+        assert!(outcome.is_empty(), "{outcome:?}");
+        let outcome = s.on_tick(now + Duration::from_secs(30));
+        assert!(outcome.is_empty(), "{outcome:?}");
     }
 
     #[test]
@@ -895,8 +903,9 @@ mod tests {
         flush(&mut s, &due, now);
 
         let t4 = now + Duration::from_secs(4);
-        assert!(s.on_submit(&tui(), "net/#rust", true, t4).is_empty());
-        assert!(s.on_tick(now + Duration::from_secs(8)).is_empty());
+        assert!(s.on_submit(&tui(), "net/#rust", true, t4).is_empty(), "{:?}", s.on_submit(&tui(), "net/#rust", true, t4));
+        let outcome = s.on_tick(now + Duration::from_secs(8));
+        assert!(outcome.is_empty(), "{outcome:?}");
     }
 
     #[test]
@@ -936,7 +945,8 @@ mod tests {
         let now = t0();
         s.on_submit(&tui(), "net/#rust", true, now);
 
-        assert!(s.on_activity(tui(), "net/#rust", true, now + Duration::from_secs(1)).is_empty());
+        let outcome = s.on_activity(tui(), "net/#rust", true, now + Duration::from_secs(1));
+        assert!(outcome.is_empty(), "{outcome:?}");
         assert_eq!(
             s.on_activity(tui(), "net/#rust", true, now + Duration::from_secs(3)),
             vec![("net/#rust".to_string(), TypingState::Active)]
@@ -1292,7 +1302,7 @@ mod tests {
         let mut w = Wired::new();
         w.conn_mut().enabled_caps.clear();
         assert!(!w.send("net/#rust", TypingState::Active, t0()));
-        assert!(w.wire().is_empty());
+        assert!(w.wire().is_empty(), "{:?}", w.wire());
     }
 
     #[test]
@@ -1301,7 +1311,7 @@ mod tests {
         let mut w = Wired::new();
         w.conn_mut().isupport_parsed.parse_tokens(&["CLIENTTAGDENY=*"]);
         assert!(!w.send("net/#rust", TypingState::Active, t0()));
-        assert!(w.wire().is_empty());
+        assert!(w.wire().is_empty(), "{:?}", w.wire());
 
         w.conn_mut()
             .isupport_parsed
@@ -1330,7 +1340,7 @@ mod tests {
                 !w.send("net/#rust", TypingState::Active, now),
                 "typing must not be sent while the connection is {status:?}"
             );
-            assert!(w.wire().is_empty());
+            assert!(w.wire().is_empty(), "{:?}", w.wire());
         }
     }
 
@@ -1397,10 +1407,8 @@ mod tests {
         );
         // Clearing the input in the channel proposes nothing — there is no
         // `done` to owe, because the target is gone.
-        assert!(
-            s.on_activity(tui(), "net/#rust", false, now + Duration::from_secs(4))
-                .is_empty()
-        );
+        let outcome = s.on_activity(tui(), "net/#rust", false, now + Duration::from_secs(4));
+        assert!(outcome.is_empty(), "{outcome:?}");
         // And no tick, now or ever, re-proposes it.
         for secs in [4, 8, 60, 600] {
             let due = s.on_tick(now + Duration::from_secs(secs));
@@ -1464,6 +1472,7 @@ mod tests {
 
         s.forget_buffer("net/#rust");
 
-        assert!(s.on_tick(now + Duration::from_secs(4)).is_empty());
+        let outcome = s.on_tick(now + Duration::from_secs(4));
+        assert!(outcome.is_empty(), "{outcome:?}");
     }
 }

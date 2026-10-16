@@ -415,13 +415,8 @@ mod tests {
                 .is_err()
         );
         let manager = app.state.e2e_manager.clone().unwrap();
-        assert!(
-            manager
-                .keyring()
-                .list_all_channel_configs()
-                .unwrap()
-                .is_empty()
-        );
+        let configs = manager.keyring().list_all_channel_configs().unwrap();
+        assert!(configs.is_empty(), "{configs:?}");
         let second = change(
             &app,
             scope,

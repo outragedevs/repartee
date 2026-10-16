@@ -102,7 +102,7 @@ fn autostart_commands_stay_on_their_network_and_preserve_focus() {
         "ircnet2",
         "OPER fixture fixture-password; /quote MODE $N +i",
     );
-    assert!(senders[0].captured().is_empty());
+    assert!(senders[0].captured().is_empty(), "{:?}", senders[0].captured());
     assert_eq!(
         senders[1]
             .captured()
@@ -114,8 +114,8 @@ fn autostart_commands_stay_on_their_network_and_preserve_focus() {
             "MODE ircnet2-nick +i\r\n"
         ]
     );
-    assert!(senders[2].captured().is_empty());
+    assert!(senders[2].captured().is_empty(), "{:?}", senders[2].captured());
     assert_eq!(app.state.active_buffer_id, focus);
     app.execute_autosendcmd("missing", "OPER fixture fixture-password");
-    assert!(senders[2].captured().is_empty());
+    assert!(senders[2].captured().is_empty(), "{:?}", senders[2].captured());
 }

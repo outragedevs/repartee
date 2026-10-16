@@ -77,7 +77,7 @@ async fn pinned_bouncer_account_matrix() {
         assert_eq!(ids.len(), 2);
         for id in &ids {
             assert!(account.networks.iter().any(|network| network.to_string() == app.bouncer_children[id].network.id));
-            assert!(app.state.connections[id].origin_config.channels.is_empty());
+            assert!(app.state.connections[id].origin_config.channels.is_empty(), "{:?}", app.state.connections[id].origin_config.channels);
         }
         all.extend(ids);
     }

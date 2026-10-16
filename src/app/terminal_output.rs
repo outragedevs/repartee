@@ -154,7 +154,7 @@ mod tests {
         let MainMessage::Output(bytes) = rx.try_recv().unwrap() else {
             panic!("missing frame")
         };
-        assert!(!bytes.is_empty());
+        assert!(!bytes.is_empty(), "`bytes` is empty");
         assert!(rx.try_recv().is_err());
         queued.fetch_sub(bytes.len(), Ordering::AcqRel);
         assert!(app.render_terminal_frame());

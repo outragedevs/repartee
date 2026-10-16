@@ -312,7 +312,7 @@ mod tests {
             ),
         );
         app.tick_bouncer_presence();
-        assert!(commands(&app, "first").is_empty());
+        assert!(commands(&app, "first").is_empty(), "{:?}", commands(&app, "first"));
         app.bouncer_presence.connections.get_mut("first").unwrap().attempted =
             Instant::now().checked_sub(Duration::from_secs(6));
         app.tick_bouncer_presence();
@@ -343,7 +343,7 @@ mod tests {
                 Mode::Absent.command()
             ]
         );
-        assert!(commands(&app, "other").is_empty());
+        assert!(commands(&app, "other").is_empty(), "{:?}", commands(&app, "other"));
     }
 
     #[tokio::test]
@@ -478,7 +478,7 @@ mod tests {
             .bouncer_control = true;
         identify(&mut app, "first", Provider::Lurker);
         app.tick_bouncer_presence();
-        assert!(commands(&app, "first").is_empty());
+        assert!(commands(&app, "first").is_empty(), "{:?}", commands(&app, "first"));
         let config =
             toml::from_str("label='Direct'\naddress='127.0.0.1'\nport=1\ntls=false\nchannels=[]")
                 .unwrap();

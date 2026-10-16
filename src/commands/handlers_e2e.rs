@@ -1856,7 +1856,7 @@ mod tests {
         assert_eq!(current.fingerprint(), donor.fingerprint());
         assert!(!current.has_pending_keyreq("#old-session"));
         assert!(app.state.pending_e2e_sends.is_empty());
-        assert!(app.state.pending_e2e_gapfills.is_empty());
+        assert!(app.state.pending_e2e_gapfills.is_empty(), "{:?}", app.state.pending_e2e_gapfills);
         let request = current.build_keyreq("#new-session").unwrap();
         assert_eq!(request.pubkey, donor.identity_pub());
         let payload = crate::e2e::handshake::signed_keyreq_payload("#new-session", &request.pubkey, &request.eph_x25519, &request.nonce);
@@ -2486,7 +2486,7 @@ mod tests {
     #[test]
     fn test_help_entries_nonempty_and_unique_names() {
         let mut names: Vec<&str> = HELP_ENTRIES.iter().map(|(n, _)| *n).collect();
-        assert!(!names.is_empty());
+        assert!(!names.is_empty(), "`names` is empty");
         names.sort_unstable();
         let before = names.len();
         names.dedup();

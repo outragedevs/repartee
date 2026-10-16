@@ -34,7 +34,7 @@ async fn certificate_commands_require_actual_sasl_and_bouncer_caps() {
     app.irc_handles.get_mut("test").unwrap().sasl_authenticated = false;
     app.state.connections.get_mut("test").unwrap().enabled_caps.insert("sasl".into());
     command(&mut app, &[]);
-    assert!(app.irc_handles["test"].sender().captured().is_empty());
+    assert!(app.irc_handles["test"].sender().captured().is_empty(), "{:?}", app.irc_handles["test"].sender().captured());
     app.irc_handles.get_mut("test").unwrap().sasl_authenticated = true;
     command(&mut app, &[]);
     assert_eq!(app.irc_handles["test"].sender().captured().len(), 2);
@@ -167,7 +167,7 @@ async fn certificate_management_requires_verified_tls_even_after_sasl() {
         for args in [vec!["list".into()], vec!["create".into(), "device".into()], vec!["delete".into()]] {
             command(&mut app, &args);
         }
-        assert!(app.irc_handles["test"].sender().captured().is_empty());
+        assert!(app.irc_handles["test"].sender().captured().is_empty(), "{:?}", app.irc_handles["test"].sender().captured());
         assert!(!app.bouncer_certificates.contains_key("test"));
         assert!(contains(&app, "verified TLS"));
     }

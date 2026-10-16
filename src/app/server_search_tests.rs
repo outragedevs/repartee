@@ -481,7 +481,7 @@ async fn bounded_history_rejects_an_oversized_labelled_request_before_tracking()
     let (mut app, sender) = app();
     app.state.connections.get_mut("first").unwrap().enabled_caps.insert("draft/chathistory".into());
     command(&mut app, &["between".into(), "x".repeat(390), "2024-01-01T00:00:00Z".into(), "2024-01-01T00:00:10Z".into()]);
-    assert!(sender.captured().is_empty());
+    assert!(sender.captured().is_empty(), "{:?}", sender.captured());
     assert!(!app.server_search.contains_key("first"));
     assert_eq!(app.state.connections["first"].chathistory.pending_count(), 0);
 }
@@ -512,7 +512,7 @@ async fn bounded_history_honors_explicit_reference_types() {
     conn.enabled_caps.insert("draft/chathistory".into());
     conn.isupport_parsed.parse_tokens(&["MSGREFTYPES=msgid"]);
     range(&mut app);
-    assert!(sender.captured().is_empty());
+    assert!(sender.captured().is_empty(), "{:?}", sender.captured());
     assert!(!app.server_search.contains_key("first"));
     app.state.connections.get_mut("first").unwrap().isupport_parsed.parse_tokens(&["MSGREFTYPES=msgid,timestamp"]);
     range(&mut app);

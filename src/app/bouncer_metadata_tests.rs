@@ -86,10 +86,10 @@ async fn blocking_filters_live_rows_invites_and_typing_and_purges_existing_rows(
     receive(&mut app, ":Alice!u@h PRIVMSG #Room :visible before blocking");
     receive(&mut app, "@+typing=active :Alice!u@h TAGMSG #Room");
     assert!(app.state.buffers["first/#room"].messages.iter().any(|row| row.text.contains("visible before blocking")));
-    assert!(!app.state.typing.nicks("first/#room").is_empty());
+    assert!(!app.state.typing.nicks("first/#room").is_empty(), "`app.state.typing.nicks(\"first/#room\")` is empty");
     receive(&mut app, "METADATA Alice soju.im/blocked * 1");
     assert!(!app.state.buffers["first/#room"].messages.iter().any(|row| row.nick.as_deref() == Some("Alice")));
-    assert!(app.state.typing.nicks("first/#room").is_empty());
+    assert!(app.state.typing.nicks("first/#room").is_empty(), "{:?}", app.state.typing.nicks("first/#room"));
     let count = app.state.buffers["first/#room"].messages.len();
     for wire in [
         ":Alice!u@h PRIVMSG #Room :blocked message",
@@ -99,7 +99,7 @@ async fn blocking_filters_live_rows_invites_and_typing_and_purges_existing_rows(
         "@+typing=active :Alice!u@h TAGMSG #Room",
     ] { receive(&mut app, wire); }
     assert_eq!(app.state.buffers["first/#room"].messages.len(), count);
-    assert!(app.state.typing.nicks("first/#room").is_empty());
+    assert!(app.state.typing.nicks("first/#room").is_empty(), "{:?}", app.state.typing.nicks("first/#room"));
     receive(&mut app, ":Bob!u@h PRIVMSG #Room :unrelated sender");
     assert_eq!(app.state.buffers["first/#room"].messages.len(), count + 1);
     receive(&mut app, "METADATA Alice soju.im/blocked * 0");

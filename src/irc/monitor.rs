@@ -804,7 +804,8 @@ mod tests {
             ":server 732 me :Bob",
             ":server 733 me :End",
         ] {
-            assert!(receive(&mut state, wire).is_empty());
+            let outcome = receive(&mut state, wire);
+            assert!(outcome.is_empty(), "{outcome:?}");
         }
         state.observe_extended(&":Alice!u@h ACCOUNT old-account".parse::<Message>().unwrap());
         assert_eq!(state.peers["alice"].online, None);

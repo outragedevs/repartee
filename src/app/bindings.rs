@@ -429,7 +429,7 @@ mod tests {
         app.bindings.clock -= std::time::Duration::from_millis(10);
         app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
         assert!(app.settings_panel.is_some());
-        assert!(app.input.value.is_empty());
+        assert!(app.input.value.is_empty(), "{:?}", app.input.value);
     }
 
     #[test]

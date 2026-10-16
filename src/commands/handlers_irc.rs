@@ -1691,7 +1691,7 @@ mod tests {
     #[test]
     fn parse_kick_args_empty_input() {
         let (nicks, reason) = parse_kick_args(&[]);
-        assert!(nicks.is_empty());
+        assert!(nicks.is_empty(), "{nicks:?}");
         assert_eq!(reason, None);
     }
 
@@ -1951,7 +1951,7 @@ mod action_context_tests {
             app.state.add_buffer(Buffer::for_test("fixture", kind, "invalid"));
             app.state.set_active_buffer("fixture/invalid");
             super::cmd_me(&mut app, &["waves".into()]);
-            assert!(sender.captured().is_empty());
+            assert!(sender.captured().is_empty(), "{:?}", sender.captured());
         }
         for (kind, name) in [(BufferType::Channel, "#here"), (BufferType::Query, "peer")] {
             app.state.add_buffer(Buffer::for_test("fixture", kind, name));

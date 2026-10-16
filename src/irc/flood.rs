@@ -784,8 +784,8 @@ mod tests {
     fn default_impl_matches_new() {
         let a = FloodState::new();
         let b = FloodState::default();
-        assert!(a.ctcp_times.is_empty());
-        assert!(b.ctcp_times.is_empty());
+        assert!(a.ctcp_times.is_empty(), "{:?}", a.ctcp_times);
+        assert!(b.ctcp_times.is_empty(), "{:?}", b.ctcp_times);
         assert!(a.ctcp_blocked_until.is_none());
         assert!(b.ctcp_blocked_until.is_none());
     }

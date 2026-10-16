@@ -134,7 +134,7 @@ mod tests {
                 _ => conn.status = crate::state::connection::ConnectionStatus::Disconnected,
             }
             command(&mut app, &["#a".into(), "ID".into()]);
-            assert!(app.irc_handles["one"].sender().captured().is_empty());
+            assert!(app.irc_handles["one"].sender().captured().is_empty(), "{:?}", app.irc_handles["one"].sender().captured());
         }
         let mut app = setup();
         for args in [
@@ -148,7 +148,7 @@ mod tests {
         ] {
             command(&mut app, &args);
         }
-        assert!(app.irc_handles["one"].sender().captured().is_empty());
+        assert!(app.irc_handles["one"].sender().captured().is_empty(), "{:?}", app.irc_handles["one"].sender().captured());
     }
     #[test]
     fn labeled_request_checks_final_wire_length() {
@@ -158,7 +158,7 @@ mod tests {
         let untagged: Message = Command::Raw("REDACT".into(), vec!["#a".into(), "ID".into(), reason.clone()]).into();
         assert!(untagged.to_string().len() <= crate::irc::PROTOCOL_LINE_MAX_BYTES);
         command(&mut app, &["#a".into(), "ID".into(), reason]);
-        assert!(app.irc_handles["one"].sender().captured().is_empty());
+        assert!(app.irc_handles["one"].sender().captured().is_empty(), "{:?}", app.irc_handles["one"].sender().captured());
         assert_eq!(app.labeled_requests["one"].pending_count(), 0);
     }
 

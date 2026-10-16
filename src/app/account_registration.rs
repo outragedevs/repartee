@@ -200,7 +200,7 @@ mod tests {
         handle.account_registration_rules = Some("email-required,min-password-length=8".into());
         app.handle_irc_event(crate::irc::IrcEvent::HandleReady(Box::new(handle)));
         register(&mut app, "short");
-        assert!(sender.captured().is_empty());
+        assert!(sender.captured().is_empty(), "{:?}", sender.captured());
         register(&mut app, "long-password");
         assert_eq!(sender.captured().len(), 1);
         app.handle_account_registration("fixture", &"CAP * DEL :draft/account-registration".parse().unwrap());
@@ -278,7 +278,7 @@ mod tests {
         let args = ["verify".into(), "-allow-insecure-upstream".into(), "*".into(), "CODE".into()];
         app.state.connections.get_mut("fixture").unwrap().enabled_caps.remove(CAP);
         command_with_secret(&mut app, &args, |_| panic!("unacknowledged capability must not load secret"));
-        assert!(sender.captured().is_empty());
+        assert!(sender.captured().is_empty(), "{:?}", sender.captured());
         app.state.connections.get_mut("fixture").unwrap().enabled_caps.insert(CAP.into());
         command_with_secret(&mut app, &args, |_| Some("verification-code".into()));
         assert!(app.has_account_registration_pending("fixture"));

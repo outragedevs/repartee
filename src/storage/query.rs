@@ -1175,7 +1175,7 @@ mod tests {
             list_buffers_for_network(&db, "oftc").unwrap(),
             vec!["#debian"]
         );
-        assert!(list_buffers_for_network(&db, "missing").unwrap().is_empty());
+        assert!(list_buffers_for_network(&db, "missing").unwrap().is_empty(), "{:?}", list_buffers_for_network(&db, "missing").unwrap());
     }
 
     #[test]

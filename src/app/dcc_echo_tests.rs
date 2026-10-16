@@ -158,7 +158,7 @@ async fn dcc_commands_route_identical_peers_by_network() {
     app.handle_submit("/dcc reject chat PEER{");
     assert!(app.dcc.records.is_empty());
     assert!(sessions[0].1.captured().iter().any(|m| m.to_string().contains("DCC REJECT")));
-    assert!(sessions[1].1.captured().is_empty());
+    assert!(sessions[1].1.captured().is_empty(), "{:?}", sessions[1].1.captured());
 }
 
 #[tokio::test]
@@ -180,7 +180,7 @@ async fn dcc_acceptance_and_missing_nick_stay_on_the_offer_network() {
     assert_eq!(app.dcc.records.values().find(|r| r.conn_id == "fixture").unwrap().state, DccState::Listening);
     assert_eq!(app.dcc.records.values().find(|r| r.conn_id == "other").unwrap().state, DccState::WaitingUser);
     assert_eq!(app.irc_handles["fixture"].sender().captured().len(), 1);
-    assert!(app.irc_handles["other"].sender().captured().is_empty());
+    assert!(app.irc_handles["other"].sender().captured().is_empty(), "{:?}", app.irc_handles["other"].sender().captured());
     app.dcc.autochat_masks = vec!["*!*@*".into()];
     receive(&mut app, "other", ":auto!user@host PRIVMSG me :\x01DCC CHAT chat 2130706433 0 43\x01");
     assert_eq!(app.dcc.records.values().find(|r| r.nick == "auto").unwrap().state, DccState::Listening);

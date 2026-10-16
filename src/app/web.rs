@@ -1228,7 +1228,7 @@ mod command_context_tests {
             "browser",
         );
         assert_eq!(app.irc_handles["one"].sender().captured().len(), 1);
-        assert!(app.irc_handles["two"].sender().captured().is_empty());
+        assert!(app.irc_handles["two"].sender().captured().is_empty(), "{:?}", app.irc_handles["two"].sender().captured());
         assert_eq!(app.state.active_buffer_id.as_deref(), Some("two/#room"));
     }
 }
