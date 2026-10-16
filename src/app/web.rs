@@ -225,17 +225,29 @@ impl App {
             tracing::debug!(count = events.len(), "draining {} web events", events.len());
         }
         let mut structural_change = false;
-        for event in events {
-            match &event {
-                crate::web::protocol::WebEvent::BufferCreated { buffer, .. } => {
+        for mut event in events {
+            match &mut event {
+                crate::web::protocol::WebEvent::BufferCreated { buffer, activate } => {
                     tracing::debug!(buffer_id = %buffer.id, "broadcasting BufferCreated");
                     structural_change = true;
+                    // Shell buffers (and their group header) are per-session
+                    // web terminals, for the same reason `ActiveBufferChanged`
+                    // into a shell is never broadcast: a tab dragged in would
+                    // show a terminal the server does not route to it. The tab
+                    // whose command opened the shell is moved there by a
+                    // targeted switch instead (see `web_run_command`).
+                    if buffer.connection_id == Self::SHELL_CONN_ID {
+                        *activate = false;
+                    }
                 }
                 crate::web::protocol::WebEvent::BufferClosed { buffer_id } => {
                     tracing::debug!(%buffer_id, "broadcasting BufferClosed");
                     structural_change = true;
                 }
-                crate::web::protocol::WebEvent::ActiveBufferChanged { buffer_id } => {
+                // A switch with a `session_id` is meant for the one tab that
+                // asked for it. It is filtered per session on send, needs none
+                // of the bookkeeping below, and goes out untouched.
+                crate::web::protocol::WebEvent::ActiveBufferChanged { buffer_id, session_id: None } => {
                     // Broadcast so the TUI and every web session stay 1:1 in
                     // sync — switching the active buffer anywhere (TUI, any tab,
                     // phone) propagates everywhere. Also structural so a
@@ -872,12 +884,45 @@ impl App {
         let prior = self.state.active_buffer_id.clone();
         self.set_active_buffer_silent(buffer_id);
         let sent_message = self.handle_submit(text);
+        self.follow_web_command_into_shell(buffer_id);
         if let Some(id) = prior {
             self.set_active_buffer_silent(&id);
         } else {
             self.state.active_buffer_id = None;
         }
         sent_message
+    }
+
+    /// Move the submitting tab into a shell its own command switched to.
+    ///
+    /// Switches into a shell are never broadcast, because each web session
+    /// owns its own PTY. So when `/shell` opens one from a browser, record
+    /// that tab at the new buffer, which lets its first `ShellResize` open
+    /// the PTY, and tell only that tab to switch.
+    fn follow_web_command_into_shell(&mut self, command_buffer: &str) {
+        let crate::app::translate::SubmitOrigin::Web(session) = &self.submit_origin else {
+            return;
+        };
+        let Some(landed) = self.state.active_buffer_id.clone() else {
+            return;
+        };
+        if landed == command_buffer
+            || !self
+                .state
+                .buffers
+                .get(&landed)
+                .is_some_and(|b| b.buffer_type == crate::state::buffer::BufferType::Shell)
+        {
+            return;
+        }
+        let session = session.clone();
+        self.confirm_web_buffer(&session, &landed);
+        self.state
+            .pending_web_events
+            .push(crate::web::protocol::WebEvent::ActiveBufferChanged {
+                buffer_id: landed,
+                session_id: Some(session),
+            });
     }
 
     fn set_active_buffer_silent(&mut self, buffer_id: &str) {
@@ -1260,6 +1305,60 @@ mod activity_read_tests {
         assert_eq!(app.state.next_activity_buffer().as_deref(), Some("net/#old"));
         app.web_mark_read("net/#old", None, "browser");
         assert!(app.state.next_activity_buffer().is_none());
+    }
+
+    /// `/shell` typed in a browser must land that tab, and only that tab, in
+    /// the new shell with a working PTY. Every tab used to auto-activate the
+    /// buffer locally while the server still recorded the old buffer, so the
+    /// tab's first `ShellResize` was rejected and its terminal stayed blank.
+    #[tokio::test]
+    async fn shell_opened_from_a_web_tab_moves_only_that_tab_into_it() {
+        use crate::web::protocol::{WebCommand, WebEvent};
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        app.state.add_buffer(Buffer::for_test("net", BufferType::Channel, "#one"));
+        app.state.set_active_buffer("net/#one");
+        app.confirm_web_buffer("browser", "net/#one");
+        app.confirm_web_buffer("other", "net/#one");
+        app.drain_pending_web_events();
+        let mut receiver = app.web_broadcaster.subscribe();
+
+        app.handle_web_command(
+            WebCommand::RunCommand { buffer_id: "net/#one".into(), text: "/shell cmd sleep 30".into() },
+            "browser",
+        );
+        app.drain_pending_web_events();
+        let shell = app
+            .state
+            .buffers
+            .values()
+            .find(|buffer| buffer.buffer_type == BufferType::Shell)
+            .map(|buffer| buffer.id.clone())
+            .expect("/shell creates a shell buffer");
+        let events: Vec<WebEvent> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
+
+        assert!(events.iter().any(|event| matches!(event,
+            WebEvent::BufferCreated { buffer, activate: false } if buffer.id == shell)),
+            "no tab may auto-activate a shell buffer: {events:?}");
+        let switches: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                WebEvent::ActiveBufferChanged { buffer_id, session_id } => Some((buffer_id, session_id.as_deref())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(switches, [(&shell, Some("browser"))]);
+        assert_eq!(app.web_active_buffers["browser"], shell);
+        assert_eq!(app.web_active_buffers["other"], "net/#one");
+        assert_eq!(app.state.active_buffer_id.as_deref(), Some("net/#one"));
+
+        app.handle_web_command(
+            WebCommand::ShellResize { buffer_id: shell.clone(), cols: 80, rows: 24 },
+            "browser",
+        );
+        let opened = app.shell_mgr.has_web_session("web-browser");
+        app.shell_mgr.close_web_by_session("browser");
+        app.close_shell_buffer(&shell);
+        assert!(opened, "the tab's first resize opens its web PTY");
     }
 }
 

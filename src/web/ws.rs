@@ -232,6 +232,7 @@ fn is_targeted_to_other(event: &WebEvent, session_id: &str) -> bool {
         | WebEvent::NickList { session_id, .. }
         | WebEvent::MentionsList { session_id, .. }
         | WebEvent::ShellScreen { session_id, .. }
+        | WebEvent::ActiveBufferChanged { session_id, .. }
         | WebEvent::Error { session_id, .. }
         // A refused message goes back ONLY to whoever typed it; broadcasting
         // it would drop one client's text into every other client's input.

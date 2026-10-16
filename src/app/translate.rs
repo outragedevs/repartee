@@ -7105,6 +7105,7 @@ mod app_tests {
             .pending_web_events
             .push(crate::web::protocol::WebEvent::ActiveBufferChanged {
                 buffer_id: BUF.to_string(),
+                session_id: None,
             });
 
         app.drain_pending_web_events();
@@ -7143,6 +7144,7 @@ mod app_tests {
             .pending_web_events
             .push(crate::web::protocol::WebEvent::ActiveBufferChanged {
                 buffer_id: "test/shell1".to_string(),
+                session_id: None,
             });
 
         app.drain_pending_web_events();
@@ -7161,6 +7163,7 @@ mod app_tests {
             .pending_web_events
             .push(crate::web::protocol::WebEvent::ActiveBufferChanged {
                 buffer_id: "test/#inne".to_string(),
+                session_id: None,
             });
         app.drain_pending_web_events();
         assert!(

@@ -157,6 +157,9 @@ pub enum WebEvent {
     },
     ActiveBufferChanged {
         buffer_id: String,
+        /// Set when the switch is meant for this tab alone.
+        #[serde(default)]
+        session_id: Option<String>,
     },
     SettingsChanged {
         timestamp_format: String,
