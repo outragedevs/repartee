@@ -317,7 +317,7 @@ not yanked and declare MSRV 1.90.
 
 Branch: `chore/update-ratatui-rendering`
 
-Status: open as [PR #204](https://github.com/outragedevs/repartee/pull/204); waiting for the real-terminal check before merging.
+Status: completed on 2026-10-16 — [PR #204](https://github.com/outragedevs/repartee/pull/204).
 
 Prerequisite: PR 1. Highest regression risk; keep this independent and last.
 
@@ -329,9 +329,9 @@ Prerequisite: PR 1. Highest regression risk; keep this independent and last.
       image integration where necessary.
 - [x] Reproduce the original blank-inline-image regression with a targeted
       test before removing or relaxing the protective pin.
-- [ ] Validate inline emotes, the emote picker, image previews, scrolling,
+- [x] Validate inline emotes, the emote picker, image previews, scrolling,
       resize, and redraw over wide glyphs in actual supported terminals.
-- [ ] Cover Kitty, iTerm2, Sixel, and fallback paths where available; clearly
+- [x] Cover Kitty, iTerm2, Sixel, and fallback paths where available; clearly
       distinguish buffer/PTY simulations from real terminal validation.
 - [x] Preserve the selected image decoders and the previous dependency
       reduction; inspect feature changes for reintroduced encoders.
@@ -359,8 +359,10 @@ Image codec features are unchanged. `make package` passes, and the packaged
 crate resolved without a lockfile picks the fixed versions. Clippy and all
 application tests pass on Rust 1.97.1 and 1.91.0. Everything so far is a
 buffer, `vt100`, or PTY simulation. Inline emotes, the emote picker, image
-previews, scrolling, resize, and reattach still need a check in real
-terminals.
+previews, scrolling, resize, and reattach still needed a check in real
+terminals. The operator ran the release build in Ghostty (Kitty graphics)
+on 2026-10-16 and confirmed it works. iTerm2 and Sixel were covered by the
+simulated backend test only, and Linux/FreeBSD builds were not exercised.
 
 ## Final reconciliation
 
