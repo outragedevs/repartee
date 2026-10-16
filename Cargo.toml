@@ -84,7 +84,7 @@ chacha20poly1305 = "0.10"
 hkdf = "0.12"
 bip39 = "2"
 zeroize = { version = "1", features = ["derive", "serde"] }
-mlua = { version = "0.11.6", features = ["lua54", "vendored", "send"] }
+mlua = { version = "0.12.2", features = ["lua54", "vendored", "send"] }
 ratatui-image = { version = "10.0", default-features = false, features = ["crossterm"] }
 spellbook = "0.4"
 image = { version = "0.25", default-features = false, features = [
