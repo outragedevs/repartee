@@ -1,0 +1,254 @@
+# Changelog
+
+All notable changes to Repartee are documented in this file. Versions follow
+[Semantic Versioning](https://semver.org/); dates are the day the release was tagged.
+
+## [2.2.1] - 2026-10-16
+
+- **Dependency cleanup and updates.** Remove redundant dependency wrappers, disable unused image and IRC configuration features, use AWS-LC for certificate generation, and replace retired macro dependencies with maintained releases.
+- **Compatible data and scripting upgrades.** Refresh the cryptographic libraries, bundled SQLite, Linux allocator, and Lua integration, with fixed fixtures for existing encrypted data and database migrations. Lua remains on 5.4 and preserves fractional integer argument handling.
+- **Terminal rendering updates.** Update Ratatui, ratatui-image, and the browser terminal renderer. Retire the old rendering pin while preserving inline images, and handle redraw and resize queries in the detached daemon.
+- **Web shell fixes.** Start a browser shell in the tab that opened it and keep wide characters aligned with the server's terminal columns.
+- **Ad-hoc network labels.** Connections opened with `/connect` adopt the server's network name again.
+
+## [2.2.0] - 2026-10-13
+
+- **Bare display and highlight navigation.** The terminal can show a clean, selectable view of chat text and long URLs, and new bindings seek to earlier or later highlights while retaining their history position.
+- **Smoother terminal output.** Animated emotes follow terminal output pacing, focus changes avoid unnecessary full redraws, and the shim writes output through a dedicated thread.
+- **Configurable status border.** The line above the status and input area can be hidden; reloading this setting resizes open shells.
+- **Lua scripting additions.** Scripts receive `irc.ison` replies, can persist their settings across restarts, and the bundled `keepnick.lua` script can reclaim a preferred nickname.
+
+## [2.1.3] - 2026-09-22
+
+- **Configurable keyboard bindings.** `/bind` now lists, assigns, deletes, and resets irssi-style key sequences and actions. Custom bindings persist across restarts and reloads, while invalid definitions and failed saves leave the active configuration intact.
+- **Shared navigation in terminal and browser.** Editable defaults cover unread activity, numbered windows, and adjacent windows. The web client receives binding changes live and applies navigation and commands only to the initiating browser session; terminal shell input retains its own key handling.
+
+## [2.1.2] - 2026-09-22
+
+- **Safer IRC command handling.** Channel-sensitive commands now require the correct context, preserve complete reason text and literal arguments, handle IPv6 endpoints and LINKS masks correctly, and apply network casemapping when reusing query buffers.
+- **More reliable DCC chat.** DCC offers, replies, echoes, routing, advertised addresses, peer validation, and transport cleanup now remain scoped to the intended network and session, with stricter validation for addresses and port ranges.
+- **Stronger configuration and reload behavior.** Failed saves roll back cleanly and report errors, runtime reloads update active settings and web-server lifecycle state, credentials survive failed reloads, and themes are validated before being stored.
+- **Hardened E2E, history, and logs.** Imported encryption keys are validated and reflected in live state, incoming trust is accepted in the recipient context, encrypted searches keep the newest matches, and log-status database failures are surfaced instead of silently hidden.
+- **Consistent terminal and web interactions.** Browser commands and settings wizards target the correct buffer and network, clears synchronize with pending history, spellcheck results return to their originating buffer, alias expansion respects command boundaries, and statusbar item values preserve their complete text.
+
+## [2.1.1] - 2026-09-21
+
+- **Shared settings panels for terminal and web.** A complete settings interface now exposes validated drafts, section resets, inherited values, pending-save protection, mouse controls, and browser-local settings consistently in both clients. Redesigned modals add network tabs and structured collection editors without losing unsaved browser drafts across reconnects.
+- **Dedicated encryption and translation workflows.** E2E and translation have their own settings pages, with per-network and per-channel wizards available in both the TUI and web UI. Stored selections render correctly, legacy SASL choices remain intact, and conflicting settings are rejected before save.
+- **Reliable multi-network startup.** Startup commands stay scoped to their configured network and run before automatic channel joins, preventing commands and joins from crossing connections during concurrent startup.
+- **Fixes for history and DCC.** Local event parameters are stored safely so historical WHOIS and themed events render correctly, and echoed outgoing DCC CHAT offers are recognized per network instead of reappearing as incoming invitations.
+
+## [2.1.0] - 2026-09-21
+
+- **First-class IRC bouncer support.** repartee now discovers and binds bouncer-managed networks, keeps their identities separate, restores them across reconnects, and supports Soju network management from `/bouncer`. Explicit bouncer names, account-required flows, interrupted registration recovery, and implicit PASS-authenticated networks are handled without leaking state between connections.
+- **Server-backed history that survives every client lifecycle.** Channel and query history is discovered, paged over bounded ranges, deduplicated, and reconciled with live traffic, local SQLite, daemon sessions, and browser reconnects. Read markers and per-client presence keep the TUI and web UI aligned while allowing independent history readers, and empty queries now load their backlog when opened.
+- **Modern bouncer capabilities.** Added labeled-response routing, live batch isolation, `MONITOR`, `SETNAME`, extended ISUPPORT, channel-context, buffer metadata, message redaction, network icons, server-side search, and upstream SASL including OAUTHBEARER. The implementations account for unlabeled replies, capability transitions, expired or partial batches, pagination, and concurrent requests.
+- **Account, certificate, and credential workflows.** Account registration, SASL EXTERNAL client certificates, provider-specific PASS credentials, TLS validation diagnostics, and account lifecycle handling are available through the native and web flows. Sensitive material is kept out of ordinary history and owned E2E secrets are zeroized when released.
+- **WebPush and file hosting for bouncer users.** Bouncer-compatible WebPush registration and delivery now work in browsers and after authenticated PASS login, with payload, settings, worker, and lock handling covered by acceptance fixtures. The bouncer file host provides bounded uploads and browser-facing delivery without exposing unrelated network state.
+- **Inline images and faster navigation.** Opt-in inline chat image previews render with bounded fetching and stable terminal output, while `Alt+A` jumps through unread buffers by activity priority. Terminal resize reconciliation, wide-glyph redraws, literal percent messages, native detach in legacy terminals, shell quoting, and mobile preview scrolling were hardened along the way.
+- **Translation and runtime refinements.** Italian and Finnish language detection were added, refusal detection was narrowed, runtime ignore changes take effect immediately, Lua scripts observe accepted buffer switches without delay, quoted `/set` values round-trip correctly, and provider SAFERATE limits now feed IRC flood control.
+- **Bouncer-focused documentation and validation.** New command references and connection guidance cover the expanded bouncer surface, backed by protocol fixtures and acceptance scenarios for Soju and Lurker covering history, presence, search, metadata, WebPush, certificates, redaction, and failure recovery.
+
+## [2.0.0] - 2026-08-14
+
+- **Live AI translation for IRC conversations.** Translation can be enabled independently for incoming and outgoing traffic on each channel or query, with separate conversation and personal languages. Translated lines can retain a dimmed original, and the display boundary is persisted in SQLite so history looks the same after restart. `/translate` manages mappings at runtime, while `/set translate.*` exposes timeouts, concurrency, queue limits, language defaults, and backend selection.
+- **Resilient multi-provider routing.** The new AI backend supports OpenAI-compatible providers including OpenRouter, Ollama-compatible endpoints, Gemini, StepFun, and Groq. Policies route German and general text separately, enforce per-model attempt budgets, and reserve Groq as the terminal fallback when preferred providers do not answer in time. Authentication rotation, provider rate limits, `Retry-After`, bounded response bodies, model fallbacks, and live configuration reloads are handled without restarting the daemon.
+- **Translation safety and privacy gates.** URLs, channels, nicknames, technical identifiers, and IRC formatting are masked before provider calls and validated on return. Unsupported languages are rejected before disclosure; wrong-language, partial, refusal, meta-text, malformed placeholder, and line-breaking responses fall through instead of being sent under the user's nick. Outgoing translation fails closed and restores the original composer text when no trustworthy result is available; RPE2E traffic is never disclosed to a translation provider.
+- **Ordered asynchronous delivery.** Per-conversation queues keep translated messages in submission order without blocking unrelated buffers. The runtime handles reconnects, nick changes and reuse, closed queries, echo-message reflection, multiline messages, actions, queue pressure, timeouts, and partial send failures while preserving the only recoverable copy of outgoing text.
+- **Modern SASL authentication.** In addition to PLAIN and EXTERNAL, repartee now supports SCRAM-SHA-1, SCRAM-SHA-256, SCRAM-SHA-512, and ECDSA-NIST256P-CHALLENGE, including chunked AUTHENTICATE reassembly and automatic selection of the strongest mechanism offered by the server. The command line, `/set`, terminal wizard, web wizard, and documentation expose the same mechanism set.
+- **Self-contained and complete help.** `repartee --help` now documents startup modes and flags before runtime initialization. Runtime `/help` is generated from command documentation embedded in the binary, supports structured subcommand help and completion, and is guarded by tests requiring every registered command to have matching documentation, category, and syntax.
+- **IRC and interface improvements.** `/close` and `/wc` can close numbered windows or ranges with safeguards for Mentions and server buffers. WHOIS numerics have complete themed rendering, the TUI and web buffer lists show typing and E2E state icons, and E2E locks refresh immediately after peer resolution or keyring import.
+- **Upgrade and release hardening.** Existing configuration and SQLite data migrate automatically; translation remains disabled until explicitly configured. Configuration writes remain atomic, generated documentation is checked for source parity, Linux ARM64 release binaries support 4, 16, and 64 KiB page-size kernels, and the documented MSRV is Rust 1.91.
+
+## [1.7.0] - 2026-07-13
+
+- **Scroll past your own logs and read history straight from the server — IRCv3 `draft/chathistory`.** Scrolling a channel or query up used to stop at the oldest line in your local SQLite log; now, when that runs out and the server advertises `draft/chathistory`, repartee asks the server for what came before (`CHATHISTORY BEFORE`) and prepends it — so you can read history from before you ever joined, or from a machine that never saw it. Reconnects are gap-filled too: on rejoin, the active buffer pulls everything posted while you were away (`CHATHISTORY AFTER`, chaining pages by `@msgid` where the server supports it, falling back to timestamps). History arrives *quietly* — replayed lines are stored and rendered but never trigger highlights, notifications, or scripts, so a gap-fill can't spam you with a hundred stale mentions. There is nothing to configure: it activates on servers that support the cap and stays out of the way on those that don't.
+- **Multi-line messages — IRCv3 `draft/multiline`.** Press **Alt+Enter** in the TUI to insert a literal newline and compose across several lines; the whole thing is sent as one logical message inside a `BATCH`, so servers and clients that support the cap show it as a single block rather than N separate PRIVMSGs. Pasting multi-line text coalesces into one message instead of flooding the channel line by line, and the web UI sends its composer content with newlines preserved. Inbound multi-line batches are reassembled back into one message. Where the server rejects a batch (too many lines, too many bytes), the `FAIL BATCH MULTILINE_*` error is surfaced to you instead of the message vanishing silently. Line limits are read from the server's own cap values, and the whole path is E2E-safe.
+- **Typing indicators — IRCv3 `+typing`, in both the TUI and the web UI.** See who's actively composing a message in the current channel or query: a status-line item and a matching web UI indicator, appearing and clearing live per the spec's timing (active/paused/done, with throttle and expiry). New `[typing]` config section: `show` (receive and display others' typing, default on), `send_channels` and `send_queries` (send your own `+typing` in channels and queries respectively, independently toggleable, both default on). **Note that sending is on by default** — after this upgrade, people in your channels and queries can see when you are composing. Turn it off with `/set typing.send_channels false` and `/set typing.send_queries false` (these accept `true`/`false`, not `on`/`off`); `/set typing.show false` stops displaying everyone else's. Add `typing` to `[statusbar] items` to place the indicator in the status line — it's included there by default, and back-filled into existing configs. The legacy pre-ratification `+draft/typing` tag is still accepted on receive, though repartee only ever sends the ratified `+typing`. Scripts can hook `api.on("irc.typing", ...)` to observe or suppress typing notifications, same as any other IRC event.
+- **Full WHOX parity on ircu-family and IRCnet servers.** `/who` and the nick-list metadata it feeds now understand the SID/UID-aware WHOX replies these ircds send, so away state, account names, and real hostnames populate correctly there instead of coming back blank.
+- **Web UI overhaul, from tester feedback.** Adjustable **text size and line spacing** via a new **Aa** menu; **input history** (recall what you sent, like the TUI); **tap a nick to mention it** and a tap-friendly completion popup, with a leading `@nick` rewritten into the network's own convention on send; **unread badges** on the buffer list; and a pile of mobile fixes — denser panels, the chat reliably pinned to the bottom, and no view jumps when an image or a live message lands mid-scroll.
+- **E2E fixes for cross-client interop.** Direct messages are now keyed by recipient consistently in both repartee and the companion scripts, so a DM encrypted by one side decrypts on the other; channel notices render correctly rather than as empty lines; and the `./!` bot-command bypass is restricted to channels, where it belongs, instead of leaking into queries.
+- **Fixes.** The TUI scroll no longer runs past the top of the buffer; `/whois` shows the full set of numerics rather than a truncated subset; extended-join now displays the UID correctly on IRCnet; reconnects no longer duplicate backlog lines; every write to `config.toml` is atomic (a crash mid-write can't leave you with a truncated config), and config migrations happen in memory rather than through a rewrite-in-place.
+- **Dependency refresh.** 115 semver-compatible dependency updates. `ratatui-core` remains deliberately pinned at `0.1.0` — `0.1.1` regressed the skip-cell rendering that inline emotes depend on.
+
+## [1.6.1] - 2026-06-10
+
+- **Fix: backlog scroll-back couldn't be started in the web UI.** Scrolling up to load older history only ever began once the message list overflowed the browser window — but a fresh connect seeds just a handful of lines (the TUI's `display.backlog_lines`, default 20), which rarely fills the viewport, so there was no scrollbar and the older-history fetch was never reachable (it appeared to work only after first scrolling that channel back in the TUI). The web view now auto-fills: it pulls successive older pages until the viewport overflows (or history runs out), so scroll-back works from a fresh page load. The scroll anchor is captured for these fills too, so a live message or preview image arriving mid-fetch can't make the view jump.
+
+## [1.6.0] - 2026-06-10
+
+- **Scroll up to read backlog from the logs — no more `repartee l`.** Scrolling a live channel/query toward the top now pages older messages straight from the SQLite log and prepends them, so you can catch up on days of history right in the normal view (irssi/weechat/The Lounge style) instead of dropping into the read-only log browser. This works in **both the TUI and the web UI** — in the browser the scroll position is anchored so loading older messages doesn't make the view jump. Memory stays bounded: a buffer you've scrolled up into is kept larger while you read it and trimmed back down (freeing the loaded history) when you return to the live bottom. Encrypted logs now decrypt on these reads too (both the TUI buffer-open backlog and web scroll-back previously showed ciphertext when `[storage] encrypt = true`).
+
+## [1.5.0] - 2026-06-08
+
+- **Inline emotes now size to the GIF, not a fixed box.** Every `:name:` emote was previously crushed into a fixed 2-cell square, so the many wide GG7 animations (e.g. 40×18, 50×20) rendered as a tiny squished strip. Each emote's on-screen footprint is now derived from its native GIF dimensions and the terminal's cell size — preserving aspect ratio and never upscaling past the original — so small square emotes keep their size while wide GIFs span proportionally more columns. Tall GIFs may also span multiple rows: the chat reserves blank rows below the line so the emote grows downward without overlapping following text (and never paints over the input bar). Tunable via `[emotes] max_cols` (default 8) and `max_rows` (default 3); set `max_rows = 1` to keep every emote strictly one row tall.
+- **Inline emotes rescale when you change the terminal font size.** The cell pixel size was detected once at startup, so zooming the terminal in/out left emotes rendered for the old font — correct only near the launch size. A resize now re-derives the cell size and re-renders emotes at the new scale.
+- **Fix: emotes rendered as black squares after detaching and reattaching to a new terminal.** On a Kitty-protocol terminal (kitty, Ghostty, …) each emote image is transmitted to the terminal exactly once; later frames only emit the placeholder glyphs that reference it. After you detached (e.g. closed the SSH session) and reattached from a *new* terminal, the daemon reused its cached image protocols, so those placeholders pointed at images the new terminal never received — and rendered as black squares. Reattach now drops the cached emote (and image-preview) protocols so the images are re-transmitted to the new terminal.
+
+## [1.4.3] - 2026-06-06
+
+- **Web UI: emote/emoji picker now inserts on mobile.** Both the desktop and mobile layouts mount their own composer, so picking an emote routed the inserted `:name:`/emoji to the hidden desktop input; mobile saw nothing. The insertion now targets the visible composer.
+- **Web UI: active-buffer view is synced 1:1 again across the TUI and every web session.** Switching the active channel/query anywhere — the terminal, any browser tab, the phone — now propagates everywhere, restoring the original shared-view behaviour. (Shell buffers stay per-session, since each web session owns its own terminal.)
+- **Web UI: fixed chat flicker with images.** The whole chat area was re-rendering — recreating every preview `<img>` — whenever the buffer list churned (unread counts/activity from traffic on other channels), which on Chrome flashed each image off and back and jumped the scroll. The chat now only re-renders on an actual shell/non-shell switch.
+
+## [1.4.2] - 2026-06-06
+
+- **Web UI: IRC formatting now renders in the channel topic.** The chat parser already handled mIRC/irssi colour, bold, italic and underline, but the topic bar rendered raw text — so a formatted topic showed control bytes instead of styles. The topic now runs through the same parser (URLs in topics are clickable too), and the mobile topic breadcrumb strips control codes so no raw bytes leak. The web mIRC colour palette was also extended from 16 to the full 99 colours, matching the TUI.
+- **Web UI: emote & emoji pickers.** A **GG emote picker** (animated `:name:` GIF thumbnails with a live filter) opens from a toolbar button, the `/emoji` command (and `/emote`, `/emotes` aliases), or **Ctrl+G**, and `:name:` now **tab-completes** in the composer. A separate **Unicode emoji picker** (category tabs + search) opens from its own button on desktop — on mobile it's hidden, since phones already provide a system emoji keyboard. Both insert at the caret.
+
+## [1.4.1] - 2026-06-06
+
+- **Fix: inline emotes rendered as blank cells on `cargo install` builds.** `ratatui-core 0.1.1` rewrote the buffer's skip/multi-width cell handling, which breaks the skip-cell mechanism `ratatui-image` relies on to draw inline graphics — so emote thumbnails (and the `/emote` picker) showed only one or two images and empty gaps for the rest. Source and CI builds were shielded by `Cargo.lock`, but `cargo install` ignores the lockfile and pulled the newer crate. `ratatui-core` is versioned independently and floats under `ratatui`'s requirement, so the fix pins **`ratatui-core = "=0.1.0"`** directly (pinning the main `ratatui` crate is not enough). macOS/Linux source builds were never affected.
+- **Fix: multi-codepoint emoji in chat are now measured by grapheme cluster.** Line wrapping and inline-emote placement summed per-`char` widths, but ratatui lays text out by grapheme clusters — so a ZWJ family emoji (👨‍👩‍👧), a skin-tone modifier (👍🏽) or a variation-selector glyph (❤️) was mis-measured. This could split an emoji across wrapped lines or position an inline emote image on the wrong cells when such an emoji preceded it on the same line. Both paths now tokenize with `unicode-segmentation` and measure each cluster with `UnicodeWidthStr`, matching ratatui's own layout.
+
+## [1.4.0] - 2026-06-06
+
+- **Built-in `:name:` emotes — 183 curated GG7 GIFs, embedded in the binary, rendered inline in both the TUI and the web UI.** Type `:usmiech:` (or the English alias `:smile:`) and it renders as an animated emote in place. The TUI composites GIF frames onto a cell-sized, theme-coloured background with an idle-friendly ~20 fps animation clock (pinned sleep, no busy-loop when nothing moves); the web UI serves them as inline `<img>` from `/emotes/{name}.gif`. An **emote picker overlay** (`Ctrl+G`) with keyboard + mouse navigation and graphical thumbnails, plus `/emote` (alias `/emoji`) to insert by name. Tab-completion offers `:name:` prefixes (closing colon + space). Names work in **Polish or English**, case-insensitive, selectable with `/set emotes.lang en|pl`. New `[emotes]` config section (`enabled`, `render` mode). The whole set — GIFs and the PL→EN alias table — is compiled in via `rust-embed`, so nothing is fetched at runtime.
+- **`/wizard server` — a guided add/edit-server form, in the TUI and the web UI.** A friendly popup for "mIRC users" who don't want to memorise `/server add` flags. Fixed-size modal with **Basics** (Network Name, address/IP, port, TLS + verify-cert toggles, bind IP) and **Advanced** (nick, channels, SASL user/pass/mechanism, encoding, reconnect, autosendcmd, client cert) pages. Full mouse support — click fields, toggle checkboxes, switch pages, press buttons — plus keyboard (Tab/Shift-Tab, Space, ←→, Enter, Esc). In the TUI, `/wizard server` adds and `/wizard server <id>` edits an existing server pre-filled (the id field is locked). In the web UI, a **"+ Add network"** button or typing `/wizard server` opens an add form. Credentials are written to `.env`, never `config.toml`; on edit, an untouched password field leaves the stored secret intact. Manual `/server add` is unchanged. Built on a reusable wizard-form toolkit, so future `/wizard` forms can reuse it.
+- **`/kick` no longer needs a `:` before the reason.** Nicks are now a single comma-separated token and everything after the first space is the reason — `/kick spammer stop flooding` and `/kick alice,bob,carol go away` both work, no colon required (a leading `:` is still accepted for backward compatibility). This removes the ambiguity of space-separated nick lists. **Behaviour change:** `/kick a b c` now kicks `a` with reason `"b c"` (previously kicked all three); multi-target kick is comma-only. Tab-completion treats a comma as a nick-list separator, so `/kick alice,b<TAB>` completes only the segment after the last comma.
+- **`/help` is fully compiled into the binary.** Command documentation was previously read from `docs/commands/*.md` on disk at runtime (searching the executable's directory and the CWD), so an installed binary needed the `docs/` tree beside it. The docs are now embedded via `rust-embed` — `repartee` is a single self-contained file for help, themes, web UI, emotes, and the default config; only your own `~/.repartee/` files live on disk.
+- **Web add-server wizard fixes** — a failing or invalid `SaveServer` now shows its error toast only to the web session that submitted the form, instead of every connected client. The `.env` credential purge on `/server remove` is gated on a successful `config.toml` save (and the in-memory server entry is restored if the save fails), so a write error can't leave credentials and config out of sync; purge failures are surfaced rather than swallowed. Fresh web clients now receive `emotes_enabled` in `SyncInit`, so they honour the config without a reload.
+
+## [1.3.3] - 2026-05-27
+
+- **TUI no longer freezes for seconds on busy IRC networks** — the Lua-script state snapshot was being deep-cloned (every connection, every buffer, every nick across every buffer, plus the full app `config.toml`) after every IRC event, every keystroke, every shim event, and every script action. On a power-user setup (~10 networks × 30 channels × 200 nicks) that's 20–50 ms per call, and a 200-event channel burst stacked into 4–10 seconds of frozen UI on `tokio::current_thread`. The fix: `update_script_snapshot()` early-returns when no Lua scripts are loaded (the dominant case), and the eager rebuild was dropped from the event arms — the tick arm (1 s) is now the single rebuild site. New `ScriptManager::has_loaded_scripts()` is the correct guard (the prior `!script_commands.is_empty()` missed event-only scripts). `tracing::warn!` fires if a rebuild ever exceeds 50 ms, so future snapshot growth surfaces in logs before users feel it.
+- **Mobile web UX rewrite — adopt TheLounge's scroll-pin pattern.** Third pass at the mobile chat-view jitter; earlier rounds layered fixes on top of an architecture that was the actual problem. CSS: `html, body { height: 100% }` (not `dvh` — animated frame-by-frame during URL-bar/keyboard transitions and triggered our resize handlers on every frame), `body { touch-action: none }` to block pull-to-refresh, `.bottom-bar` is now a plain `flex: 0 0 auto` item (not `position: sticky`, which intermittently detached during iOS Safari URL-bar collapse), and `content-visibility: auto` is gone from `.chat-line` and `.msg-preview-card.loaded` — that was the headline jitter source, off-screen lines were 40 px placeholders that re-measured on viewport entry and grew `scrollHeight` underneath the pin. Viewport meta drops `interactive-widget=resizes-content` (Chrome-Android only, net negative). Rust scroll-pin: drop `ResizeObserver` and `VisualViewport` listeners entirely in favour of a single throttled (RAF-coalesced) `window.resize`; new `skip_next_scroll` flag so programmatic pins don't re-enter `on_scroll` and stale-flip `is_at_bottom` (this is the fix for "I close the keyboard and chat doesn't snap back to the bottom"); new `pin_scheduled` debounce so message bursts produce at most one pin per frame; `SCROLL_THRESHOLD` 100 → 30 (matches TheLounge); image-preview `onload` pins inline from JS (replaces the deleted `ResizeObserver`). Net result: mobile scroll behaves like TheLounge / Obsidian / Slack — no jitter, deterministic snap-to-bottom on keyboard close.
+
+## [1.3.2] - 2026-05-26
+
+- **Rock-solid mobile scroll stickiness** — the web chat view on mobile no longer "jumps up several lines and then back down" on every new message. Four root causes addressed together: (1) `overflow-anchor: none` on `.chat-messages` so the browser's scroll-anchor heuristic stops fighting the manual pin; (2) a `ResizeObserver` on a new `.chat-messages-inner` wrapper re-pins `scrollTop` on EVERY content-height change (image decode, font swap, content-visibility re-measure, new line), replacing the single-rAF append handler that raced layout; (3) `interactive-widget=resizes-content` in the viewport meta so Chrome 108+ Android shrinks the layout viewport when the keyboard opens; (4) a parallel `visualViewport.resize`/`scroll` listener so iOS Safari (which does NOT fire `window.resize` on keyboard open) gets the same pin-if-at-bottom treatment. Tested behaviour now matches TheLounge / Slack / Discord stickiness.
+- **Mobile compound improvements** — `SCROLL_THRESHOLD` raised 40 → 100 px (a single wrapped mobile line is often 30–50 px); `.chat-line` `contain-intrinsic-size` raised to `auto 40px` so the virtualization placeholder no longer underestimates real mobile heights; `.app` dropped `position: fixed; inset: 0` (conflicted with `100dvh` during iOS URL-bar collapse); `html, body` switched to `100dvh`; `.bottom-bar` made `position: sticky; bottom: 0` so safe-area-inset collapse on keyboard-open no longer shifts the chat list; `scroll-padding-bottom: 60px` so iOS auto-scroll-into-focus snaps above the bar instead of mid-message.
+- **`<For>` key correctness** — chat-message keying was switched to `(msg.id, msg.timestamp)` with a discriminator so date-separator rows (which share `id = 0` by design) no longer collide into a single reused DOM node, while real messages still key by their unique `msg.id` so backlog timestamp re-stamps cannot force a re-mount of the entire list.
+
+## [1.3.1] - 2026-05-26
+
+- **`/reload` now re-reads `~/.repartee/.env`** — previously `/reload` only picked up `config.toml` and the theme, so a freshly-added `SHRINK_API_KEY` (or rotated server `PASS` / SASL secret / `WEB_SESSION_SECRET`) stayed invisible until restart. The handler now mirrors the startup credential path. When the shrink API key transitions empty → populated, a themed message tells the user to restart explicitly, because the shrink workers were never spawned at startup and cannot be safely rebuilt from a command handler.
+- **Irssi-style instant `/wc`** — closing a channel buffer no longer waits for the server-side PART echo. The buffer disappears immediately and the PART is fire-and-forget. The eventual server echo is a clean no-op (`remove_buffer` is now idempotent, so no duplicate `BufferClosed` event reaches the web frontend).
+- **`/op`, `/deop`, `/voice`, `/devoice` no longer silently drop nicks past 3** — server `MAXMODES` caps each MODE line at 3 parameter modes, but the previous handler packed every arg into one line. The new chunker splits per the irssi convention — first line carries 2 nicks, every subsequent line up to 3 (`4 → [2,2]`, `5 → [2,3]`, `6 → [2,3,1]`, `7 → [2,3,2]`, …). All resulting MODE lines are queued back-to-back with no await between sends, so the server applies the full batch as a single burst.
+- **`/kick` accepts up to 6 nicks plus a multi-word `:reason`** — `kick` left the greedy-command list so multiple nicks tokenise naturally. Reason is everything from the first `:`-prefixed token onward (leading `:` stripped, rest joined with spaces); no `:` means every argument is a nick. Hard cap of 6 nicks. Five nicks split as `[2, 3]`, six as `[2, 4]`; multi-target uses the comma-list form `KICK #chan a,b,c :reason`. Same back-to-back burst send as the mode commands.
+
+## [1.3.0] - 2026-05-25
+
+- **URL shortening via `shr.al`** — long URLs are transparently shortened by an external API both **before they hit the wire** (outgoing) and **before they hit your screen** (incoming). Display: outgoing renders as `https://shr.al/abc`; incoming renders as `https://shr.al/abc [original-host.tld]` so you can see where the original link points. Independent `shrink.outgoing_enabled` / `shrink.incoming_enabled` toggles. Default threshold is `min_url_length = 50` (hard floor 25) and tunable via `/set shrink.min_url_length`.
+- **`/shrink <url>` command** — explicitly shorten a URL without sending it; result is copied into the input line. `/help shrink` shows full usage.
+- **Hardened against URL-display spoofing** — `host_of` strips `user:pass@` userinfo before extracting the displayed `[host]` hint, so a phishing URL like `https://trusted.com:x@evil.com/path` correctly renders as `[evil.com]` instead of `[trusted.com]`. Portless IPv6 literals (`[2001:db8::1]`) are preserved intact.
+- **Quality-of-life shrink internals** — in-memory LRU cache (default 500 entries) avoids re-billing API calls for repeated URLs; 2-second timeout with silent fallback to the original URL on any failure (network, API, panic); per-message URLs are pre-extracted at dispatch time so a `/set shrink.min_url_length` change mid-flight cannot desync the gate from the worker; all per-message worker bodies are wrapped in `catch_unwind` so a panic in one shortening never bricks the feature for the rest of the session.
+- **E2E REKEY fix for PMs** — REKEY NOTICEs produced by lazy session rotation in encrypted private messages are no longer silently dropped (regression that pre-dated this release: the buffer key was being reconstructed from the `@peer_handle` pseudochannel instead of the actual nick-keyed buffer).
+- **Secrets stay in `.env`** — `SHRINK_API_KEY` is loaded exclusively from the `.env` file and never written to `config.toml`.
+
+## [1.2.0] - 2026-05-24
+
+- **Runtime bind-IP override** — new `repartee -h <ip>` / `--bind <ip>` / `--bind=<ip>` CLI flag (modelled on `irssi -h`) lets multi-homed hosts pick the outgoing IRC source address for a session without editing config. New `general.default_bind_ip` config key (also settable via `/set`) provides a host-wide default. Precedence: per-server `bind_ip` → CLI `-h` → `general.default_bind_ip` → OS default. The CLI flag never persists.
+- **No more duplicate web messages** — every line is now deduplicated by message id at both the live-event and backlog-fetch layers, and the `SyncInit` handler no longer triggers two competing `FetchMessages` round-trips per resync. Previously every reconnect or lag-recovery showed each chat line twice.
+- **No more web chat-view jitter** — image previews now reserve a fixed 320×200 (desktop) / aspect-ratio (mobile) box before loading, so async thumbnail loads no longer reflow the bottom-anchored chat. The message list switched to keyed `<For>` rendering, so appending a single new line stops rebuilding the entire 1000-line DOM. Browser-native `content-visibility` keeps off-screen lines out of layout/paint.
+- **Per-element web reactivity** — timestamp format, nick column width, nick truncation, nick colors, and dismissed-preview state are wrapped in fine-grained reactive closures, so settings changes and preview dismissals update only the affected DOM nodes instead of the whole message list.
+- **Multi-tab opt-out** — set `web_follow_tui_buffer = false` in localStorage to make a browser tab stop following the TUI's active-buffer flips (default behaviour is preserved for single-tab + TUI workflows).
+- **Resilient web reconnect** — a transient network blip on initial page load no longer kicks the user back to the login form; the client retries with exponential backoff for up to five attempts before giving up. Resize listener is now cleaned up on component unmount, eliminating a per-login closure leak.
+- **Eager web-state snapshot** — `SyncInit` no longer reads up-to-1-second-old state when a new WS session connects between background ticks. Snapshot is now refreshed inline whenever a structural event (`BufferCreated`, `BufferClosed`, `ActiveBufferChanged`, `ConnectionStatus`, `SettingsChanged`) is broadcast.
+- **Backend lock and asset cache cleanup** — replaced `std::sync::RwLock` with `parking_lot::RwLock` on the web-state snapshot (no risk of blocking a tokio worker on contention). Trunk-hashed static assets now ship with `Cache-Control: public, max-age=31536000, immutable`; unhashed paths get a 1-hour cache.
+
+## [1.1.1] - 2026-05-16
+
+- **Refreshed bundled web UI** — `cargo install repartee@1.1.0` shipped the v1.0.x WASM bundle because `static/web/` in the published source predated the web-improvements work. This release re-bundles the actual v1.1.0 frontend (login form with username field, clickable links, image preview rendering) so `cargo install` users get the working UI without having to clone the repo and run `make wasm` themselves.
+
+## [1.1.0] - 2026-05-12
+
+- **Web frontend improvements** — added persistent web sessions, a login form, clickable chat links, and server-generated image previews.
+- **Image preview SSRF hardening** — `/api/preview` now blocks private, loopback, link-local, cloud metadata, and other non-public targets across direct URLs, redirects, and `og:image` follow-up fetches.
+
+## [1.0.1] - 2026-05-09
+
+- **Log browser event rendering fix** — `repartee l` now renders persisted event text directly, so JOIN/PART/MODE/KICK/NICK/QUIT lines keep their original nick/channel/mode details instead of expanding empty event templates.
+- **Fan-out event reference resolution** — secondary-channel QUIT/NICK log rows now resolve their `ref_id` primary row when reading history, preventing blank timestamp-only lines in multi-channel event history.
+
+## [1.0.0] - 2026-05-09
+
+- **Read-only log browser** — `repartee l` / `repartee logs` opens the SQLite history directly, without connecting to IRC or starting scripts/web services. It supports network headers, day separators, paged scrollback loading, `/search`, and encrypted-log fallback behavior.
+- **Paste-burst connection hardening** — updated to `irc-repartee` 1.5.1 so internal IRC PING/PONG traffic uses a priority lane and cannot be starved behind flood-throttled paste backlogs.
+- **More tolerant local ping timeout** — repartee now sets the IRC client ping response timeout to 60 seconds instead of inheriting the upstream 20-second default.
+
+## [0.9.4] - 2026-05-06
+
+- **Live ban-list tracking** — channel `+b/-b` mode changes now keep the local ban list current, and joined channels silently sync `MODE #channel b` so `/unban` numeric references and wildcard removals work without repeatedly refreshing `/ban`.
+- **Themeable WHOIS replies** — WHOIS numerics now carry event keys and structured parameters for `[formats.events]`, with default and Spring theme entries for the common WHOIS lines.
+- **Complete server-add configuration** — `/server add` now exposes the practical connection parameters in command parsing and help, including TLS verification, reconnect behavior, SASL, autosend commands, bind IP, encoding, password, and client certificate path.
+
+## [0.9.3] - 2026-05-01
+
+- **IRCnet reop mode handling** — updated to `irc-proto-repartee` 1.2.2 so channel mode `+R/-R` is parsed as the reop list mode with masks, while registered-only remains lowercase `+r`.
+- **Batched list modes** — `/reop`, `/except`, `/invex`, and their removal commands now batch multiple masks as `+RRR/-RRR`, `+eee/-eee`, and `+III/-III` according to the server `MODES` limit.
+- **Mode display regression tests** — added coverage for `r/R` rendering and multi-mask list-mode display.
+
+## [0.9.2] - 2026-04-24
+
+- **Memory bounds and long-session hardening** — capped oversized input history entries, bounded socket output buffering, capped storage writer pending rows, and limited IRCv3 batch retention to prevent unbounded memory growth under bursty or degraded conditions.
+- **Web UI memory discipline** — capped client-side messages per buffer and reduced broad signal cloning in the chat, layout, and nick-list components.
+- **Web build refresh** — regenerated bundled web frontend assets for the release.
+
+## [0.9.1] - 2026-04-13
+
+- **Web session isolation and auth hardening** — web shell snapshots and active-buffer state are now isolated per session, WebSocket auth no longer sends bearer tokens in the URL, and session validation enforces client IP continuity.
+- **Secret storage hardening** — E2E private material stored in SQLite is now encrypted at rest, with compatibility for existing databases during migration.
+- **Local runtime hardening** — `~/.repartee` runtime files now use owner-only permissions where required, TLS/private env material is written securely, and local attach rejects peers from a different Unix UID.
+
+## [0.9.0] - 2026-04-12
+
+- **RPE2E end-to-end encryption** — native E2E for repartee with per-peer trust, pending accept/decline flow, reciprocal key exchange, key export/import, revoke/reverify, and channel/query support.
+- **Cross-client interoperability** — bundled companion scripts for WeeChat and Irssi/Eerssi now speak the same compact RPE2E v1 wire format, including long-message chunking, UTF-8/emoji handling, auto-handshake, and debug output directly in the current buffer.
+- **Operational hardening** — multiple state-handling fixes landed across repartee and companion scripts: atomic E2E export/import where applicable, safer forget/reverify cleanup, improved multi-peer handshake tracking, and plaintext bypass for bot-style commands starting with `.` or `!`.
+
+## [0.8.5] - 2026-04-10
+
+- **Critical: fix 3 GB OOM crash on long mouse-wheel scroll** — the chat view's render loop could walk the entire message buffer on every frame when `scroll_offset` exceeded available content. Under sustained wheel scrolling this produced 200–600 MB/s of allocation churn, fragmenting glibc's arena until the kernel (or `systemd-oomd`) killed the process at ~3 GB RSS. The loop is now capped at `buffer_len × 16` visual lines so it terminates in `O(buffer_len)` regardless of scroll position. Observed on Debian with v0.8.4 after a week of uptime; pre-existing bug, not a 0.8.4 regression, but v0.8.4 had enough baseline churn to make it reachable in normal use.
+- **jemalloc on Linux** — `tikv-jemallocator` is now the global allocator on Linux builds via `#[cfg(target_os = "linux")]`. Defense-in-depth against glibc ptmalloc2 fragmentation in long-running sessions (weeks of uptime). macOS keeps `libsystem_malloc`, FreeBSD keeps its native jemalloc — builds on those platforms are byte-identical to v0.8.4, the dependency is not pulled into their build graph at all.
+- **Regression tests** — six unit tests lock in the render-budget invariant so the OOM cannot regress silently; tests are organized under `compute_render_budget::...` for IDE filtering and carry diagnostic assert messages.
+
+## [0.8.4] - 2026-04-09
+
+- **Web: sticky scroll** — auto-scroll now only scrolls to bottom when you're already there; scroll-up to read backlog stays put. Scroll-to-bottom button (▼) appears when scrolled up
+- **Web: event_key parity** — web frontend now receives per-event-type keys (join, part, quit, kick, kicked, nick_change, topic_changed, mode, connected, disconnected, chghost, account) for themed icons and colors instead of fragile text heuristics
+- **Web: notice rendering** — notices now render with `-nick- text` format and distinct cyan styling
+- **Web: nick truncation** — accounts for mode prefix width (`@`, `+`) like the TUI does
+- **Kick notification** — when kicked from a channel, the message now appears in the server status window, the channel buffer (before removal), and the landing buffer (where you end up). Themed as `kicked` event with red highlight
+- **`/kick` and `/kb` accept `#channel`** — you can now specify a target channel: `/kick #otherchan nick reason`
+- **Web: in-memory FetchMessages** — initial buffer loads serve from in-memory messages first, ensuring recent events (like kick notifications) are visible immediately even before the log writer flushes to SQLite
+- **`event_key` persisted to DB** — backward-compatible migration adds `event_key TEXT` column so historical messages retain their event type for themed rendering
+- **CI: WASM build step** — release workflow now builds the WASM frontend in a separate job, ensuring every release binary includes the latest web UI
+- Removed dead `MessageType::Ctcp` variant
+
+## [0.8.3] - 2026-03-30
+
+- Web buffer sync reliability fixes
+
+[2.2.1]: https://github.com/outragedevs/repartee/releases/tag/v2.2.1
+[2.2.0]: https://github.com/outragedevs/repartee/releases/tag/v2.2.0
+[2.1.3]: https://github.com/outragedevs/repartee/releases/tag/v2.1.3
+[2.1.2]: https://github.com/outragedevs/repartee/releases/tag/v2.1.2
+[2.1.1]: https://github.com/outragedevs/repartee/releases/tag/v2.1.1
+[2.1.0]: https://github.com/outragedevs/repartee/releases/tag/v2.1.0
+[2.0.0]: https://github.com/outragedevs/repartee/releases/tag/v2.0.0
+[1.7.0]: https://github.com/outragedevs/repartee/releases/tag/v1.7.0
+[1.6.1]: https://github.com/outragedevs/repartee/releases/tag/v1.6.1
+[1.6.0]: https://github.com/outragedevs/repartee/releases/tag/v1.6.0
+[1.5.0]: https://github.com/outragedevs/repartee/releases/tag/v1.5.0
+[1.4.3]: https://github.com/outragedevs/repartee/releases/tag/v1.4.3
+[1.4.2]: https://github.com/outragedevs/repartee/releases/tag/v1.4.2
+[1.4.1]: https://github.com/outragedevs/repartee/releases/tag/v1.4.1
+[1.4.0]: https://github.com/outragedevs/repartee/releases/tag/v1.4.0
+[1.3.3]: https://github.com/outragedevs/repartee/releases/tag/v1.3.3
+[1.3.2]: https://github.com/outragedevs/repartee/releases/tag/v1.3.2
+[1.3.1]: https://github.com/outragedevs/repartee/releases/tag/v1.3.1
+[1.3.0]: https://github.com/outragedevs/repartee/releases/tag/v1.3.0
+[1.2.0]: https://github.com/outragedevs/repartee/releases/tag/v1.2.0
+[1.1.1]: https://github.com/outragedevs/repartee/releases/tag/v1.1.1
+[1.1.0]: https://github.com/outragedevs/repartee/releases/tag/v1.1.0
+[1.0.1]: https://github.com/outragedevs/repartee/releases/tag/v1.0.1
+[1.0.0]: https://github.com/outragedevs/repartee/releases/tag/v1.0.0
+[0.9.4]: https://github.com/outragedevs/repartee/releases/tag/v0.9.4
+[0.9.3]: https://github.com/outragedevs/repartee/releases/tag/v0.9.3
+[0.9.2]: https://github.com/outragedevs/repartee/releases/tag/v0.9.2
+[0.9.1]: https://github.com/outragedevs/repartee/releases/tag/v0.9.1
+[0.9.0]: https://github.com/outragedevs/repartee/releases/tag/v0.9.0
+[0.8.5]: https://github.com/outragedevs/repartee/releases/tag/v0.8.5
+[0.8.4]: https://github.com/outragedevs/repartee/releases/tag/v0.8.4
+[0.8.3]: https://github.com/outragedevs/repartee/releases/tag/v0.8.3
