@@ -35,12 +35,12 @@ Manual release — push the version-bump commit to `outrage/main`, then push a `
 ### Pre-flight (local only)
 
 1. Bump `version` in `Cargo.toml` (`[package]` section — the only place that needs changing)
-2. Add a `### vX.Y.Z` entry to the changelog in `README.md` (match the style of existing entries — user-facing bullet list)
+2. Add a `## [X.Y.Z] - YYYY-MM-DD` entry at the top of `CHANGELOG.md` plus its release link at the bottom (match the style of existing entries — user-facing bullet list), and replace the "What's new" section of `README.md` with the same bullets
 3. `make build` — refreshes `Cargo.lock` and validates the crate still builds locally after the version bump
 4. `make clippy`
 5. `make test` — steps 4 and 5 must pass with 0 warnings (pedantic + nursery + perf=deny + redundant_clone=deny)
 6. `make release` — verifies the LTO/codegen-units=1/strip release profile builds locally
-7. `git add Cargo.toml Cargo.lock README.md && git commit -m "chore: bump version to X.Y.Z"`
+7. `git add Cargo.toml Cargo.lock CHANGELOG.md README.md && git commit -m "chore: bump version to X.Y.Z"`
 
 Optional: if `web-ui/` changed, run `make wasm` before step 6 and include `static/web/` in the commit. CI also runs `build-wasm` as a dependency of all native build jobs, so CI-built releases always embed the latest web UI regardless.
 
